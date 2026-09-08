@@ -20,16 +20,20 @@ also cleared an otherwise valid result list to issue another search.
 - The title scrolls away instead of sticking over images. Return/page/jump controls start hidden;
   tap the picture or margin, press M, or use the inline Reading tools button to reveal them.
   Escape, Close, and jumping hide them again. No permanent floating button is added.
+- Only the first image retains the page/chapter caption. Hidden reading tools include accessible
+  top/bottom icons: top returns to the document start, bottom renders remaining batches and aligns
+  with the last image's lower edge. Position is maintained while lazy images finish loading.
 - No automatic download or remote image streaming. Missing/deleted local images produce a clear explanation.
 - The existing paged preview remains unchanged. Colors, typography, spacing and radii follow the locked eye-care tokens.
 
 搜索地址、结果快照和滚动位置一起保存；阅读按钮打开独立的连续阅读页，复用本地预览接口。
 每批 20 张图片并按需加载，支持跳页、重试与阅读位置记忆。保留原翻页预览，不自动下载或在线播放。
 标题不吸顶，返回和跳页默认隐藏；轻触画面/空白处、按 M 或点击页首阅读工具可唤出，Esc/收起/跳页后隐藏。
+只有第一页显示页码与章节说明；工具内新增一键到顶、到底小图标，到底会补齐剩余批次并定位末页图片底部。
 
 ## Validation / 验证
 
-- Backend regression: 162 passed, 1 skipped for Windows file-symlink permission.
+- Backend regression: 163 passed, 1 skipped for Windows file-symlink permission.
 - Real-browser checks use only `tests/ui_reader_fixture.py` synthetic pages and temporary databases.
 - Checked: search → detail → back, query/page/scroll restoration without an upstream re-search,
   reload restoration, reader → back, lazy batches, image-error retry, missing-download state,

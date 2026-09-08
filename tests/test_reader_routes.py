@@ -32,3 +32,9 @@ def test_reader_tools_are_hidden_but_accessible(client):
     assert 'aria-controls="reader-tools" aria-expanded="false"' in html
     assert 'id="reader-tools-close"' in html
     assert '按 M' in html
+
+
+def test_reader_has_accessible_edge_buttons(client):
+    html = client.get('/read/123').get_data(as_text=True)
+    assert 'id="reader-top" title="一键到顶" aria-label="一键到顶" disabled' in html
+    assert 'id="reader-bottom" title="一键到底" aria-label="一键到底" disabled' in html

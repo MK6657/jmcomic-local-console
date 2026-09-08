@@ -14,6 +14,10 @@
     </header>
     <section id="reader-tools" class="reader-tools" aria-label="阅读工具" hidden>
         <a class="btn btn-outline-secondary btn-sm" href="/search" id="reader-back"><i class="bi bi-arrow-left"></i> 返回</a>
+        <div class="d-flex gap-2" role="group" aria-label="快速定位">
+            <button type="button" class="btn btn-outline-primary btn-sm" id="reader-top" title="一键到顶" aria-label="一键到顶" disabled><i class="bi bi-chevron-bar-up" aria-hidden="true"></i></button>
+            <button type="button" class="btn btn-outline-primary btn-sm" id="reader-bottom" title="一键到底" aria-label="一键到底" disabled><i class="bi bi-chevron-bar-down" aria-hidden="true"></i></button>
+        </div>
         <span class="text-muted small" id="reader-progress" aria-live="polite">正在读取本地图片…</span>
         <form class="reader-jump d-none" id="reader-jump">
             <label class="visually-hidden" for="reader-page-input">跳转页码</label>

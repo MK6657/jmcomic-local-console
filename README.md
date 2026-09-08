@@ -57,6 +57,7 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   Undownloaded albums show an explanation instead of starting a download or streaming upstream content.
   The title scrolls away; return/jump controls stay hidden until you tap the picture/margin or press M.
   Press Escape to hide them again. A Reading tools button at the page top provides keyboard access.
+  Page/chapter captions appear only on the first image; the hidden tools also include one-click top/bottom icons.
 - Returning from details or the reader restores the search query, sort, result page, results and scroll position.
   Results are cached only in browser-session/history state and reused for up to 30 minutes.
 

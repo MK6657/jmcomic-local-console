@@ -16,13 +16,18 @@
   var byId = function (id) { return document.getElementById(id); };
   var tools = byId('reader-tools');
   var jumpAnchor = null;
+  var jumpAlignment = 'start';
   var alignFrame = 0;
+  function positionJump() {
+    if (jumpAlignment === 'top') window.scrollTo({ top: 0, behavior: 'instant' });
+    else byId('reader-page-' + jumpAnchor).scrollIntoView({ block: jumpAlignment, behavior: 'instant' });
+  }
   function alignJump() {
     if (jumpAnchor === null || alignFrame) return;
     alignFrame = requestAnimationFrame(function () {
       alignFrame = 0;
       if (jumpAnchor !== null) {
-        byId('reader-page-' + jumpAnchor).scrollIntoView({ block: 'start', behavior: 'instant' });
+        positionJump();
       }
     });
   }
@@ -104,6 +109,7 @@
         figure.className = 'reader-page';
         figure.id = 'reader-page-' + (index + 1);
         figure.dataset.page = index + 1;
+        figure.setAttribute('aria-label', '第 ' + (index + 1) + ' 页');
         var caption = document.createElement('figcaption');
         caption.textContent = '第 ' + (index + 1) + ' 页' + (page.chapter ? ' · ' + page.chapter : '');
         var img = document.createElement('img');
@@ -130,7 +136,8 @@
           url.searchParams.set('retry', Date.now());
           img.src = url.href;
         });
-        figure.append(caption, img, error);
+        if (index === 0) figure.appendChild(caption);
+        figure.append(img, error);
         fragment.appendChild(figure);
         if (src) img.src = src;
         else img.onerror();
@@ -141,13 +148,14 @@
     byId('reader-more').classList.toggle('d-none', rendered >= pages.length);
     byId('reader-end').classList.toggle('d-none', rendered < pages.length || pages.length === 0);
   }
-  function jump(number) {
+  function jump(number, alignment) {
     if (!pages.length) return;
     number = Math.max(1, Math.min(pages.length, Math.floor(Number(number)) || 1));
     while (rendered < number) appendPages();
     jumpAnchor = number;
+    jumpAlignment = alignment || 'start';
     byId('reader-page-' + number).querySelector('img').loading = 'eager';
-    byId('reader-page-' + number).scrollIntoView({ block: 'start', behavior: 'instant' });
+    positionJump();
     setCurrent(number);
   }
   function load() {
@@ -168,6 +176,8 @@
         document.title = (data.title || '连续阅读') + ' - JMComic';
         byId('reader-jump').classList.remove('d-none');
         byId('reader-page-input').max = pages.length;
+        byId('reader-top').disabled = false;
+        byId('reader-bottom').disabled = false;
         appendPages();
         var saved = 1;
         try { saved = Number(sessionStorage.getItem(storageKey)) || 1; } catch (_) {}
@@ -196,6 +206,8 @@
     showTools(false);
     jump(number);
   });
+  byId('reader-top').addEventListener('click', function () { showTools(false); jump(1, 'top'); });
+  byId('reader-bottom').addEventListener('click', function () { showTools(false); jump(pages.length, 'end'); });
   byId('reader-load-more').addEventListener('click', appendPages);
   byId('reader-retry').addEventListener('click', load);
   byId('reader-back').addEventListener('click', function (event) {

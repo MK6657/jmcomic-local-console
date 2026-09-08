@@ -51,6 +51,8 @@ async (page) => {
     return img && img.complete && img.naturalWidth > 0 && !img.classList.contains('d-none');
   });
   check(await page.locator('.reader-page').count() < 45, 'Reader rendered every page immediately');
+  check(await page.locator('.reader-page figcaption').count() === 1, 'Only the first page should have a caption');
+  check(await page.locator('#reader-page-1 figcaption').count() === 1, 'First page caption is missing');
   check(!(await page.locator('#reader-tools').isVisible()), 'Reading controls should start hidden');
   check(await page.locator('.reader-toolbar').evaluate(el => getComputedStyle(el).position) === 'static', 'Title banner must not be sticky');
   await page.screenshot({ path: 'output/playwright/continuous-reader-desktop.png', animations: 'disabled' });
@@ -74,6 +76,21 @@ async (page) => {
   await page.screenshot({ path: 'output/playwright/reader-unobstructed-desktop.png', animations: 'disabled' });
   await page.keyboard.press('m');
   await page.locator('#reader-tools').waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: '一键到底', exact: true }).click();
+  await page.waitForFunction(() => {
+    const last = document.getElementById('reader-page-45');
+    return last && last.querySelector('img').complete && last.querySelector('img').naturalWidth > 0
+      && Math.abs(last.getBoundingClientRect().bottom - innerHeight) < 4;
+  });
+  check(await page.locator('.reader-page').count() === 45, 'Bottom button did not render the final batch');
+  check(await page.locator('.reader-page figcaption').count() === 1, 'Later batches must not repeat captions');
+  check(!(await page.locator('#reader-tools').isVisible()), 'Bottom button should hide the tools');
+  await page.screenshot({ path: 'output/playwright/reader-bottom.png', animations: 'disabled' });
+  await page.keyboard.press('m');
+  await page.getByRole('button', { name: '一键到顶', exact: true }).click();
+  await page.waitForFunction(() => scrollY === 0);
+  check(!(await page.locator('#reader-tools').isVisible()), 'Top button should hide the tools');
+  await page.keyboard.press('m');
   await page.locator('#reader-back').click();
   await page.locator('.reader-link').first().waitFor();
   check(page.url() === queryUrl, 'Reader back did not return to original results');
@@ -99,5 +116,5 @@ async (page) => {
   check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Reader has mobile horizontal overflow');
   await page.screenshot({ path: 'output/playwright/continuous-reader-mobile.png', animations: 'disabled' });
   check(errors.length === 0, 'Browser JS errors: ' + errors.join('; '));
-  return { status: 'passed', checks: 'result restore, reader navigation, lazy batches, retry, mobile layout, hidden tools, keyboard/tap reveal, Escape/jump hide, non-sticky banner' };
+  return { status: 'passed', checks: 'result restore, reader navigation, lazy batches, retry, mobile layout, hidden tools, first-page-only caption, top/bottom icons and last-page alignment' };
 }
