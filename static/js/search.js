@@ -21,6 +21,66 @@
   var currentPage = 1;
   var currentSort = 'latest';
   var currentPageSize = 20;
+  var lastResults = null;
+  var requestSerial = 0;
+  var snapshotKey = 'jm-search-state-v1';
+
+  function saveSearchState() {
+    if (!currentQuery) return;
+    var url = new URL(window.location.href);
+    url.searchParams.set('keyword', currentQuery);
+    url.searchParams.set('sort', currentSort);
+    url.searchParams.set('page_size', currentPageSize);
+    url.searchParams.set('page', currentPage);
+    var snapshot = {
+      url: url.pathname + url.search, query: currentQuery, sort: currentSort,
+      pageSize: currentPageSize, page: currentPage, data: lastResults,
+      scrollY: window.scrollY, savedAt: Date.now()
+    };
+    try {
+      history.replaceState(Object.assign({}, history.state, { jmSearch: snapshot }), '', snapshot.url);
+    } catch (_) {
+      try { history.replaceState(null, '', snapshot.url); } catch (ignored) {}
+    }
+    try { sessionStorage.setItem(snapshotKey, JSON.stringify(snapshot)); } catch (_) {}
+  }
+
+  function restoreSearchState() {
+    var params = new URLSearchParams(window.location.search);
+    currentQuery = params.get('keyword') || '';
+    currentSort = ['latest', 'views', 'likes'].indexOf(params.get('sort')) >= 0 ? params.get('sort') : 'latest';
+    currentPage = Math.max(1, Math.min(500, parseInt(params.get('page'), 10) || 1));
+    currentPageSize = [20, 50, 100].indexOf(Number(params.get('page_size'))) >= 0 ? Number(params.get('page_size')) : 20;
+    if (!currentQuery) return false;
+    searchInput.value = currentQuery;
+    sortSelect.value = currentSort;
+    pageSizeSelect.value = String(currentPageSize);
+    var saved = history.state && history.state.jmSearch;
+    if (!saved) {
+      try { saved = JSON.parse(sessionStorage.getItem(snapshotKey)); } catch (_) {}
+    }
+    if (saved && saved.url === location.pathname + location.search && saved.data
+        && Date.now() - saved.savedAt < 30 * 60 * 1000) {
+      lastResults = saved.data;
+      renderResults(lastResults);
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { window.scrollTo(0, saved.scrollY || 0); });
+      });
+    } else {
+      fetchResults(currentPage);
+    }
+    return true;
+  }
+
+  window.addEventListener('pagehide', function () {
+    saveSearchState();
+    requestSerial += 1;
+  });
+  resultsDiv.addEventListener('click', function (event) {
+    if (event.target.closest('a, button, input')) return;
+    var card = event.target.closest('[data-album-url]');
+    if (card) window.location.href = card.getAttribute('data-album-url');
+  });
 
   // ── 全局 alert 管理 ──
 
@@ -71,6 +131,10 @@
     currentSort = sortSelect.value;
     currentPageSize = parseInt(pageSizeSelect.value) || 20;
 
+    var serial = ++requestSerial;
+    lastResults = null;
+    saveSearchState();
+    paginationDiv.innerHTML = '';
     var url = '/api/search?q=' + encodeURIComponent(currentQuery)
       + '&page=' + currentPage
       + '&page_size=' + currentPageSize
@@ -88,10 +152,14 @@
     // abortKey：快速翻页/连续搜索时自动中止上一次未完成的搜索请求，避免占满连接池
     window.apiFetch(url, { timeoutMs: 30000, abortKey: 'search-results' })
       .then(function (data) {
+        if (serial !== requestSerial) return;
         if (data.status !== 'ok') throw new Error(data.message || '搜索失败');
+        lastResults = data;
         renderResults(data);
+        saveSearchState();
       })
       .catch(function (err) {
+        if (serial !== requestSerial) return;
         if (err && err.name === 'AbortError') return; // pagehide/新搜索中止，静默
         // 检查是否网络错误（TypeError 通常表示网络问题）
         if (err instanceof TypeError && err.message === 'Failed to fetch') {
@@ -169,18 +237,18 @@
     items.forEach(function (item) {
       var albumUrl = '/album/' + encodeURIComponent(item.album_id);
       html += '<div class="col">';
+      html += '<div class="card album-card h-100 shadow-sm" data-album-url="' + albumUrl + '">';
       html += '<a href="' + albumUrl + '" class="text-decoration-none text-reset">';
-      html += '<div class="card album-card h-100 shadow-sm">';
 
       // 封面
       if (item.cover_url) {
-        html += '<img src="' + escapeHtmlAttr(item.cover_url) + '" class="card-img-top" alt="' + escapeHtml(item.title) + '" loading="lazy">';
+        html += '<img src="' + escapeHtmlAttr(item.cover_url) + '" class="card-img-top" alt="' + escapeHtmlAttr(item.title) + '" loading="lazy">';
       } else {
         html += '<div class="cover-placeholder"><i class="bi bi-image"></i></div>';
       }
 
-      html += '<div class="card-body d-flex flex-column">';
-      html += '<h6 class="card-title">' + escapeHtml(item.title) + '</h6>';
+      html += '</a><div class="card-body d-flex flex-column">';
+      html += '<h6 class="card-title"><a class="text-decoration-none text-reset" href="' + albumUrl + '">' + escapeHtml(item.title) + '</a></h6>';
       html += '<div class="mb-2 small text-muted">';
       if (item.author) html += '<div><i class="bi bi-person"></i> ' + escapeHtml(item.author) + '</div>';
       if (item.album_id) html += '<div><i class="bi bi-hash"></i> ' + escapeHtml(item.album_id) + '</div>';
@@ -196,13 +264,15 @@
       }
 
       // 按钮（需 stopPropagation 防止触发父 <a> 导航）
-      html += '<div class="mt-auto d-flex gap-2">';
-      html += '<span class="btn btn-outline-primary btn-sm flex-fill"><i class="bi bi-info-circle"></i> 详情</span>';
+      html += '<div class="mt-auto"><div class="d-flex gap-2 mb-2">';
+      html += '<a href="' + albumUrl + '" class="btn btn-outline-primary btn-sm flex-fill"><i class="bi bi-info-circle"></i> 详情</a>';
+      html += '<a href="/read/' + encodeURIComponent(item.album_id) + '" class="btn btn-outline-primary btn-sm flex-fill reader-link"><i class="bi bi-book"></i> 阅读</a>';
+      html += '</div><div class="d-flex gap-2">';
       html += '<button type="button" class="btn btn-success btn-sm flex-fill" data-album-id="' + escapeHtmlAttr(item.album_id) + '" onclick="event.stopPropagation();quickDownload(this)"><i class="bi bi-download"></i> 下载</button>';
       html += '<button type="button" class="btn btn-sm wishlist-btn btn-outline-warning" data-album-id="' + escapeHtmlAttr(item.album_id) + '" data-title="' + escapeHtmlAttr(item.title) + '" data-author="' + escapeHtmlAttr(item.author) + '" data-cover="' + escapeHtmlAttr(item.cover_url) + '" onclick="event.stopPropagation();toggleWishlist(this)" title="收藏"><i class="bi bi-star"></i></button>';
-      html += '</div>';
+      html += '</div></div>';
 
-      html += '</div></div></a></div>';
+      html += '</div></div></div>';
     });
     html += '</div>';
     resultsDiv.innerHTML = html;
@@ -396,10 +466,10 @@
     }
   });
   if (sortSelect) sortSelect.addEventListener('change', function () {
-    if (currentQuery) fetchResults();
+    if (currentQuery) fetchResults(1);
   });
   if (pageSizeSelect) pageSizeSelect.addEventListener('change', function () {
-    if (currentQuery) fetchResults();
+    if (currentQuery) fetchResults(1);
   });
 
   // ── 搜索历史 ──
@@ -477,37 +547,14 @@
       });
   };
 
-  // ── 页面加载时从 URL 参数自动搜索 ──
-  (function autoSearchFromUrl() {
-    var kw = searchInput ? searchInput.value.trim() : '';
-    if (kw) {
-      currentQuery = kw;
-      currentSort = sortSelect ? sortSelect.value : 'latest';
-      currentPageSize = parseInt(pageSizeSelect ? pageSizeSelect.value : '20') || 20;
-      fetchResults();
-    }
-  })();
-
-  // ── bfcache 恢复时重新初始化 ──
+  // URL is the source of truth; snapshots preserve results across both reload and bfcache.
+  restoreSearchState();
   window.addEventListener('pageshow', function (event) {
     if (event.persisted) {
-      // 从 bfcache 恢复：重新获取元素引用 + 触发自动搜索
-      searchForm = document.getElementById('search-form');
-      searchInput = document.getElementById('search-input');
-      searchBtn = document.getElementById('search-btn');
-      sortSelect = document.getElementById('sort-select');
-      pageSizeSelect = document.getElementById('page-size-select');
-      resultsDiv = document.getElementById('search-results');
-      paginationDiv = document.getElementById('pagination');
-      statusDiv = document.getElementById('search-status');
-      if (!searchForm || !resultsDiv) return;
-      var kw = searchInput ? searchInput.value.trim() : '';
-      if (kw) {
-        currentQuery = kw;
-        currentSort = sortSelect ? sortSelect.value : 'latest';
-        currentPageSize = parseInt(pageSizeSelect ? pageSizeSelect.value : '20') || 20;
-        fetchResults();
-      }
+      restoreSearchState();
+    } else if (!currentQuery && searchInput.value.trim()) {
+      // Older history entries may restore only the form after scripts have executed.
+      doSearch();
     }
   });
 

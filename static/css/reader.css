@@ -1,0 +1,27 @@
+/* Uses the locked eye-care colors, typography, spacing and radius tokens. */
+.continuous-reader { max-width: 64rem; margin: 0 auto; }
+.reader-toolbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 16px; margin-bottom: 16px;
+  background: var(--bg-secondary); border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.reader-heading { flex: 1; min-width: 0; }
+.reader-heading h1 { font-size: 20px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.reader-jump { display: flex; gap: 8px; }
+.reader-jump input { width: 5rem; }
+.reader-page {
+  min-height: 12rem; margin: 0 0 16px;
+  background: var(--bg-secondary); border: 1px solid var(--border);
+  border-radius: var(--radius-md); overflow: hidden;
+  scroll-margin-top: var(--reader-toolbar-height, 8rem);
+}
+.reader-page img { display: block; width: 100%; height: auto; }
+.reader-page figcaption { padding: 8px 16px; color: var(--text-secondary); font-size: 14px; }
+.reader-page-error { padding: 24px 16px; text-align: center; color: var(--text-secondary); }
+@media (max-width: 576px) {
+  .reader-toolbar { padding: 8px; }
+  .reader-heading h1 { font-size: 16px; }
+  .reader-jump { width: 100%; justify-content: flex-end; }
+}

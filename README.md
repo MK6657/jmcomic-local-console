@@ -52,6 +52,12 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
 
 ## Features and settings
 
+- Search cards now have a **Read** button opening a continuous scrolling local reader.
+  It loads images in batches, supports page jumps/retry and remembers the page within the browser session.
+  Undownloaded albums show an explanation instead of starting a download or streaming upstream content.
+- Returning from details or the reader restores the search query, sort, result page, results and scroll position.
+  Results are cached only in browser-session/history state and reused for up to 30 minutes.
+
 - Search and detail pages; queued downloads, retry/cancel and SSE progress.
 - Bookmarks, a downloaded library and local image reader.
 - ZIP/PDF export and optional automatic CBZ/ZIP packaging.

@@ -48,3 +48,5 @@ venv/
 docs/reports/
 tests/_test_export_data/
 tests/*_report.json
+.playwright-cli/
+output/playwright/

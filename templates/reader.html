@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}JMComic 下载控制台 - 连续阅读{% endblock %}
+{% block head_extra %}
+<link rel="stylesheet" href="{{ asset_url('css/reader.css') }}">
+{% endblock %}
+{% block content %}
+<main class="continuous-reader" data-album-id="{{ album_id }}">
+    <header class="reader-toolbar">
+        <a class="btn btn-outline-secondary btn-sm" href="/search" id="reader-back"><i class="bi bi-arrow-left"></i> 返回</a>
+        <div class="reader-heading">
+            <h1 id="reader-title">连续阅读</h1>
+            <span class="text-muted small" id="reader-progress" aria-live="polite">正在读取本地图片…</span>
+        </div>
+        <form class="reader-jump d-none" id="reader-jump">
+            <label class="visually-hidden" for="reader-page-input">跳转页码</label>
+            <input class="form-control form-control-sm" id="reader-page-input" type="number" min="1" value="1" aria-label="跳转页码">
+            <button class="btn btn-outline-primary btn-sm" type="submit">跳转</button>
+        </form>
+    </header>
+    <div class="card my-3" id="reader-loading" role="status"><div class="card-body text-center">正在读取本地图片…</div></div>
+    <div class="card my-3 d-none" id="reader-empty" role="status">
+        <div class="card-body text-center">
+            <h2 class="h5">暂时无法阅读</h2>
+            <p id="reader-message" class="text-muted mb-3"></p>
+            <a class="btn btn-outline-primary btn-sm" href="/album/{{ album_id }}">查看详情</a>
+            <a class="btn btn-outline-secondary btn-sm" href="/downloads">下载管理</a>
+            <button class="btn btn-outline-primary btn-sm" type="button" id="reader-retry">重试</button>
+        </div>
+    </div>
+    <div id="reader-pages" aria-label="漫画页面"></div>
+    <div id="reader-more" class="text-center my-3 d-none">
+        <button type="button" class="btn btn-outline-primary" id="reader-load-more">继续加载</button>
+    </div>
+    <p class="text-center text-muted my-3 d-none" id="reader-end">已到末页</p>
+</main>
+{% endblock %}
+{% block scripts_extra %}
+<script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/reader.js') }}"></script>
+{% endblock %}

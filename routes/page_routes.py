@@ -77,6 +77,15 @@ def preview_page(album_id: str):
     return render_template("preview.html", title="图片预览", album_id=album_id)
 
 
+@page_bp.get("/read/<album_id>")
+def continuous_reader(album_id: str):
+    """Continuous scrolling over existing local images; never starts a download."""
+    from core.validation import validate_numeric
+    if not validate_numeric(album_id):
+        abort(400)
+    return render_template("reader.html", title="连续阅读", album_id=album_id)
+
+
 @page_bp.get("/preview/job/<job_id>")
 def preview_by_job(job_id: str):
     """从 job_id 跳转到预览页"""
