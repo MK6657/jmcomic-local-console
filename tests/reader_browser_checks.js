@@ -8,6 +8,7 @@ async (page) => {
   await page.unroute('**/api/preview-img/**');
   await page.setViewportSize({ width: 1329, height: 912 });
   await page.goto(base + '/search');
+  await page.evaluate(() => sessionStorage.removeItem('jm-reader-page:900001'));
   await page.getByLabel('关键词或车号').fill('sample');
   await page.getByRole('button', { name: '搜索', exact: false }).click();
   await page.locator('.reader-link').first().waitFor();
@@ -50,11 +51,29 @@ async (page) => {
     return img && img.complete && img.naturalWidth > 0 && !img.classList.contains('d-none');
   });
   check(await page.locator('.reader-page').count() < 45, 'Reader rendered every page immediately');
+  check(!(await page.locator('#reader-tools').isVisible()), 'Reading controls should start hidden');
+  check(await page.locator('.reader-toolbar').evaluate(el => getComputedStyle(el).position) === 'static', 'Title banner must not be sticky');
   await page.screenshot({ path: 'output/playwright/continuous-reader-desktop.png', animations: 'disabled' });
+  await page.keyboard.press('m');
+  await page.locator('#reader-tools').waitFor({ state: 'visible' });
+  await page.keyboard.press('Escape');
+  check(!(await page.locator('#reader-tools').isVisible()), 'Escape must hide controls');
+  await page.locator('#reader-page-1').click({ position: { x: 8, y: 8 } });
+  await page.locator('#reader-tools').waitFor({ state: 'visible' });
   await page.getByLabel('跳转页码', { exact: true }).fill('39');
   await page.getByRole('button', { name: '跳转', exact: true }).click();
   await page.locator('#reader-page-39').waitFor();
   check(await page.locator('.reader-page').count() >= 39, 'Jump did not load later pages');
+  check(!(await page.locator('#reader-tools').isVisible()), 'Jump should hide controls again');
+  await page.waitForFunction(() => document.querySelector('.reader-toolbar').getBoundingClientRect().bottom < 0);
+  await page.waitForFunction(() => {
+    const figure = document.getElementById('reader-page-39');
+    const image = figure.querySelector('img');
+    return image.complete && image.naturalWidth > 0 && Math.abs(figure.getBoundingClientRect().top - 16) < 4;
+  });
+  await page.screenshot({ path: 'output/playwright/reader-unobstructed-desktop.png', animations: 'disabled' });
+  await page.keyboard.press('m');
+  await page.locator('#reader-tools').waitFor({ state: 'visible' });
   await page.locator('#reader-back').click();
   await page.locator('.reader-link').first().waitFor();
   check(page.url() === queryUrl, 'Reader back did not return to original results');
@@ -71,10 +90,14 @@ async (page) => {
   await page.screenshot({ path: 'output/playwright/search-reading-mobile.png', animations: 'disabled' });
   await page.locator('a.reader-link[href="/read/900001"]').click();
   await page.locator('#reader-page-1').waitFor();
+  await page.keyboard.press('m');
+  await page.locator('#reader-tools').waitFor({ state: 'visible' });
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Tools have mobile horizontal overflow');
+  await page.screenshot({ path: 'output/playwright/reader-tools-mobile.png', animations: 'disabled' });
   await page.getByLabel('跳转页码', { exact: true }).fill('1');
   await page.getByRole('button', { name: '跳转', exact: true }).click();
   check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Reader has mobile horizontal overflow');
   await page.screenshot({ path: 'output/playwright/continuous-reader-mobile.png', animations: 'disabled' });
   check(errors.length === 0, 'Browser JS errors: ' + errors.join('; '));
-  return { status: 'passed', checks: 'result restore, page/scroll retention, reader navigation, lazy batches, image retry, empty state, mobile layout' };
+  return { status: 'passed', checks: 'result restore, reader navigation, lazy batches, retry, mobile layout, hidden tools, keyboard/tap reveal, Escape/jump hide, non-sticky banner' };
 }

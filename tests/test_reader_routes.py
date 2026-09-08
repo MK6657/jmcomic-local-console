@@ -23,3 +23,12 @@ def test_paged_preview_still_available(client):
     html = client.get("/preview/123").get_data(as_text=True)
     assert 'id="preview-image"' in html
     assert 'js/preview.js' in html
+
+
+def test_reader_tools_are_hidden_but_accessible(client):
+    import re
+    html = client.get('/read/123').get_data(as_text=True)
+    assert re.search(r'<section[^>]*id="reader-tools"[^>]*\bhidden\b', html)
+    assert 'aria-controls="reader-tools" aria-expanded="false"' in html
+    assert 'id="reader-tools-close"' in html
+    assert '按 M' in html

@@ -4,19 +4,24 @@
 <link rel="stylesheet" href="{{ asset_url('css/reader.css') }}">
 {% endblock %}
 {% block content %}
-<main class="continuous-reader" data-album-id="{{ album_id }}">
+<main class="continuous-reader" data-album-id="{{ album_id }}" tabindex="-1">
     <header class="reader-toolbar">
-        <a class="btn btn-outline-secondary btn-sm" href="/search" id="reader-back"><i class="bi bi-arrow-left"></i> 返回</a>
         <div class="reader-heading">
             <h1 id="reader-title">连续阅读</h1>
-            <span class="text-muted small" id="reader-progress" aria-live="polite">正在读取本地图片…</span>
+            <p class="text-muted small mb-0">轻触画面或空白处，或按 M 显示阅读工具；Esc 收起。</p>
         </div>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="reader-tools-toggle" aria-controls="reader-tools" aria-expanded="false">阅读工具</button>
+    </header>
+    <section id="reader-tools" class="reader-tools" aria-label="阅读工具" hidden>
+        <a class="btn btn-outline-secondary btn-sm" href="/search" id="reader-back"><i class="bi bi-arrow-left"></i> 返回</a>
+        <span class="text-muted small" id="reader-progress" aria-live="polite">正在读取本地图片…</span>
         <form class="reader-jump d-none" id="reader-jump">
             <label class="visually-hidden" for="reader-page-input">跳转页码</label>
             <input class="form-control form-control-sm" id="reader-page-input" type="number" min="1" value="1" aria-label="跳转页码">
             <button class="btn btn-outline-primary btn-sm" type="submit">跳转</button>
         </form>
-    </header>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="reader-tools-close" aria-label="收起阅读工具">收起</button>
+    </section>
     <div class="card my-3" id="reader-loading" role="status"><div class="card-body text-center">正在读取本地图片…</div></div>
     <div class="card my-3 d-none" id="reader-empty" role="status">
         <div class="card-body text-center">
