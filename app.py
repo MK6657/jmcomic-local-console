@@ -27,37 +27,28 @@ _DEFAULT_PORT = 5000
 _FALLBACK_PORTS = [5001, 5002, 5003]
 
 
+_mutex_handle = None
+
+
 def _acquire_lock():
-    """使用 Windows 命名互斥体实现原子级单实例锁（防止双进程竞争）。
-    如果互斥体存在但端口空闲，说明前一个实例已崩溃，忽略互斥体继续启动。"""
-    kernel32 = ctypes.windll.kernel32
+    """A live named mutex cannot be stale; protect startup before any port is bound."""
+    global _mutex_handle
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
     mutex = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
-    err = kernel32.GetLastError()
-    if err == 183:  # ERROR_ALREADY_EXISTS
-        # 检查端口是否真的被占用（用 bind 检测，TIME_WAIT 状态也可检测）
-        import socket as _sock
-        _s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
-        _s.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
-        try:
-            _s.bind(("127.0.0.1", _DEFAULT_PORT))
-            _s.close()
-            # 端口空闲 → 互斥体是残留的，覆盖它
-            kernel32.CloseHandle(mutex)
-            mutex = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
-            print("[锁] 检测到残留互斥体，已清理并重新获取锁")
-        except OSError:
-            _s.close()
-            # 端口真实被占
-            kernel32.CloseHandle(mutex)
-            print("[锁] 检测到另一个实例正在运行，退出")
-            sys.exit(1)
-    # 记录 PID 供进程管理工具使用（不再作为锁）
+    error = ctypes.get_last_error()
+    if not mutex:
+        raise ctypes.WinError(error)
+    if error == 183:
+        kernel32.CloseHandle(mutex)
+        raise SystemExit("Another JMComic instance is already running or starting.")
+    _mutex_handle = mutex
     _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _PID_FILE.write_text(str(os.getpid()))
-    except Exception:
-        pass
-    # 返回 mutex 句柄（进程退出时 OS 自动释放）
+    _PID_FILE.write_text(str(os.getpid()))
     return mutex
 
 
@@ -148,6 +139,7 @@ def _bind_preemptive() -> socket.socket:
 
 def _release_lock():
     """释放锁文件和端口记录"""
+    global _mutex_handle
     try:
         if _PID_FILE.exists():
             pid_in_file = _PID_FILE.read_text().strip()
@@ -157,9 +149,14 @@ def _release_lock():
         pass
     try:
         if _PORT_FILE.exists():
-            _PORT_FILE.unlink()
+            record = json.loads(_PORT_FILE.read_text())
+            if record.get("pid") == os.getpid():
+                _PORT_FILE.unlink()
     except Exception:
         pass
+    if _mutex_handle is not None:
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(_mutex_handle))
+        _mutex_handle = None
 
 from flask import Flask
 
@@ -229,9 +226,27 @@ def create_app() -> Flask:
 
     @app.before_request
     def _init_request():
-        from flask import request
+        from flask import request, jsonify
+        from urllib.parse import urlsplit
         set_request_id()
         request._request_start_time = _time.time()
+        # Loopback binding alone does not prevent browser-origin attacks/DNS rebinding.
+        try:
+            host = urlsplit("http://" + request.host).hostname
+            origin = request.headers.get("Origin")
+            foreign_origin = origin is not None and origin != request.host_url.rstrip("/")
+            if host not in {"127.0.0.1", "localhost", "::1"} or foreign_origin:
+                return jsonify(status="error", message="仅允许本机同源访问"), 403
+            if request.headers.get("Sec-Fetch-Site") == "cross-site":
+                return jsonify(status="error", message="拒绝跨站请求"), 403
+        except ValueError:
+            return jsonify(status="error", message="无效主机地址"), 403
+        if request.path.startswith("/api/") and request.is_json:
+            if not isinstance(request.get_json(silent=True), dict):
+                return jsonify(status="error", message="请求体需为 JSON 对象"), 400
+        elif (request.path.startswith("/api/") and request.content_length
+              and request.mimetype != "multipart/form-data"):
+            return jsonify(status="error", message="请使用 application/json 或文件上传"), 415
 
     # 页面路由
     app.register_blueprint(page_bp)
@@ -324,12 +339,6 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    # 启动任务调度器
-    job_manager.start()
-
-    # 启动定时下载调度器
-    start_scheduler()
-
     # 启动日志 — 打印关键配置摘要
     log.info(
         f"启动配置 PORT={_DEFAULT_PORT} PID={os.getpid()} "
@@ -346,6 +355,9 @@ def main():
             log.info("使用 waitress 服务器")
             sock = _bind_preemptive()
             actual_port = sock.getsockname()[1]
+            # Do not start/resume downloads when no server port can be acquired.
+            job_manager.start()
+            start_scheduler()
             # 记录实际端口
             _PORT_FILE.write_text(json.dumps({
                 "pid": os.getpid(),
@@ -356,9 +368,10 @@ def main():
             log.info(f"服务已启动 → http://127.0.0.1:{actual_port}")
             serve(app, sockets=[sock], threads=128)
         except ImportError:
-            log.info("waitress 未安装，使用 Flask 开发服务器 (建议: pip install waitress)")
-            app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False, threaded=True)
+            raise RuntimeError("运行依赖缺失，请执行 python -m pip install -r requirements.txt") from None
     finally:
+        job_manager.stop()
+        stop_scheduler()
         _release_lock()
 
 

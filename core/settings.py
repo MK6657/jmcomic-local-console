@@ -68,72 +68,68 @@ def get_setting(key: str) -> str:
 
 
 def update_settings(settings: dict):
-    """批量更新设置，只保存 DEFAULT_SETTINGS 中存在的 key，更新后清空缓存"""
-    # 枚举白名单
-    # 枚举白名单
-    _VALID_CLIENT_TYPES = {"api", "html"}
-    _VALID_PACK_FORMATS = {"cbz", "pdf", "zip"}
-    _VALID_ORGANIZE_MODES = {"none", "by_author", "flat"}  # 与 jm_service.organize_download 一致
-    _VALID_BOOL_KEYS = {"schedule_enabled", "auto_pack", "delete_originals", "skip_existing"}
-
+    """Validate the whole patch, then commit it atomically; never report a silent skip."""
+    enums = {
+        "client_type": {"api", "html"}, "pack_format": {"cbz", "zip"},
+        "organize_mode": {"none", "by_author", "flat"},
+    }
+    bounds = {
+        "timeout": (5, 120), "retry_times": (0, 20), "max_running_jobs": (1, 5),
+        "image_threads": (1, 50), "photo_threads": (1, 10),
+        "schedule_start": (0, 23), "schedule_end": (0, 23),
+    }
+    bool_keys = {"schedule_enabled", "auto_pack", "delete_originals", "skip_existing"}
+    normalized = {}
     for key, value in settings.items():
-        if key in DEFAULT_SETTINGS:
-            # download_root 固定为项目目录
-            if key == "download_root":
-                value = str(DOWNLOAD_ROOT)
-            # 确保布尔值存储为小写字符串 'true'/'false'
+        if key not in DEFAULT_SETTINGS:
+            raise ValueError(f"未知设置项: {key}")
+        if key == "download_root":
+            normalized[key] = str(DOWNLOAD_ROOT)
+            continue
+        if key in bool_keys:
             if isinstance(value, bool):
                 value = "true" if value else "false"
-            # 枚举白名单校验
-            if key == "client_type" and str(value).strip() not in _VALID_CLIENT_TYPES:
-                log.warning(f"设置项 'client_type' 值 '{value}' 无效，已跳过")
-                continue
-            if key == "pack_format" and str(value).strip() not in _VALID_PACK_FORMATS:
-                log.warning(f"设置项 'pack_format' 值 '{value}' 无效，已跳过")
-                continue
-            if key == "organize_mode" and str(value).strip() not in _VALID_ORGANIZE_MODES:
-                log.warning(f"设置项 'organize_mode' 值 '{value}' 无效，已跳过")
-                continue
-            # 布尔字符串校验
-            if key in _VALID_BOOL_KEYS:
-                str_val = str(value).strip().lower()
-                if str_val not in ("true", "false"):
-                    log.warning(f"设置项 '{key}' 值 '{value}' 不是有效布尔值，已跳过")
-                    continue
-                value = str_val
-            # Proxy URL 格式校验（非空时）
-            if key == "proxy" and value:
-                parsed = urlparse(str(value))
-                if not parsed.scheme or not parsed.netloc:
-                    log.warning("设置项 'proxy' 不是有效 URL，已跳过（地址已隐藏）")
-                    continue
-            # 类型/范围校验
-            if key in ("timeout", "retry_times", "max_running_jobs", "image_threads", "photo_threads"):
-                try:
-                    int_val = int(str(value))
-                    if int_val < 1:
-                        raise ValueError(f"{key} 必须 ≥ 1")
-                    if key in ("image_threads", "photo_threads") and int_val > 50:
-                        raise ValueError(f"{key} 最大为 50")
-                    if key == "retry_times" and int_val > 10:
-                        raise ValueError("retry_times 最大为 10")
-                    if key == "max_running_jobs" and int_val > 5:
-                        raise ValueError("max_running_jobs 最大为 5")
-                except (ValueError, TypeError) as e:
-                    log.warning(f"设置项 '{key}' 值校验失败: {e}，已跳过")
-                    continue
-            if key in ("schedule_start", "schedule_end"):
-                try:
-                    hour = int(str(value))
-                    if hour < 0 or hour > 23:
-                        log.warning(f"设置项 '{key}' 值 {value} 不在 0-23 范围内，已跳过")
-                        continue
-                except (ValueError, TypeError):
-                    log.warning(f"设置项 '{key}' 值 {value} 不是有效小时，已跳过")
-                    continue
-            db.set_setting(key, str(value))
-
-    # 写入后清空缓存，确保下次读取最新数据
+            if not isinstance(value, str) or value.strip().lower() not in {"true", "false"}:
+                raise ValueError(f"{key} 必须为 true 或 false")
+            normalized[key] = value.strip().lower()
+        elif key in bounds:
+            lo, hi = bounds[key]
+            if isinstance(value, bool) or not isinstance(value, (str, int)):
+                raise ValueError(f"{key} 必须是 {lo}–{hi} 的整数")
+            try:
+                number = int(value)
+            except (ValueError, TypeError):
+                raise ValueError(f"{key} 必须是 {lo}–{hi} 的整数") from None
+            if not lo <= number <= hi:
+                raise ValueError(f"{key} 必须是 {lo}–{hi} 的整数")
+            normalized[key] = str(number)
+        elif key in enums:
+            if not isinstance(value, str) or value.strip() not in enums[key]:
+                raise ValueError(f"{key} 的选项无效")
+            normalized[key] = value.strip()
+        elif key == "proxy":
+            if not isinstance(value, str):
+                raise ValueError("proxy 必须是字符串")
+            value = value.strip()
+            try:
+                if value:
+                    parsed = urlparse(value)
+                    if (parsed.scheme not in {"http", "https", "socks5", "socks5h"}
+                            or not parsed.hostname or parsed.port == 0
+                            or any(char.isspace() for char in value)):
+                        raise ValueError()
+            except ValueError:
+                raise ValueError("proxy 地址无效（认证信息已隐藏）") from None
+            normalized[key] = value
+    conn = db.get_db()
+    try:
+        with conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                list(normalized.items()),
+            )
+    finally:
+        conn.close()
     invalidate_settings_cache()
 
 

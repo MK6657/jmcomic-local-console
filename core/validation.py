@@ -19,17 +19,17 @@ from typing import Optional
 # album_id 纯数字校验（SSRF 保护）
 # 使用场景：api_album / api_jobs / api_library / api_wishlist
 # ============================================================
-_RE_NUMERIC = re.compile(r"^\d+$")
+_RE_NUMERIC = re.compile(r"[0-9]{1,20}")
 
 
 def validate_numeric(album_id: str) -> bool:
     """校验 album_id 是否为纯数字（SSRF 保护）"""
-    return bool(_RE_NUMERIC.match(album_id))
+    return isinstance(album_id, str) and bool(_RE_NUMERIC.fullmatch(album_id))
 
 
 def require_numeric(album_id: str, field_name: str = "album_id") -> Optional[str]:
     """校验 album_id 为纯数字，合法时返回 None，非法时返回错误消息"""
-    if not _RE_NUMERIC.match(album_id):
+    if not validate_numeric(album_id):
         return f"{field_name} 必须是纯数字"
     return None
 
@@ -43,7 +43,7 @@ _RE_JOB_ID = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 def validate_job_id(job_id: str) -> bool:
     """校验 job_id 格式：字母数字下划线连字符，长度 1-64"""
-    return bool(_RE_JOB_ID.match(job_id))
+    return isinstance(job_id, str) and bool(_RE_JOB_ID.fullmatch(job_id))
 
 
 def require_job_id(job_id: str) -> Optional[str]:

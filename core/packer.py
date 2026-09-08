@@ -3,12 +3,17 @@ CBZ / 漫画打包模块
 """
 import os
 import zipfile
+import tempfile
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from .logger import log
 from .validation import EXPORT_IMAGE_EXTENSIONS
+from .file_tree import safe_files
+
+_publish_lock = threading.Lock()
 
 
 class Packer(ABC):
@@ -56,7 +61,7 @@ class CbzPacker(Packer):
 
         # 收集图片文件
         image_files: list[Path] = []
-        for entry in sorted(source_dir.rglob("*")):
+        for entry in safe_files(source_dir):
             if entry.is_file() and entry.suffix.lower() in EXPORT_IMAGE_EXTENSIONS:
                 image_files.append(entry)
 
@@ -64,15 +69,11 @@ class CbzPacker(Packer):
             raise ValueError(f"源目录中未找到任何图片: {source_dir}")
 
         total = len(image_files)
-        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-
-        # 清理上次残留的临时文件（如进程崩溃遗留）
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-                log.info(f"清理残留临时文件: {tmp_path}")
-            except OSError as e:
-                log.warning(f"无法清理残留临时文件: {tmp_path} error={e}")
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=output_path.name + ".", suffix=".tmp", dir=output_path.parent)
+        os.close(fd)
+        tmp_path = Path(name)
 
         try:
             with zipfile.ZipFile(
@@ -97,7 +98,8 @@ class CbzPacker(Packer):
                         on_progress(idx, total)
 
             # 重命名 .tmp → .cbz（原子操作）
-            os.replace(str(tmp_path), str(output_path))
+            with _publish_lock:
+                os.replace(str(tmp_path), str(output_path))
             log.info(
                 f"CBZ 打包完成: {output_path} ({total} 张图片)"
             )

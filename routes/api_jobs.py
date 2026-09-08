@@ -78,6 +78,8 @@ api_jobs_bp = Blueprint("api_jobs", __name__)
 def create_job():
     """创建新的下载任务(不阻塞: 不调 jmcomic API, 标题从请求体取或默认用 album_id)"""
     body = request.get_json(force=True)
+    if not isinstance(body, dict):
+        return jsonify(status="error", message="请求体需为 JSON 对象"), 400
     album_id = str(body.get("album_id", "") or "").strip()
     photo_ids = body.get("photo_ids", [])
     title = str(body.get("title", "") or "").strip() or album_id
@@ -92,6 +94,9 @@ def create_job():
     # 校验 photo_ids 为列表
     if not isinstance(photo_ids, list):
         return jsonify({"status": "error", "message": "photo_ids 必须是数组"}), 400
+    if len(photo_ids) > 1000 or any(not validate_numeric(str(pid)) for pid in photo_ids):
+        return jsonify(status="error", message="photo_ids 必须是最多 1000 个数字章节 ID"), 400
+    photo_ids = list(dict.fromkeys(str(pid) for pid in photo_ids))
 
     # 限制 title 长度
     if len(title) > 500:
@@ -243,7 +248,7 @@ def remove_job(job_id: str):
         return jsonify({"status": "error", "message": "任务不存在"}), 404
 
     # running 任务不能删除,必须先取消
-    if job["status"] == "running":
+    if job["status"] in ("running", "paused"):
         return jsonify({"status": "error", "message": "任务正在下载中，请先取消后再删除"}), 400
 
     delete_job(job_id)

@@ -16,6 +16,7 @@ import core.database as db
 from core.logger import log
 from core.path_guard import DOWNLOAD_ROOT, is_safe_path
 from core.validation import validate_job_id, EXPORT_IMAGE_EXTENSIONS
+from core.file_tree import safe_files
 
 api_export_bp = Blueprint("api_export", __name__)
 
@@ -98,12 +99,11 @@ def export_zip(job_id: str):
         # 使用临时文件避免大 ZIP 全量缓冲内存
         tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         tmp_path = tmp.name
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in sorted(output_dir.rglob("*")):
-                if f.is_file():
+        with tmp, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in safe_files(output_dir):
+                if is_safe_path(f):
                     arcname = str(f.relative_to(output_dir.parent))
                     zf.write(str(f), arcname)
-        tmp.close()
         return _send_tmp_file(tmp_path, "application/zip", f"{safe_name}.zip")
     except Exception as e:
         _cleanup_tmp(tmp_path)
@@ -114,7 +114,7 @@ def export_zip(job_id: str):
 def _collect_images(output_dir: Path) -> list[Path]:
     """递归收集目录下所有图片文件（排序保证页序稳定）"""
     return [
-        f for f in sorted(output_dir.rglob("*"))
+        f for f in safe_files(output_dir)
         if f.is_file() and f.suffix.lower() in EXPORT_IMAGE_EXTENSIONS
     ]
 
@@ -200,7 +200,10 @@ def export_pdf(job_id: str):
     if output_dir is None:
         return jsonify({"status": "error", "message": "下载目录不存在"}), 404
 
-    images = _collect_images(output_dir)
+    try:
+        images = _collect_images(output_dir)
+    except (ValueError, OSError):
+        return jsonify(status="error", message="无法安全读取下载目录"), 403
     if not images:
         return jsonify({"status": "error", "message": "下载目录中没有图片"}), 404
 

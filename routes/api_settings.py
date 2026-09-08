@@ -35,7 +35,10 @@ def save_settings():
     if "download_root" in body:
         del body["download_root"]
 
-    update_settings(body)
+    try:
+        update_settings(body)
+    except ValueError as exc:
+        return jsonify(status="error", message=str(exc)), 400
     invalidate_option_cache()  # 设置变更后重建 jmcomic Option
     sync_scheduler()  # 定时下载开关即时生效（无需重启）
     updated = get_settings()

@@ -61,9 +61,9 @@ def add_wishlist():
     if not validate_numeric(album_id):
         return jsonify({"status": "error", "message": "album_id 必须是纯数字"}), 400
 
-    title = body.get("title", "")
-    author = body.get("author", "")
-    cover_url = body.get("cover_url", "")
+    title = str(body.get("title", "") or "")
+    author = str(body.get("author", "") or "")
+    cover_url = str(body.get("cover_url", "") or "")
 
     # 限制字符串长度防 DoS
     if len(str(title)) > 500:
@@ -159,7 +159,6 @@ def get_single_wishlist(album_id: str):
 def batch_check_wishlist():
     """批量查询收藏状态"""
     body = request.get_json(force=True)
-    log.debug(f"API批量检查收藏 album_ids_count={len(body.get('album_ids', []))}")
     album_ids = body.get("album_ids", [])
 
     if not album_ids or not isinstance(album_ids, list):
@@ -228,7 +227,10 @@ def batch_download_wishlist():
 def batch_import_wishlist():
     """批量导入收藏"""
     body = request.get_json(force=True)
-    raw = body.get("raw", "").strip()
+    raw = body.get("raw", "")
+    if not isinstance(raw, str):
+        return jsonify(status="error", message="raw 必须是字符串"), 400
+    raw = raw.strip()
 
     if not raw:
         return jsonify({"status": "error", "message": "缺少 raw 内容"}), 400
@@ -350,9 +352,9 @@ def import_wishlist_file():
             errors.append({"index": idx, "album_id": album_id, "message": "album_id 缺失或不是纯数字"})
             continue
 
-        title = entry.get("title", "")
-        author = entry.get("author", "")
-        cover_url = entry.get("cover_url", "")
+        title = str(entry.get("title", "") or "")
+        author = str(entry.get("author", "") or "")
+        cover_url = str(entry.get("cover_url", "") or "")
 
         # 截断过长的字符串
         if len(str(title)) > 500:

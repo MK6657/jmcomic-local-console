@@ -4,6 +4,7 @@ jmcomic 服务封装模块
 """
 import os
 import shutil
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -25,12 +26,14 @@ from .settings import get_settings, build_jmcomic_option
 from .validation import safe_dirname as _safe_dirname
 from .path_guard import DOWNLOAD_ROOT, is_safe_path
 from .packer import CbzPacker
+from .file_tree import safe_files
+from .validation import EXPORT_IMAGE_EXTENSIONS
 
 
 # ── 全局复用客户端（搜索/详情用，避免每次新建 client + 连接池）──
 _global_option = None
 _global_client = None
-_option_lock = threading.Lock()
+_option_lock = threading.RLock()
 # 独立 client 活跃计数（用于 session 泄漏监控）
 _active_independent_clients = 0
 _clients_lock = threading.Lock()
@@ -55,90 +58,77 @@ def _get_or_create_option():
 
 
 def invalidate_option_cache():
-    """使 Option 缓存失效（设置页保存后调用），下次 get_client 时重建"""
+    """Retire the old shared client; close it only after its last request releases it."""
     global _global_option, _global_client
     with _option_lock:
+        previous = _global_client
         _global_option = None
         _global_client = None
+        if previous is not None:
+            previous._jm_retired = True
+            if getattr(previous, "_jm_users", 0) == 0:
+                _dispose_client(previous)
 
 
 def get_client(shared=True):
-    """获取 jmcomic 客户端。
-
-    Args:
-        shared: True（默认）返回全局复用客户端（搜索/详情用）
-                False 返回独立客户端（下载线程用，避免多线程共享 session）
-    """
-    global _global_client
-    option = _get_or_create_option()
-    if shared:
-        if _global_client is None:
-            client = option.build_jm_client()  # @field_cache → 单例
-            try:
-                setattr(client, _JM_SHARED_ATTR, True)
-            except Exception:
-                pass  # 极端情况（__slots__）下退化为可关闭，不影响功能
-            _global_client = client
-        return _global_client, option
-    else:
-        client = option.new_jm_client()  # 独立客户端，无 @field_cache
+    """Acquire a client. Every acquisition must be balanced by close_client()."""
+    global _global_client, _active_independent_clients
+    with _option_lock:
+        option = _get_or_create_option()
+        if shared:
+            if _global_client is None:
+                _global_client = option.new_jm_client()
+                setattr(_global_client, _JM_SHARED_ATTR, True)
+                _global_client._jm_users = 0
+                _global_client._jm_retired = False
+            _global_client._jm_users += 1
+            return _global_client, option
+        client = option.new_jm_client()
+        client._jm_counted = True
         with _clients_lock:
-            global _active_independent_clients
             _active_independent_clients += 1
         return client, option
 
 
 def get_active_client_count() -> int:
-    """获取当前活跃的独立 client 数（用于 health 接口监控 session 泄漏）"""
     with _clients_lock:
         return _active_independent_clients
 
 
-def close_client(client) -> None:
-    """安全关闭 jmcomic 客户端的 HTTP session，防止连接泄漏。
-
-    全局复用客户端（由 get_client(shared=True) 返回）不会被关闭，
-    其 session 保持活跃供后续请求复用。
-    仅在下载线程中创建的独立客户端（get_client(shared=False)）会被关闭。
-    """
-    if client is None:
+def _dispose_client(client):
+    """Close the transport once; callers serialize lifetime transitions."""
+    if getattr(client, _JM_CLOSED_ATTR, False):
         return
-    # 对象自带标记，不受 invalidate_option_cache 并发清缓存影响
-    if getattr(client, _JM_SHARED_ATTR, False):
-        return
-    # 防止同一独立 client 被重复关闭导致计数变负
-    global _active_independent_clients
-    with _clients_lock:
-        if getattr(client, _JM_CLOSED_ATTR, False):
-            return
-        try:
-            setattr(client, _JM_CLOSED_ATTR, True)
-        except Exception:
-            pass
+    setattr(client, _JM_CLOSED_ATTR, True)
     try:
         root = client.get_root_postman()
-        # RequestsSessionPostman / RequestsPostman → session (requests.Session)
-        if hasattr(root, 'session') and hasattr(root.session, 'close'):
+        if hasattr(root, "session") and hasattr(root.session, "close"):
             root.session.close()
-            return
-        # 其他有 close() 方法的 postman 类型
-        if hasattr(root, 'close'):
+        elif hasattr(root, "close"):
             root.close()
-            return
-        # 兜底：直接尝试 close client 本身
-        if hasattr(client, 'close'):
+        elif hasattr(client, "close"):
             client.close()
-    except Exception as e:
-        log.warning(f"关闭 client 异常: {e}")
-        # 最后尝试直接关闭 client 本身
-        try:
-            if hasattr(client, 'close'):
-                client.close()
-        except Exception:
-            log.warning(f"关闭 client session 二次失败", exc_info=True)
-    finally:
-        with _clients_lock:
-            _active_independent_clients -= 1
+    except Exception as exc:
+        log.warning(f"关闭 client 异常: {exc}")
+
+
+def close_client(client) -> None:
+    global _active_independent_clients
+    if client is None:
+        return
+    with _option_lock:
+        if getattr(client, _JM_SHARED_ATTR, False):
+            client._jm_users = max(0, getattr(client, "_jm_users", 0) - 1)
+            if getattr(client, "_jm_retired", False) and client._jm_users == 0:
+                _dispose_client(client)
+            return
+        if getattr(client, _JM_CLOSED_ATTR, False):
+            return
+        _dispose_client(client)
+        if getattr(client, "_jm_counted", False):
+            with _clients_lock:
+                _active_independent_clients -= 1
+
 
 
 _FIRST_PASS_TIMEOUT = 120
@@ -203,9 +193,11 @@ def _download_image_single_attempt(
     """
     img_name = f"{idx + 1:05d}.webp"
     img_path = photo_dir / img_name if not str(img_path).startswith(str(photo_dir)) else img_path
+    if not is_safe_path(img_path) or not is_safe_path(photo_dir):
+        raise ValueError("图片输出路径越权")
 
     skip = get_settings().get("skip_existing", "true") == "true"
-    if skip and pass_num == 1 and img_path.exists() and img_path.stat().st_size > 100:
+    if skip and pass_num == 1 and _valid_image(img_path):
         with lock:
             done_pages[0] += 1
         if tracker:
@@ -217,23 +209,29 @@ def _download_image_single_attempt(
             })
         return
 
+    tmp_path = None
     try:
+        # Never overwrite a previous valid image before a replacement is verified.
+        fd, name = tempfile.mkstemp(prefix=img_path.stem + ".", suffix=img_path.suffix, dir=photo_dir)
+        os.close(fd)
+        tmp_path = Path(name)
         client.download_image(
             img_url=img_url,
-            img_save_path=str(img_path),
+            img_save_path=str(tmp_path),
             scramble_id=scramble_id,
             decode_image=True,
         )
         # 下载成功但文件可能为空（jmcomic 静默失败），校验后纠正
-        if not img_path.exists() or img_path.stat().st_size == 0:
-            raise IOError(f"下载后文件不存在或为空: {img_path}")
+        if not _valid_image(tmp_path):
+            raise IOError("下载结果不是完整有效的图片")
+        os.replace(tmp_path, img_path)
         # 确认下载成功后计数
         with lock:
             done_pages[0] += 1
     except Exception as e:
-        if img_path.exists():
+        if tmp_path is not None and tmp_path.exists():
             try:
-                img_path.unlink()
+                tmp_path.unlink()
             except OSError:
                 pass
         if pass_num == 1 and pending_images is not None:
@@ -267,6 +265,33 @@ def _download_image_single_attempt(
             })
 
 
+def _valid_image(path):
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            image.verify()
+        return True
+    except (OSError, ValueError, SyntaxError):
+        return False
+
+
+def _submit_client_call(pool, client, fn, *args, **kwargs):
+    """Keep a shared transport leased until the future actually finishes/cancels."""
+    shared = client is not None and getattr(client, _JM_SHARED_ATTR, False)
+    if shared:
+        with _option_lock:
+            client._jm_users += 1
+    try:
+        future = pool.submit(fn, *args, **kwargs)
+    except Exception:
+        if shared:
+            close_client(client)
+        raise
+    if shared:
+        future.add_done_callback(lambda _: close_client(client))
+    return future
+
+
 def _call_with_timeout(label: str, timeout: float, timeout_msg: str, fn, *args, **kwargs):
     """在独立线程中执行 jmcomic 远程调用，带超时保护。
 
@@ -275,7 +300,7 @@ def _call_with_timeout(label: str, timeout: float, timeout_msg: str, fn, *args, 
     确保 Waitress 请求线程不会被网络调用永久挂起。
     """
     pool = ThreadPoolExecutor(max_workers=1)
-    fut = pool.submit(fn, *args, **kwargs)
+    fut = _submit_client_call(pool, getattr(fn, "__self__", None), fn, *args, **kwargs)
     try:
         result = fut.result(timeout=timeout)
     except Exception as e:
@@ -374,7 +399,7 @@ def get_album_detail(album_id: str) -> dict:
             if pending_photos:
                 check_pool = ThreadPoolExecutor(max_workers=min(len(pending_photos), 10))
                 for photo in pending_photos:
-                    fut = check_pool.submit(client.check_photo, photo)
+                    fut = _submit_client_call(check_pool, client, client.check_photo, photo)
                     fut_map[fut] = photo
                 for fut in as_completed(fut_map, timeout=15):
                     photo = fut_map[fut]
@@ -494,18 +519,15 @@ def organize_download(output_path: str, mode: str, album) -> str | None:
             author = _safe_dirname(_safe_str(getattr(album, "author", "")) or "unknown_author")
             new_root = dl_root / author
             new_output = new_root / output.name
-            # 如果新路径已存在，直接合并；否则创建
-            new_output.mkdir(parents=True, exist_ok=True)
-            # 移动所有章节目录
-            for item in output.iterdir():
-                dest = new_output / item.name
-                if item.is_dir():
-                    shutil.move(str(item), str(dest))
-                elif item.is_file():
-                    # 也移动根目录下的文件（如果有）
-                    shutil.move(str(item), str(dest))
-            # 清理空目录
-            _remove_empty_dir(output)
+            # A move into an existing directory nests chapters or overwrites files.
+            # Keep the original intact when a destination already exists.
+            if new_output.exists() or new_output.is_relative_to(output):
+                log.warning(f"整理目标已存在或位于源目录内部，保留源目录: {new_output}")
+                return None
+            if not is_safe_path(new_output):
+                raise ValueError("整理目标路径越权")
+            new_root.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(output), str(new_output))
             log.info(f"按作者整理完成: {output_path} -> {new_output}")
             return str(new_output)
 
@@ -526,6 +548,9 @@ def organize_download(output_path: str, mode: str, album) -> str | None:
                     counter += 1
                     new_name = f"{ch_prefix}_{counter:05d}{img_path.suffix}"
                     dest = output / new_name
+                    if dest.exists():
+                        log.warning(f"扁平化目标已存在，保留源图片: {dest}")
+                        continue
                     shutil.move(str(img_path), str(dest))
                 # 删除空章节目录
                 _remove_empty_dir(ch_dir)
@@ -555,6 +580,8 @@ def _download_chapter(
     """下载单个章节的所有图片（支持章节内多图并行，每图独立 client）"""
     image_threads = int(get_settings().get("image_threads", "3"))
     photo_dir = album_dir / _safe_dirname(photo.name or str(photo.photo_id))
+    if not is_safe_path(photo_dir):
+        raise ValueError("章节输出路径越权")
     photo_dir.mkdir(parents=True, exist_ok=True)
 
     photo_images = list(enumerate(photo))
@@ -638,6 +665,8 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
     pause_ev = None
 
     try:
+        if _should_stop(job_id, album_id, tracker, pause_ev):
+            return
         db.update_wishlist_download_status(album_id, "downloading")
         tracker.push("progress", {
             "job_id": job_id, "status": "running",
@@ -657,10 +686,15 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
                 total_pages += pages
                 photos_to_download.append(photo)
 
+        if not photos_to_download or total_pages <= 0:
+            raise ValueError("选中的章节不存在或没有可下载图片")
+
         dl_root = str(DOWNLOAD_ROOT)
         os.makedirs(dl_root, exist_ok=True)
 
         album_dir = Path(dl_root) / f"{_safe_dirname(album.name)}_{album_id}"
+        if not is_safe_path(album_dir):
+            raise ValueError("专辑输出路径越权")
         album_dir.mkdir(parents=True, exist_ok=True)
         output_path = str(album_dir)
 
@@ -737,9 +771,15 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
 
         now = datetime.now().isoformat()
 
+        # Futures can fail before recording a page error. Do not pack partial data.
+        if _should_stop(job_id, album_id, tracker, pause_ev):
+            return
+        if done_pages[0] != total_pages:
+            failed_pages.append(f"下载不完整：{done_pages[0]}/{total_pages} 页")
+
         # -- 以下为 CBZ 打包、元数据写入、完成标记等（不变）--
         organize_mode = get_settings().get("organize_mode", "none")
-        if organize_mode and organize_mode != "none":
+        if not failed_pages and organize_mode and organize_mode != "none":
             new_path = organize_download(output_path, organize_mode, album)
             if new_path:
                 output_path = new_path
@@ -747,24 +787,36 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
                 log.info(f"整理后 output_path 已更新: {output_path}")
 
         settings = get_settings()
-        if settings.get("auto_pack") == "true":
+        if not failed_pages and settings.get("auto_pack") == "true":
             tracker.push("archiving", {
                 "job_id": job_id, "status": "archiving",
                 "message": "正在打包 CBZ...",
             })
             packer = CbzPacker()
             output_dir = Path(output_path)
-            cbz_path = output_dir.parent / f"{output_dir.name}{packer.extension()}"
+            suffix = ".zip" if settings.get("pack_format") == "zip" else packer.extension()
+            # Preserve a valid output directory for the library and open-folder.
+            cbz_path = output_dir / f"{output_dir.name}{suffix}"
             try:
+                originals = {
+                    path: (path.stat().st_size, path.stat().st_mtime_ns)
+                    for path in safe_files(output_dir)
+                    if path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS
+                }
                 packer.pack(output_dir, cbz_path)
                 log.info(f"CBZ 打包完成: {cbz_path}")
                 if settings.get("delete_originals") == "true":
                     if not is_safe_path(output_dir):
                         log.error(f"delete_originals 安全校验失败，拒绝删除: {output_dir}")
                     else:
-                        log.warning(f"delete_originals 已启用，正在删除原始目录: {output_dir}")
-                        shutil.rmtree(output_dir)
-                        log.info(f"已删除原始目录: {output_dir}")
+                        if _should_stop(job_id, album_id, tracker, pause_ev):
+                            return
+                        # Delete only packed unchanged images, never the directory.
+                        for path, signature in originals.items():
+                            if (is_safe_path(path) and path.is_file()
+                                    and (path.stat().st_size, path.stat().st_mtime_ns) == signature):
+                                path.unlink()
+                        log.info(f"已清理打包原图，保留归档及其他文件: {output_dir}")
             except Exception as e:
                 log.warning(f"CBZ 打包失败（不影响下载完成状态）job_id={job_id} error={e}")
 
@@ -803,30 +855,32 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
             if len(failed_pages) > 5:
                 err_all += f" ...（共 {len(failed_pages)} 页失败）"
             log.warning(f"下载任务部分失败 job_id={job_id} failed_pages={len(failed_pages)} total_pages={total_pages}")
-            ok = db.transition_job_status(job_id, ["running"], "failed",
+            ok = db.transition_job_status(job_id, ["running", "paused"], "failed",
                                      done_pages=done_val,
                                      error_message=err_all, completed_at=now)
             if not ok:
                 log.warning(f"transition_job_status 失败，状态可能已被更改 job_id={job_id}")
-            db.update_wishlist_download_status(album_id, "failed")
-            tracker.push("failed", {
-                "job_id": job_id, "status": "failed",
-                "error_message": err_all,
-                "done_pages": done_val, "total_pages": total_pages,
-            })
+            if ok:
+                db.update_wishlist_download_status(album_id, "failed")
+                tracker.push("failed", {
+                    "job_id": job_id, "status": "failed",
+                    "error_message": err_all,
+                    "done_pages": done_val, "total_pages": total_pages,
+                })
         else:
             log.info(f"下载任务完成 job_id={job_id} total_pages={total_pages} output_path={output_path}")
-            ok = db.transition_job_status(job_id, ["running"], "completed",
+            ok = db.transition_job_status(job_id, ["running", "paused"], "completed",
                                      done_pages=done_val, completed_at=now)
             if ok:
                 db.update_wishlist_download_status(album_id, "completed")
             else:
                 log.warning(f"transition_job_status 失败，状态可能已被取消 job_id={job_id}")
-            tracker.push("completed", {
-                "job_id": job_id, "status": "completed",
-                "output_path": output_path,
-                "done_pages": done_val, "total_pages": total_pages,
-            })
+            if ok:
+                tracker.push("completed", {
+                    "job_id": job_id, "status": "completed",
+                    "output_path": output_path,
+                    "done_pages": done_val, "total_pages": total_pages,
+                })
 
         tracker.close()
 
@@ -846,9 +900,12 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
         if failed_pages:
             err_msg = "; ".join(failed_pages[:3]) + " | " + err_msg
         try:
-            db.update_job(job_id, status="failed", error_message=err_msg[:1000])
+            changed = db.transition_job_status(job_id, ["running", "paused"], "failed", error_message=err_msg[:1000])
         except Exception as db_err:
             log.error(f"更新失败状态到数据库出错: {db_err}")
+            changed = False
+        if not changed:
+            return
         try:
             db.update_wishlist_download_status(album_id, "failed")
         except Exception as wl_err:

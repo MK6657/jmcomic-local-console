@@ -23,7 +23,7 @@ def _find_album_dir(album_id: str) -> tuple[Path | None, str | None]:
     job = get_completed_job_by_album_id(album_id)
     if job and job.get("output_path"):
         p = Path(job["output_path"])
-        if p.exists():
+        if p.is_dir() and is_safe_path(p):
             return p, job.get("title") or p.name
 
     # 没有匹配的已完成任务
@@ -31,43 +31,19 @@ def _find_album_dir(album_id: str) -> tuple[Path | None, str | None]:
 
 
 def _scan_pages(album_dir: Path) -> list[dict]:
-    """扫描专辑目录下的所有章节子目录，返回扁平化的 pages 列表"""
+    """Include root images and nested chapters, with natural order and URL escaping."""
+    from urllib.parse import quote
+    from core.file_tree import safe_files
     pages = []
-    page_number = 0
-
-    chapter_dirs = sorted([d for d in album_dir.iterdir() if d.is_dir()])
-
-    if not chapter_dirs:
-        # 没有子目录，直接在专辑目录下找图片（单章扁平结构）
-        image_files = sorted(
-            f
-            for f in album_dir.iterdir()
-            if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS
-        )
-        for img in image_files:
-            page_number += 1
-            rel_path = str(img.relative_to(DOWNLOAD_ROOT)).replace("\\", "/")
-            pages.append({
-                "page": page_number,
-                "url": f"/api/preview-img/{rel_path}",
-                "chapter": album_dir.name,
-            })
-    else:
-        for ch_dir in chapter_dirs:
-            image_files = sorted(
-                f
-                for f in ch_dir.iterdir()
-                if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS
-            )
-            for img in image_files:
-                page_number += 1
-                rel_path = str(img.relative_to(DOWNLOAD_ROOT)).replace("\\", "/")
-                pages.append({
-                    "page": page_number,
-                    "url": f"/api/preview-img/{rel_path}",
-                    "chapter": ch_dir.name,
-                })
-
+    for img in safe_files(album_dir):
+        if img.suffix.lower() not in ALLOWED_EXTENSIONS or not is_safe_path(img):
+            continue
+        rel_path = img.relative_to(DOWNLOAD_ROOT).as_posix()
+        pages.append({
+            "page": len(pages) + 1,
+            "url": "/api/preview-img/" + quote(rel_path, safe="/"),
+            "chapter": img.parent.name,
+        })
     return pages
 
 

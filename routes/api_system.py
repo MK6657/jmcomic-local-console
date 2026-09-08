@@ -83,7 +83,7 @@ def diagnose():
                 continue
             try:
                 with open(f, 'r', encoding='utf-8', errors='replace') as fh:
-                    for line in fh:
+                    for line in iter(fh.readline, ""):
                         if fh.tell() > _MAX_SCAN_SIZE:
                             break
                         if _error_pattern.search(line):

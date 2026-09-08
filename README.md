@@ -113,6 +113,23 @@ There is no `package.json`, so npm lint/typecheck/build scripts are not provided
 
 ## Maintenance changes
 
+### Second audit
+
+- Malformed API JSON and invalid settings return explicit errors; settings save atomically.
+- Browser-origin/Host checks protect the loopback service from cross-site requests.
+- ZIP/PDF/CBZ file discovery skips symbolic links and Windows junctions; previews
+  include nested chapters, natural page order and escaped filenames.
+- Incomplete/canceled downloads do not trigger automatic packaging or original-image
+  deletion. Failed image replacement preserves the previous valid image.
+- Automatic ZIP/CBZ archives stay in the recorded output directory. Original-image
+  cleanup preserves archives, notes and other files; readers need original images.
+- Same-album workers cannot write concurrently; failed thread startup releases capacity.
+- Shared client retirement waits for in-flight and timed-out background calls to finish.
+- Windows mutex protection applies even before startup binds a port. Missing Waitress
+  now fails explicitly rather than starting an untracked development-server fallback.
+
+### Initial maintenance
+
 - Fixed proxy placement in jmcomic HTTP client metadata.
 - Removed proxy/private fields from settings exports.
 - Replaced forced port cleanup with verified service discovery and safe fallback.

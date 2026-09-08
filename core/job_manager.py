@@ -19,6 +19,7 @@ class JobManager:
     def __init__(self):
         self._lock = threading.Lock()
         self._running_jobs: dict[str, threading.Thread] = {}
+        self._running_albums: dict[str, str] = {}
         self._pause_events: dict[str, threading.Event] = {}  # job_id → Event
         self._stop_event = threading.Event()
         self._scheduler_thread: Optional[threading.Thread] = None
@@ -92,6 +93,10 @@ class JobManager:
 
             job_id = next_job["job_id"]
             album_id = next_job["album_id"]
+            # Canceled workers can still be finishing an HTTP request.
+            if album_id in self._running_albums.values():
+                db.transition_job_status(job_id, ["running"], "queued")
+                return
             try:
                 photo_ids = json.loads(next_job["selected_photo_ids"] or "[]")
             except Exception:
@@ -114,9 +119,18 @@ class JobManager:
             )
 
             self._running_jobs[job_id] = thread
+            self._running_albums[job_id] = album_id
 
         # 在线程启动前释放锁，避免 start() 持锁等待 OS 调度
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            with self._lock:
+                self._running_jobs.pop(job_id, None)
+                self._running_albums.pop(job_id, None)
+            db.transition_job_status(job_id, ["running"], "failed", error_message="下载线程启动失败")
+            progress_manager.remove_tracker(job_id)
+            raise
         log.info(f"开始执行任务 job_id={job_id} album_id={album_id} photo_count={len(photo_ids)}")
 
     def _run_job_wrapper(self, job_id: str, album_id: str, photo_ids: list[str]):
@@ -126,11 +140,12 @@ class JobManager:
             log.info(f"任务完成 job_id={job_id} album_id={album_id}")
         except Exception as e:
             log.error(f"任务执行异常 job_id={job_id} error={e}")
-            db.update_job(job_id, status="failed", error_message=str(e)[:1000])
+            changed = db.transition_job_status(job_id, ["running", "paused"], "failed", error_message=str(e)[:1000])
             # 确保 wishlist 状态同步
-            db.update_wishlist_download_status(album_id, "failed")
+            if changed:
+                db.update_wishlist_download_status(album_id, "failed")
             tracker = progress_manager.get_tracker(job_id)
-            if tracker:
+            if tracker and changed:
                 tracker.push("failed", {
                     "job_id": job_id, "status": "failed",
                     "error_message": str(e)[:500],
@@ -139,6 +154,7 @@ class JobManager:
         finally:
             with self._lock:
                 self._running_jobs.pop(job_id, None)
+                self._running_albums.pop(job_id, None)
             # 清理暂停事件，防止内存泄漏
             self.clear_pause_event(job_id)
             # 加固：确保 tracker 被清理

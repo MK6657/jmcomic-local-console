@@ -150,6 +150,8 @@ def album_tags_add(album_id: str):
         raw_tags = body.get("tags", [])
         if not raw_tags or not isinstance(raw_tags, list):
             return jsonify({"status": "error", "message": "缺少 tags 列表"}), 400
+        if len(raw_tags) > 200 or any(not isinstance(tag, str) for tag in raw_tags):
+            return jsonify(status="error", message="tags 必须是最多 200 个字符串"), 400
 
         added = 0
         skipped = 0
@@ -186,6 +188,12 @@ def album_tags_delete(album_id: str):
     try:
         body = request.get_json(force=True) or {}
         total_deleted = 0
+        if (not isinstance(body, dict)
+                or ("tags" in body and (not isinstance(body["tags"], list)
+                    or any(not isinstance(tag, str) for tag in body["tags"])))
+                or ("source" in body and body["source"] not in ("auto", "user"))
+                or any(key not in {"tags", "source"} for key in body)):
+            return jsonify(status="error", message="无效的标签删除条件"), 400
 
         # 模式1：删除指定标签列表
         if "tags" in body and isinstance(body["tags"], list):
