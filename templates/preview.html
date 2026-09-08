@@ -54,6 +54,7 @@
     .preview-nav .btn-nav { min-width: 90px; padding: 0.4rem 0.8rem; font-size: 0.85rem; }
 }
 </style>
+<link rel="stylesheet" href="{{ asset_url('css/preview.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -68,6 +69,10 @@
         </div>
         <h4><i class="bi bi-book"></i> 本地阅读器</h4>
         <div class="album-title" id="album-title">加载中...</div>
+        <div class="d-flex justify-content-center gap-2 mt-3" role="group" aria-label="阅读方式">
+            <span class="btn btn-primary btn-sm" aria-current="page">单页翻页</span>
+            <a class="btn btn-outline-primary btn-sm" id="preview-continuous" href="/read/{{ album_id }}">连续滚动</a>
+        </div>
     </div>
 
     <!-- 错误提示（初始隐藏） -->
@@ -92,15 +97,20 @@
 
         <!-- 缩略图导航 -->
         <div class="thumbnail-bar" id="thumbnail-bar">
+            <p class="small text-muted mb-2">缩略图 · 左右滑动查看，点击页码定位</p>
+            <div class="preview-thumbnails-row">
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="thumb-prev" aria-label="向前浏览缩略图"><i class="bi bi-chevron-left" aria-hidden="true"></i></button>
             <div class="thumb-container" id="thumb-container">
                 <!-- JS 动态生成 -->
+            </div>
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="thumb-next" aria-label="向后浏览缩略图"><i class="bi bi-chevron-right" aria-hidden="true"></i></button>
             </div>
         </div>
 
         <!-- 图片显示区 -->
         <div class="preview-image-wrapper" id="image-wrapper">
             <div class="loading-spinner d-none" id="img-spinner">
-                <div class="spinner-border text-light" role="status">
+                <div class="spinner-border text-primary" role="status">
                     <span class="visually-hidden">加载中...</span>
                 </div>
             </div>
@@ -108,15 +118,15 @@
                  src=""
                  alt="预览图片"
                  style="display:none;" />
-            <div id="no-image-hint" class="text-light" style="display:none;">
+            <div id="no-image-hint" class="text-muted" style="display:none;">
                 <i class="bi bi-image" style="font-size:3rem;"></i>
-                <p class="mt-2">选择左侧缩略图开始阅读</p>
+                <p class="mt-2">选择上方缩略图开始阅读</p>
             </div>
         </div>
 
         <!-- 翻页导航 -->
         <div class="preview-nav">
-            <button class="btn btn-outline-secondary btn-nav" id="btn-first" onclick="goPage(1)" title="首页">
+            <button class="btn btn-outline-secondary btn-nav" id="btn-first" onclick="goPage(1)" title="首页" aria-label="首页">
                 <i class="bi bi-chevron-double-left"></i>
             </button>
             <button class="btn btn-outline-primary btn-nav" id="btn-prev" onclick="goPage(currentPage - 1)">
@@ -137,7 +147,7 @@
             <button class="btn btn-outline-primary btn-nav" id="btn-next" onclick="goPage(currentPage + 1)">
                 下一页 <i class="bi bi-chevron-right"></i>
             </button>
-            <button class="btn btn-outline-secondary btn-nav" id="btn-last" onclick="goPage(totalPages)" title="末页">
+            <button class="btn btn-outline-secondary btn-nav" id="btn-last" onclick="goPage(totalPages)" title="末页" aria-label="末页">
                 <i class="bi bi-chevron-double-right"></i>
             </button>
         </div>

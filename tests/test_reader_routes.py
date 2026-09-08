@@ -38,3 +38,12 @@ def test_reader_has_accessible_edge_buttons(client):
     html = client.get('/read/123').get_data(as_text=True)
     assert 'id="reader-top" title="一键到顶" aria-label="一键到顶" disabled' in html
     assert 'id="reader-bottom" title="一键到底" aria-label="一键到底" disabled' in html
+
+
+def test_reading_mode_links_and_thumbnail_controls(client):
+    paged = client.get('/preview/123').get_data(as_text=True)
+    continuous = client.get('/read/123').get_data(as_text=True)
+    assert 'id="preview-continuous" href="/read/123"' in paged
+    assert 'id="reader-paged" href="/preview/123"' in continuous
+    assert 'id="thumb-prev"' in paged and 'id="thumb-next"' in paged
+    assert 'css/preview.css' in paged

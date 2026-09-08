@@ -68,6 +68,14 @@
   }
   function setCurrent(number) {
     current = number;
+    byId('reader-paged').href = '/preview/' + encodeURIComponent(albumId) + '?page=' + current;
+    if (new URLSearchParams(location.search).has('page')) {
+      try {
+        var locationUrl = new URL(location.href);
+        locationUrl.searchParams.set('page', current);
+        history.replaceState(history.state, '', locationUrl.pathname + locationUrl.search);
+      } catch (_) {}
+    }
     byId('reader-progress').textContent = '第 ' + current + ' / ' + pages.length + ' 页 · 向下滚动阅读';
     if (document.activeElement !== byId('reader-page-input')) byId('reader-page-input').value = current;
     remember();
@@ -181,6 +189,8 @@
         appendPages();
         var saved = 1;
         try { saved = Number(sessionStorage.getItem(storageKey)) || 1; } catch (_) {}
+        var requested = Number(new URLSearchParams(location.search).get('page'));
+        if (requested > 0 && Number.isFinite(requested)) saved = requested;
         setCurrent(1);
         observe();
         if (saved > 1) requestAnimationFrame(function () { jump(saved); });
@@ -210,6 +220,10 @@
   byId('reader-bottom').addEventListener('click', function () { showTools(false); jump(pages.length, 'end'); });
   byId('reader-load-more').addEventListener('click', appendPages);
   byId('reader-retry').addEventListener('click', load);
+  byId('reader-paged').addEventListener('click', function (event) {
+    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    event.preventDefault(); remember(); location.replace(this.href);
+  });
   byId('reader-back').addEventListener('click', function (event) {
     try {
       if (new URL(document.referrer).origin === location.origin && history.length > 1) {

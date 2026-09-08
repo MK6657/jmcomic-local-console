@@ -58,6 +58,8 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   The title scrolls away; return/jump controls stay hidden until you tap the picture/margin or press M.
   Press Escape to hide them again. A Reading tools button at the page top provides keyboard access.
   Page/chapter captions appear only on the first image; the hidden tools also include one-click top/bottom icons.
+  Switch between paged and continuous reading while keeping the current page. Paged thumbnails show
+  the full image with page numbers, horizontal browse arrows and automatic loading of later-page thumbnails.
 - Returning from details or the reader restores the search query, sort, result page, results and scroll position.
   Results are cached only in browser-session/history state and reused for up to 30 minutes.
 

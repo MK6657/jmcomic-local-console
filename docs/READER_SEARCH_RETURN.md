@@ -24,7 +24,11 @@ also cleared an otherwise valid result list to issue another search.
   top/bottom icons: top returns to the document start, bottom renders remaining batches and aligns
   with the last image's lower edge. Position is maintained while lazy images finish loading.
 - No automatic download or remote image streaming. Missing/deleted local images produce a clear explanation.
-- The existing paged preview remains unchanged. Colors, typography, spacing and radii follow the locked eye-care tokens.
+- The paged preview now has a Continuous mode link; the continuous reader offers Paged mode in its hidden tools.
+  Both share the current page through URL/session state and replace the mode's history entry, preserving Back navigation.
+- Paged thumbnails constrain image dimensions with `object-fit: contain`, show page numbers and have horizontal arrows.
+  The outer rail no longer clips vertically. Later-page jumps load the required thumbnail batch and resize keeps it visible.
+- Colors, typography, spacing and radii follow the locked eye-care tokens; the paged canvas now uses the warm background too.
 
 搜索地址、结果快照和滚动位置一起保存；阅读按钮打开独立的连续阅读页，复用本地预览接口。
 每批 20 张图片并按需加载，支持跳页、重试与阅读位置记忆。保留原翻页预览，不自动下载或在线播放。
@@ -33,12 +37,14 @@ also cleared an otherwise valid result list to issue another search.
 
 ## Validation / 验证
 
-- Backend regression: 163 passed, 1 skipped for Windows file-symlink permission.
+- Backend regression: 164 passed, 1 skipped for Windows file-symlink permission.
 - Real-browser checks use only `tests/ui_reader_fixture.py` synthetic pages and temporary databases.
 - Checked: search → detail → back, query/page/scroll restoration without an upstream re-search,
   reload restoration, reader → back, lazy batches, image-error retry, missing-download state,
   desktop 1329×912 and mobile 390×844 without horizontal overflow.
 - Browser script: `tests/reader_browser_checks.js`, executed via Playwright CLI `run-code --filename`.
+- Mode/thumbnail script: `tests/reading_modes_browser_checks.js`; synthetic 430-page check covers containment,
+  page 25 round trips, last/previous page, refresh, mobile resizing, and Back returning to the original search results.
 - Screenshots are local-only under ignored `output/playwright/`; no user comic images are used in tests.
 - No target site is cloned: the existing project components and DESIGN.md define all new UI styling.
 

@@ -13,6 +13,7 @@
     var albumTitle = '';
     var THUMBNAILS_PER_PAGE = 100;
     var thumbnailsLoaded = 0;
+    var storageKey = 'jm-reader-page:' + albumId;
 
     // ── DOM 引用 ──
     var $ = function (id) { return document.getElementById(id); };
@@ -46,6 +47,7 @@
                 }
                 pages = data.pages || [];
                 totalPages = data.total_pages || 0;
+                window.totalPages = totalPages;
                 albumTitle = data.title || '';
 
                 // 显示阅读器
@@ -55,6 +57,7 @@
 
                 // 更新页面信息
                 pageTotal.textContent = totalPages;
+                jumpInput.max = totalPages;
                 document.title = albumTitle + ' - JMComic 图片预览';
 
                 // 生成缩略图
@@ -62,7 +65,11 @@
 
                 // 跳转到第一页
                 if (totalPages > 0) {
-                    goPage(1);
+                    var saved = 1;
+                    try { saved = Number(sessionStorage.getItem(storageKey)) || 1; } catch (_) {}
+                    var requested = Number(new URLSearchParams(location.search).get('page'));
+                    if (requested > 0 && Number.isFinite(requested)) saved = requested;
+                    goPage(saved, true);
                 } else {
                     noImageHint.style.display = 'block';
                 }
@@ -95,10 +102,10 @@
         var html = '';
         for (var i = start; i < end; i++) {
             var p = pages[i];
-            html += '<div class="thumb-item" data-page="' + window.escapeHtmlAttr(String(p.page))
-                  + '" onclick="goPage(' + window.escapeHtmlAttr(String(p.page)) + ')" title="第 ' + window.escapeHtmlAttr(String(p.page)) + ' 页">'
+            html += '<button type="button" class="thumb-item" data-page="' + (i + 1)
+                  + '" onclick="goPage(' + (i + 1) + ')" aria-label="第 ' + (i + 1) + ' 页" title="第 ' + (i + 1) + ' 页">'
                   + '<img src="' + window.escapeHtmlAttr(p.url) + '" alt="第' + p.page + '页" loading="lazy" />'
-                  + '</div>';
+                  + '<span class="thumb-number">' + (i + 1) + '</span></button>';
         }
         // 用 insertAdjacentHTML 追加而非覆盖
         thumbContainer.insertAdjacentHTML('beforeend', html);
@@ -107,23 +114,34 @@
         // 如果还有更多，追加"加载更多"按钮
         if (thumbnailsLoaded < pages.length) {
             var remaining = pages.length - thumbnailsLoaded;
-            var loadBtn = document.createElement('div');
+            var loadBtn = document.createElement('button');
+            loadBtn.type = 'button';
             loadBtn.className = 'load-more-item';
-            loadBtn.innerHTML = '<i class="bi bi-plus-circle" title="点击加载更多（剩余 ' + remaining + ' 页）"></i>';
+            loadBtn.textContent = '加载更多';
+            loadBtn.title = '剩余 ' + remaining + ' 页缩略图';
             loadBtn.addEventListener('click', loadMoreThumbnails);
             thumbContainer.appendChild(loadBtn);
         }
     }
 
     // ── 翻页 ──
-    function goPage(page) {
+    function goPage(page, force) {
         // 边界检查
         if (totalPages === 0) return;
+        page = Math.floor(Number(page)) || 1;
         if (page < 1) page = 1;
         if (page > totalPages) page = totalPages;
 
-        if (page === currentPage) return;
+        if (page === currentPage && !force) return;
         currentPage = page;
+        try { sessionStorage.setItem(storageKey, String(page)); } catch (_) {}
+        $('preview-continuous').href = '/read/' + encodeURIComponent(albumId) + '?page=' + page;
+        try {
+            var url = new URL(location.href);
+            url.searchParams.set('page', page);
+            history.replaceState(history.state, '', url.pathname + url.search);
+        } catch (_) {}
+        while (thumbnailsLoaded < page) loadMoreThumbnails();
 
         // 更新页码显示
         pageCurrent.textContent = currentPage;
@@ -156,7 +174,6 @@
         noImageHint.style.display = 'none';
 
         // 加载图片
-        previewImage.src = pageData.url;
         previewImage.onload = function () {
             imgSpinner.classList.add('d-none');
             previewImage.style.display = 'inline';
@@ -166,10 +183,11 @@
             previewImage.style.display = 'none';
             noImageHint.innerHTML = '<i class="bi bi-exclamation-circle" style="font-size:3rem;"></i>'
                                   + '<p class="mt-2">图片加载失败</p>'
-                                  + '<button class="btn btn-sm btn-outline-light mt-2" onclick="goPage(' + currentPage + ')">'
+                                  + '<button class="btn btn-sm btn-outline-primary mt-2" onclick="goPage(' + currentPage + ', true)">'
                                   + '<i class="bi bi-arrow-clockwise"></i> 重试</button>';
             noImageHint.style.display = 'block';
         };
+        previewImage.src = pageData.url;
 
         // 更新缩略图高亮
         var thumbs = thumbContainer.querySelectorAll('.thumb-item');
@@ -177,10 +195,14 @@
             var t = thumbs[j];
             if (parseInt(t.getAttribute('data-page')) === currentPage) {
                 t.classList.add('active');
+                t.setAttribute('aria-current', 'page');
                 // 滚动到可视区
-                t.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+                var bounds = t.getBoundingClientRect();
+                var rail = thumbContainer.getBoundingClientRect();
+                thumbContainer.scrollTo({ left: thumbContainer.scrollLeft + bounds.left - rail.left - (rail.width - bounds.width) / 2, behavior: 'instant' });
             } else {
                 t.classList.remove('active');
+                t.removeAttribute('aria-current');
             }
         }
 
@@ -214,7 +236,7 @@
         previewImage.style.display = 'none';
         noImageHint.innerHTML = '<i class="bi bi-exclamation-circle" style="font-size:3rem;"></i>'
                               + '<p class="mt-2">图片加载失败</p>'
-                              + '<button class="btn btn-sm btn-outline-light mt-2" onclick="goPage(' + currentPage + ')">'
+                              + '<button class="btn btn-sm btn-outline-primary mt-2" onclick="goPage(' + currentPage + ', true)">'
                               + '<i class="bi bi-arrow-clockwise"></i> 重试</button>';
         noImageHint.style.display = 'block';
     }
@@ -254,6 +276,23 @@
             goPage(totalPages);
         }
     });
+
+    $('preview-continuous').addEventListener('click', function (event) {
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+        event.preventDefault(); location.replace(this.href);
+    });
+    $('thumb-prev').addEventListener('click', function () { thumbContainer.scrollBy({ left: -thumbContainer.clientWidth * 0.8, behavior: 'instant' }); });
+    $('thumb-next').addEventListener('click', function () { thumbContainer.scrollBy({ left: thumbContainer.clientWidth * 0.8, behavior: 'instant' }); });
+    window.addEventListener('resize', function () {
+        requestAnimationFrame(function () {
+            var selected = thumbContainer.querySelector('.thumb-item.active');
+            if (!selected) return;
+            var bounds = selected.getBoundingClientRect();
+            var rail = thumbContainer.getBoundingClientRect();
+            thumbContainer.scrollTo({ left: thumbContainer.scrollLeft + bounds.left - rail.left - (rail.width - bounds.width) / 2, behavior: 'instant' });
+        });
+    });
+    window.addEventListener('pageshow', function (event) { if (event.persisted && !pages.length) loadPreview(); });
 
     // ── 启动 ──
     document.addEventListener('DOMContentLoaded', function () {

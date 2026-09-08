@@ -19,6 +19,7 @@
             <button type="button" class="btn btn-outline-primary btn-sm" id="reader-bottom" title="一键到底" aria-label="一键到底" disabled><i class="bi bi-chevron-bar-down" aria-hidden="true"></i></button>
         </div>
         <span class="text-muted small" id="reader-progress" aria-live="polite">正在读取本地图片…</span>
+        <a class="btn btn-outline-primary btn-sm" id="reader-paged" href="/preview/{{ album_id }}" title="切换阅读方式并保留当前页">单页翻页</a>
         <form class="reader-jump d-none" id="reader-jump">
             <label class="visually-hidden" for="reader-page-input">跳转页码</label>
             <input class="form-control form-control-sm" id="reader-page-input" type="number" min="1" value="1" aria-label="跳转页码">
