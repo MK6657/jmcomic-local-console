@@ -13,6 +13,7 @@ from core.logger import log
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 
 api_library_bp = Blueprint("api_library", __name__, url_prefix="/api/library")
+_bulk_sync_lock = threading.Lock()
 
 
 def _sanitize_tag(tag: str) -> str:
@@ -234,13 +235,13 @@ def album_tags_sync(album_id: str):
             data = fut.result(timeout=20)
         except FuturesTimeout:
             log.warning(f"API同步标签超时 album_id={album_id}")
-            pool.shutdown(wait=False)  # 不阻塞 Waitress 线程
             return jsonify({"status": "error", "message": "同步标签超时"}), 504
-
-        pool.shutdown(wait=True)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         raw_tags = data.get("tags", []) or []
-        tag_names = [t if isinstance(t, str) else (t.get("name") or str(t)) for t in raw_tags]
+        tag_names = [t if isinstance(t, str) else str(t.get("name") or "")
+                     for t in raw_tags if isinstance(t, (str, dict))]
         synced = db.batch_sync_auto_tags(album_id, tag_names)
 
         # 同时缓存元数据
@@ -278,16 +279,7 @@ def search_tags_autocomplete():
         if not q:
             return jsonify({"status": "ok", "tags": []})
 
-        # 从 get_all_tags 结果中模糊匹配
-        all_tags = db.get_all_tags(min_count=1)
-        matched = [
-            {"tag": t["tag"], "count": t["count"]}
-            for t in all_tags
-            if q in t["tag"]
-        ]
-        # 按 count DESC 排序并限制前 20 条
-        matched.sort(key=lambda x: x["count"], reverse=True)
-        matched = matched[:20]
+        matched = db.search_library_tags(q, limit=20)
         return jsonify({"status": "ok", "tags": matched})
     except Exception as e:
         log.error(f"API标签搜索失败 q={q} error={e}")
@@ -303,6 +295,8 @@ def sync_all_tags():
     从 wishlist + completed jobs 获取所有 album_id，逐个同步标签（单次最多 50 个）。
     后台异步执行，立即返回接受状态。
     """
+    if not _bulk_sync_lock.acquire(blocking=False):
+        return jsonify(status="busy", message="已有批量同步正在运行，请勿重复提交"), 409
     def _sync_worker():
         try:
             all_lib = db.get_library(page=1, page_size=200)
@@ -336,8 +330,14 @@ def sync_all_tags():
             log.info(f"批量同步标签完成: processed={processed}, errors={errors}")
         except Exception as e:
             log.error(f"后台批量同步标签失败 error={e}")
+        finally:
+            _bulk_sync_lock.release()
 
-    t = threading.Thread(target=_sync_worker, daemon=True)
-    t.start()
+    try:
+        t = threading.Thread(target=_sync_worker, daemon=True)
+        t.start()
+    except Exception:
+        _bulk_sync_lock.release()
+        return jsonify(status="error", message="无法启动批量同步，请稍后重试"), 503
     log.info("API批量同步标签已接受，后台执行中")
     return jsonify({"status": "accepted", "message": "批量同步已开始，后台执行中"}), 202

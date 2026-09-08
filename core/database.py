@@ -3,8 +3,6 @@ SQLite 数据库操作模块
 """
 import json
 import sqlite3
-import threading
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -77,6 +75,7 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
             CREATE INDEX IF NOT EXISTS idx_jobs_status_album_id ON jobs(status, album_id);
+            CREATE INDEX IF NOT EXISTS idx_jobs_album_latest ON jobs(album_id, status, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_wishlist_download_status ON wishlist(download_status);
 
             CREATE TABLE IF NOT EXISTS album_tags (
@@ -225,7 +224,7 @@ def get_jobs_by_status(status: str) -> list[dict]:
         conn.close()
 
 
-def claim_next_queued_job() -> dict | None:
+def claim_next_queued_job(excluded_album_ids=()) -> dict | None:
     """原子地获取并锁定下一个 queued 任务（防双重调度）。
 
     将第一个 queued 任务的状态更新为 'running'，并返回任务记录。
@@ -233,8 +232,12 @@ def claim_next_queued_job() -> dict | None:
     """
     conn = get_db()
     try:
+        excluded_album_ids = tuple(excluded_album_ids)
+        exclusion = (" AND album_id NOT IN (" + ",".join("?" for _ in excluded_album_ids) + ")"
+                     if excluded_album_ids else "")
         row = conn.execute(
-            "SELECT * FROM jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1"
+            "SELECT * FROM jobs WHERE status='queued'" + exclusion + " ORDER BY created_at ASC, id ASC LIMIT 1",
+            excluded_album_ids,
         ).fetchone()
         if not row:
             return None
@@ -670,6 +673,23 @@ def get_all_tags(min_count: int = 1, library_only: bool = True) -> list[dict]:
         conn.close()
 
 
+def search_library_tags(keyword: str, limit: int = 20) -> list[dict]:
+    """Search all library tags before applying the result limit, not just the tag cloud."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT tag, COUNT(*) AS count FROM album_tags
+               WHERE tag LIKE ? ESCAPE ? AND album_id IN (
+                   SELECT album_id FROM wishlist UNION
+                   SELECT album_id FROM jobs WHERE status='completed')
+               GROUP BY tag ORDER BY count DESC, tag ASC LIMIT ?""",
+            ("%" + _escape_like(keyword.strip().lower()) + "%", chr(92), max(1, min(limit, 100))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def get_albums_by_tag(tag: str) -> list[str]:
     """获取含有某标签的所有 album_id 列表"""
     conn = get_db()
@@ -735,25 +755,6 @@ def clear_album_tags(album_id: str, source: str | None = None) -> int:
         conn.close()
 
 
-# ─── 文件存在性检查缓存 ───
-
-_file_check_cache: dict[str, tuple[bool, float]] = {}
-_file_check_cache_lock = threading.Lock()
-_FILE_CHECK_TTL = 300  # 5 分钟
-
-
-def _check_files_exist_cached(album_id: str) -> bool:
-    """检查 album_id 对应的下载文件夹是否存在（带缓存）。"""
-    now = time.time()
-    with _file_check_cache_lock:
-        cached = _file_check_cache.get(album_id)
-        if cached and (now - cached[1]) < _FILE_CHECK_TTL:
-            return cached[0]
-    job = get_completed_job_by_album_id(album_id)
-    exists = bool(job and job.get("output_path") and Path(job["output_path"]).is_dir())
-    with _file_check_cache_lock:
-        _file_check_cache[album_id] = (exists, now)
-    return exists
 
 
 # ─── Library 查询（SQL 分页版 2026-07） ───
@@ -815,6 +816,8 @@ def _make_status_sql(status: str | None) -> str:
     """生成状态过滤的 WHERE 子句"""
     if status == "completed" or status == "downloaded":
         return "AND ai.download_status = ?"
+    elif status == "queued":
+        return "AND ai.download_status = ?"
     elif status == "none" or status == "undownloaded":
         return "AND ai.download_status IN (?, ?)"
     return ""
@@ -846,7 +849,7 @@ def get_library(
 
     kw = keyword.strip().lower() if keyword else ""
     # 标签统一小写存储（add_album_tag 会 lower()），查询侧同样归一化，否则大写输入永远查不到
-    wanted_tags = [t.strip().lower() for t in tag.split(",") if t.strip()] if tag else []
+    wanted_tags = list(dict.fromkeys(t.strip().lower() for t in tag.split(",") if t.strip())) if tag else []
     tag_count = len(wanted_tags)
 
     conn = get_db()
@@ -868,14 +871,14 @@ def get_library(
         # ── 排序子句 ──
         sort_lower = sort.lower()
         if sort_lower == "title":
-            order_clause = "ORDER BY LOWER(_base.title) ASC"
+            order_clause = "ORDER BY LOWER(_base.title) ASC, _base.album_id ASC"
         elif sort_lower == "added_at":
-            order_clause = "ORDER BY _base.added_at DESC"
+            order_clause = "ORDER BY _base.added_at DESC, _base.album_id ASC"
         elif sort_lower == "album_id":
             order_clause = "ORDER BY _base.album_id ASC"
         else:  # updated_at (default)
             order_clause = (
-                "ORDER BY COALESCE(NULLIF(_base.updated_at, ''), _base.added_at, '') DESC"
+                "ORDER BY COALESCE(NULLIF(_base.updated_at, ''), _base.added_at, '') DESC, _base.album_id ASC"
             )
 
         # ── 完整查询 SQL ──
@@ -938,6 +941,8 @@ def get_library(
 
         if status == "completed" or status == "downloaded":
             params.append("completed")
+        elif status == "queued":
+            params.append("queued")
         elif status == "none" or status == "undownloaded":
             params.extend(["none", "none"])
 
@@ -983,12 +988,27 @@ def get_library(
                     tags_by_album[aid] = []
                 tags_by_album[aid].append({"tag": tr["tag"], "source": tr["source"]})
 
+        # One query for the current page instead of one connection/SELECT per album.
+        completed_ids = [item["album_id"] for item in items_list if item["download_status"] == "completed"]
+        paths = {}
+        if completed_ids:
+            ph = ",".join("?" for _ in completed_ids)
+            rows = conn.execute(
+                f"""SELECT j.album_id, j.output_path FROM jobs j
+                    WHERE j.album_id IN ({ph}) AND j.status='completed'
+                    AND j.id = (SELECT latest.id FROM jobs latest
+                        WHERE latest.album_id=j.album_id AND latest.status='completed'
+                        ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)""",
+                completed_ids,
+            ).fetchall()
+            paths = {row["album_id"]: row["output_path"] for row in rows}
         result_items = []
         for it in items_list:
             aid = it["album_id"]
             it["tags"] = tags_by_album.get(aid, [])
             if it["download_status"] == "completed":
-                it["file_exists"] = _check_files_exist_cached(aid)
+                path = paths.get(aid)
+                it["file_exists"] = bool(path and Path(path).is_dir())
             result_items.append(it)
 
         return {
@@ -1091,13 +1111,30 @@ def get_cached_album_detail(album_id: str, ttl: int = 3600) -> dict | None:
         ).fetchone()
         if not row:
             return None
-        cached_at = datetime.fromisoformat(row["cached_at"])
+        try:
+            cached_at = datetime.fromisoformat(row["cached_at"])
+            detail = json.loads(row["detail_json"])
+            if not isinstance(detail, dict):
+                return None
+        except (ValueError, TypeError):
+            return None
         if (datetime.now() - cached_at).total_seconds() > ttl:
             return None
         return {
-            "detail": json.loads(row["detail_json"]),
+            "detail": detail,
+            "cached_at": cached_at.timestamp(),
             "cover_cdn_url": row["cover_cdn_url"] or "",
         }
+    finally:
+        conn.close()
+
+
+def clear_cached_album_details():
+    """Clear only derived detail-cache data, never jobs, settings or bookmarks."""
+    conn = get_db()
+    try:
+        with conn:
+            conn.execute("DELETE FROM album_detail_cache")
     finally:
         conn.close()
 

@@ -10,7 +10,7 @@ from flask import Blueprint, jsonify, request
 from core.database import get_db, get_all_jobs
 from core.logger import log, LOG_DIR, MAX_TOTAL_SIZE_MB, MAX_LOG_AGE_DAYS
 from core.validation import validate_numeric
-from core.jm_service import get_active_client_count, invalidate_option_cache
+from core.jm_service import get_active_client_count, invalidate_option_cache, clear_album_detail_cache
 from core.settings import build_jmcomic_option
 from urllib.parse import urlparse
 import re as _re
@@ -189,6 +189,7 @@ def clear_jm_comic_cache():
     log.info("API清除 jmcomic 缓存")
     try:
         invalidate_option_cache()
+        clear_album_detail_cache()
         return jsonify({"status": "ok", "message": "jmcomic 缓存已清除"})
     except Exception as e:
         log.error(f"清除 jmcomic 缓存失败: {e}")

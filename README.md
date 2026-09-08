@@ -113,6 +113,20 @@ There is no `package.json`, so npm lint/typecheck/build scripts are not provided
 
 ## Maintenance changes
 
+### Cache and query optimization
+
+- Concurrent requests for the same detail share one fetch; cache TTL is honored,
+  returned objects cannot mutate cached data, and corrupt entries are refetched.
+- Clear-cache removes both detail-cache tiers without erasing personal records;
+  an older in-flight fetch cannot repopulate the cleared cache.
+- A 25-item downloaded-library page is regression-tested at one DB connection and
+  four SQL statements. File availability updates immediately rather than staying stale for five minutes.
+- Queued filtering, duplicate tag filters, rare-tag autocomplete and stable pagination are fixed.
+- Busy-album jobs no longer block unrelated queued jobs. Duplicate bulk tag-sync requests
+  return a busy response; archive-cache eviction is safe under concurrent requests.
+
+Validation: 137 tests passed, one Windows file-symlink permission case skipped.
+
 ### Second audit
 
 - Malformed API JSON and invalid settings return explicit errors; settings save atomically.

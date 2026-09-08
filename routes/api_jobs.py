@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import threading
 from pathlib import Path
 
 from flask import Blueprint, request, jsonify, Response, stream_with_context
@@ -20,6 +21,7 @@ from core.packer import CbzPacker
 _cbz_cache: dict[str, tuple[bool, float]] = {}
 _CBZ_CACHE_TTL = 60  # 缓存有效期（秒）
 _CBZ_CACHE_MAX = 500  # 最大缓存条目数
+_cbz_cache_lock = threading.Lock()
 
 
 def _scan_cbz_path(output_path: str) -> bool:
@@ -46,16 +48,17 @@ def _scan_cbz_path(output_path: str) -> bool:
 def _check_cbz_path(output_path: str) -> bool:
     """检查单个路径的 CBZ 存在性（带 TTL 缓存）"""
     now = time.time()
-    if output_path in _cbz_cache:
-        exists, ts = _cbz_cache[output_path]
-        if now - ts < _CBZ_CACHE_TTL:
-            return exists
+    with _cbz_cache_lock:
+        cached = _cbz_cache.get(output_path)
+        if cached is not None and now - cached[1] < _CBZ_CACHE_TTL:
+            return cached[0]
     exists = _scan_cbz_path(output_path)
-    _cbz_cache[output_path] = (exists, now)
-    # 限制缓存大小，防止内存泄漏
-    if len(_cbz_cache) > _CBZ_CACHE_MAX:
-        oldest = min(_cbz_cache.keys(), key=lambda k: _cbz_cache[k][1])
-        del _cbz_cache[oldest]
+    with _cbz_cache_lock:
+        _cbz_cache[output_path] = (exists, now)
+        # Eviction is atomic with insertion, even across concurrent API requests.
+        while len(_cbz_cache) > _CBZ_CACHE_MAX:
+            oldest = min(_cbz_cache, key=lambda key: _cbz_cache[key][1])
+            del _cbz_cache[oldest]
     return exists
 
 

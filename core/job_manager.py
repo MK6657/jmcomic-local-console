@@ -87,7 +87,7 @@ class JobManager:
                 return
 
             # 原子地获取并锁定下一个 queued 任务（防止双重调度）
-            next_job = db.claim_next_queued_job()
+            next_job = db.claim_next_queued_job(self._running_albums.values())
             if not next_job:
                 return
 

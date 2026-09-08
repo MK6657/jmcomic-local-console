@@ -445,52 +445,54 @@ def get_album_detail(album_id: str) -> dict:
         close_client(client)
 
 
+_detail_cache = OrderedDict()
+_detail_cache_lock = threading.Lock()
+# Bounded locks: same-album cold requests share a fetch, without unbounded lock storage.
+_detail_fetch_locks = [threading.Lock() for _ in range(64)]
+_detail_cache_generation = 0
+
+
+def clear_album_detail_cache():
+    """Clear both cache tiers; an older in-flight fetch must not repopulate them."""
+    global _detail_cache_generation
+    with _detail_cache_lock:
+        _detail_cache_generation += 1
+        _detail_cache.clear()
+        db.clear_cached_album_details()
+
+
 def get_album_detail_cached(album_id: str, ttl: int = 3600) -> dict:
-    """带二级缓存的 get_album_detail。
-
-    缓存层级：
-      1. 内存 LRU（`_memory_cache` 字典，限制 500 条，TTL=300s）— 最快
-      2. SQLite（`album_detail_cache` 表，TTL=3600s 默认）— 进程重启后保留
-      3. 远程调用（`get_album_detail()`）— 3-8 秒
-
-    每次远程调用成功后，同时回填两级缓存。
-    """
-    now = time.time()
-
-    # ── 1. 内存缓存 ──
-    mem_ttl = 300  # 内存缓存 5 分钟
-    if not hasattr(get_album_detail_cached, '_mem_cache'):
-        get_album_detail_cached._mem_cache = OrderedDict()
-        get_album_detail_cached._mem_lock = threading.Lock()
-    with get_album_detail_cached._mem_lock:
-        mem = get_album_detail_cached._mem_cache
-        cached = mem.get(album_id)
-        if cached and (now - cached['ts']) < mem_ttl:
-            mem.move_to_end(album_id)  # LRU 刷新
-            return cached['data']
-
-    # ── 2. SQLite 持久化缓存 ──
-    sqlite_result = db.get_cached_album_detail(album_id)
-    if sqlite_result:
-        data = sqlite_result["detail"]
-        if sqlite_result["cover_cdn_url"]:
-            data["cover"] = sqlite_result["cover_cdn_url"]
-        with get_album_detail_cached._mem_lock:
-            mem[album_id] = {'data': data, 'ts': now}
-            if len(mem) > 500:
-                mem.popitem(last=False)  # 移除最旧的（O(1)）
-        return data
-
-    # ── 3. 远程调用 + 回填缓存 ──
-    data = get_album_detail(album_id)
-    cover_cdn_url = data.get("cover", "")
+    """Bounded two-tier cache with request coalescing and isolated return values."""
+    from copy import deepcopy
     import json
-    db.set_cached_album_detail(album_id, json.dumps(data, ensure_ascii=False), cover_cdn_url)
-    with get_album_detail_cached._mem_lock:
-        mem[album_id] = {'data': data, 'ts': now}
-        if len(mem) > 500:
-            mem.popitem(last=False)
-    return data
+    key = (str(db.DB_PATH), album_id)
+    ttl = max(0, ttl)
+    with _detail_fetch_locks[hash(key) % len(_detail_fetch_locks)]:
+        now = time.time()
+        with _detail_cache_lock:
+            generation = _detail_cache_generation
+            cached = _detail_cache.get(key)
+            if cached and ttl > 0 and now - cached["ts"] < min(300, ttl):
+                _detail_cache.move_to_end(key)
+                return deepcopy(cached["data"])
+        stored = db.get_cached_album_detail(album_id, ttl=ttl) if ttl > 0 else None
+        if stored:
+            data = stored["detail"]
+            if stored["cover_cdn_url"]:
+                data["cover"] = stored["cover_cdn_url"]
+            timestamp = stored["cached_at"]
+        else:
+            data = get_album_detail(album_id)
+            timestamp = time.time()
+        with _detail_cache_lock:
+            if generation == _detail_cache_generation:
+                if stored is None:
+                    db.set_cached_album_detail(album_id, json.dumps(data, ensure_ascii=False), data.get("cover", ""))
+                _detail_cache[key] = {"data": deepcopy(data), "ts": timestamp}
+                _detail_cache.move_to_end(key)
+                while len(_detail_cache) > 500:
+                    _detail_cache.popitem(last=False)
+        return deepcopy(data)
 
 
 def organize_download(output_path: str, mode: str, album) -> str | None:
