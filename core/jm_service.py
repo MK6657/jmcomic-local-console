@@ -575,16 +575,45 @@ def _remove_empty_dir(path: Path):
         pass  # 目录非空或无权删除，忽略
 
 
+def _chapter_output_dir(album_dir, photo):
+    """Identify folders by chapter ID; never adopt or overwrite an unmarked old folder."""
+    import json
+    from .validation import validate_numeric
+    photo_id = str(photo.photo_id)
+    if not validate_numeric(photo_id):
+        raise ValueError("章节 ID 无效")
+    base_name = f"{_safe_dirname(photo.name or photo_id, max_len=100)}__{photo_id}"
+    suffix = 1
+    while True:
+        name = base_name if suffix == 1 else f"{base_name}_{suffix}"
+        directory = Path(album_dir) / name
+        marker = directory / ".jm-chapter.json"
+        if not is_safe_path(directory) or not is_safe_path(marker):
+            raise ValueError("章节输出路径越权")
+        if directory.exists():
+            try:
+                record = json.loads(marker.read_text(encoding="utf-8"))
+                if record.get("photo_id") == photo_id:
+                    return directory
+            except (OSError, ValueError, AttributeError):
+                pass
+            suffix += 1
+            continue
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            continue
+        marker.write_text(json.dumps({"photo_id": photo_id}), encoding="utf-8")
+        return directory
+
+
 def _download_chapter(
     job_id, album_id, album, album_dir, photo, total_pages,
     done_pages, pending_images, failed_pages, tracker, pause_ev, lock, pass_num, timeout,
 ):
     """下载单个章节的所有图片（支持章节内多图并行，每图独立 client）"""
     image_threads = int(get_settings().get("image_threads", "3"))
-    photo_dir = album_dir / _safe_dirname(photo.name or str(photo.photo_id))
-    if not is_safe_path(photo_dir):
-        raise ValueError("章节输出路径越权")
-    photo_dir.mkdir(parents=True, exist_ok=True)
+    photo_dir = _chapter_output_dir(album_dir, photo)
 
     photo_images = list(enumerate(photo))
     if len(photo_images) <= 1 or image_threads <= 1:
@@ -681,8 +710,12 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
 
         total_pages = 0
         photos_to_download = []
+        seen_photo_ids = set()
         for photo in album:
             if str(photo.photo_id) in photo_ids or not photo_ids:
+                if str(photo.photo_id) in seen_photo_ids:
+                    continue
+                seen_photo_ids.add(str(photo.photo_id))
                 client.check_photo(photo)
                 pages = len(photo) if hasattr(photo, "__len__") and photo.page_arr else 0
                 total_pages += pages

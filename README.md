@@ -113,6 +113,19 @@ There is no `package.json`, so npm lint/typecheck/build scripts are not provided
 
 ## Maintenance changes
 
+### Chapter, cleanup and PDF correctness
+
+- Chapter folders include the chapter ID and an ownership marker, preventing identical,
+  sanitized or case-insensitive titles from sharing images. Retries reuse marked folders.
+  Legacy folders remain untouched and are not automatically migrated; re-downloading can
+  leave both legacy and new folders, which should be reviewed before manual cleanup.
+- Clearing or deleting job records recomputes bookmark status from remaining jobs in the
+  same transaction. Existing downloads/queued tasks are not reset to "not downloaded".
+- PDF export is all-or-nothing: corrupt/unconvertible images produce an explicit error
+  and no partial PDF. Original images remain untouched and temporary output is removed.
+
+Validation: 155 tests passed, one Windows file-symlink permission case skipped.
+
 ### Cache and query optimization
 
 - Concurrent requests for the same detail share one fetch; cache TTL is honored,

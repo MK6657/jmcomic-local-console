@@ -285,38 +285,59 @@ def transition_job_status(job_id: str, from_statuses: list[str], to_status: str,
         conn.close()
 
 
+def _refresh_wishlist_after_job_delete(conn, album_ids):
+    """Derive bookmark status from remaining jobs using the same deletion transaction."""
+    conn.executemany(
+        """UPDATE wishlist SET download_status=COALESCE((
+            SELECT CASE
+                WHEN status='completed' THEN 'completed'
+                WHEN status IN ('running', 'paused') THEN 'downloading'
+                WHEN status='queued' THEN 'queued'
+                WHEN status='failed' THEN 'failed'
+                ELSE 'none' END
+            FROM jobs WHERE jobs.album_id=wishlist.album_id
+            ORDER BY CASE
+                WHEN status='completed' THEN 0
+                WHEN status IN ('running', 'paused') THEN 1
+                WHEN status='queued' THEN 2 ELSE 3 END,
+                created_at DESC, id DESC
+            LIMIT 1
+        ), 'none') WHERE album_id=?""",
+        [(album_id,) for album_id in album_ids],
+    )
+
+
 def delete_job(job_id: str):
-    """删除指定 job_id 的任务记录（如果是 queued 状态，同步清理 wishlist 状态）"""
+    """Delete one record and recompute the affected bookmark status atomically."""
     conn = get_db()
     try:
-        # 先查一下是否 queued 任务，以便更新 wishlist
-        row = conn.execute("SELECT album_id, status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-        if row and row["status"] == "queued" and row["album_id"]:
-            conn.execute("UPDATE wishlist SET download_status='none' WHERE album_id=?", (row["album_id"],))
-        conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
-        conn.commit()
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT album_id FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
+            if row:
+                _refresh_wishlist_after_job_delete(conn, [row["album_id"]])
     finally:
         conn.close()
 
 
 def clear_jobs_by_status(status: str | list[str]) -> int:
-    """删除指定状态的所有任务记录，返回删除的行数。
-
-    Args:
-        status: 单个状态字符串（如 'completed'）或状态列表（如 ['completed','failed','canceled']）。
-
-    Returns:
-        被删除的记录数。
-    """
+    """Delete matching records, then derive affected bookmark states from remaining jobs."""
+    statuses = [status] if isinstance(status, str) else list(status)
+    if not statuses:
+        return 0
+    placeholders = ",".join("?" for _ in statuses)
     conn = get_db()
     try:
-        if isinstance(status, str):
-            cur = conn.execute("DELETE FROM jobs WHERE status=?", (status,))
-        else:
-            placeholders = ",".join("?" for _ in status)
-            cur = conn.execute(f"DELETE FROM jobs WHERE status IN ({placeholders})", status)
-        deleted = cur.rowcount
-        conn.commit()
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            affected = conn.execute(
+                f"SELECT DISTINCT album_id FROM jobs WHERE status IN ({placeholders})", statuses,
+            ).fetchall()
+            deleted = conn.execute(
+                f"DELETE FROM jobs WHERE status IN ({placeholders})", statuses,
+            ).rowcount
+            _refresh_wishlist_after_job_delete(conn, [row["album_id"] for row in affected])
         return deleted
     finally:
         conn.close()

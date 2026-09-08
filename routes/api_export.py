@@ -21,6 +21,12 @@ from core.file_tree import safe_files
 api_export_bp = Blueprint("api_export", __name__)
 
 
+class IncompletePdfError(ValueError):
+    def __init__(self, images):
+        self.images = [path.name for path in images]
+        super().__init__(f"有 {len(self.images)} 张图片损坏或无法转换，已取消 PDF 导出；请修复或重新下载图片后重试")
+
+
 def _check_job(job_id: str):
     """校验任务是否存在、已完成、并有合法输出路径"""
     if not validate_job_id(job_id):
@@ -128,6 +134,7 @@ def _needs_pillow_conversion(img_path: Path) -> bool:
     try:
         from PIL import Image
         with Image.open(img_path) as im:
+            im.load()  # Decode pixels too: a readable header alone does not prove a complete image.
             if im.mode in ("RGBA", "LA", "PA", "P"):
                 # P 模式可能带透明 palette，统一转换最稳妥
                 return True
@@ -150,12 +157,12 @@ def _image_to_jpeg_bytes(img_path: Path) -> bytes | None:
             rgb.save(buf, format="JPEG", quality=90)
             return buf.getvalue()
     except Exception as e:
-        log.warning(f"PDF 导出跳过无法转换的图片: {img_path.name} error={e}")
+        log.warning(f"PDF 图片转换失败: {img_path.name} error={e}")
         return None
 
 
 def _build_pdf(images: list[Path], out_stream) -> int:
-    """将图片列表写入 PDF 输出流，返回成功嵌入的页数。
+    """完整写入图片列表并返回页数；任何坏图都抛错，禁止静默缺页。
 
     优先直接嵌入原图（无损、无重编码开销）；对带 alpha/动图先转 JPEG。
     如整体转换仍失败（个别图片格式异常），回退到全量 Pillow 转换。
@@ -163,14 +170,19 @@ def _build_pdf(images: list[Path], out_stream) -> int:
     import img2pdf
 
     pages: list = []
+    failed = []
     for img_path in images:
         if _needs_pillow_conversion(img_path):
             b = _image_to_jpeg_bytes(img_path)
             if b:
                 pages.append(b)
+            else:
+                failed.append(img_path)
         else:
             pages.append(str(img_path))
 
+    if failed:
+        raise IncompletePdfError(failed)
     if not pages:
         return 0
 
@@ -183,9 +195,16 @@ def _build_pdf(images: list[Path], out_stream) -> int:
     # 兜底：全部经 Pillow 归一化为 JPEG
     out_stream.seek(0)
     out_stream.truncate()
-    fallback = [b for b in (_image_to_jpeg_bytes(p) for p in images) if b]
-    if not fallback:
-        return 0
+    fallback = []
+    failed = []
+    for path in images:
+        converted = _image_to_jpeg_bytes(path)
+        if converted:
+            fallback.append(converted)
+        else:
+            failed.append(path)
+    if failed:
+        raise IncompletePdfError(failed)
     img2pdf.convert(fallback, outputstream=out_stream)
     return len(fallback)
 
@@ -213,13 +232,17 @@ def export_pdf(job_id: str):
         tmp_path = tmp.name
         with tmp:
             page_count = _build_pdf(images, tmp)
-        if page_count == 0:
+        if page_count != len(images):
             _cleanup_tmp(tmp_path)
-            return jsonify({"status": "error", "message": "没有可转换为 PDF 的图片"}), 500
+            return jsonify(status="error", message="PDF 页数不完整，已取消导出，请检查原图"), 422
 
         safe_name = _safe_export_name(output_dir)
         log.info(f"PDF 导出完成 job_id={job_id} pages={page_count}/{len(images)}")
         return _send_tmp_file(tmp_path, "application/pdf", f"{safe_name}.pdf")
+    except IncompletePdfError as e:
+        _cleanup_tmp(tmp_path)
+        log.warning(f"PDF 完整性检查失败 job_id={job_id} failed={len(e.images)}")
+        return jsonify(status="error", message=str(e), failed_images=e.images), 422
     except Exception as e:
         _cleanup_tmp(tmp_path)
         log.error(f"PDF 导出失败 job_id={job_id} error={e}")

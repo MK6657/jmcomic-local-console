@@ -287,25 +287,6 @@ def open_folder(job_id: str):
         return jsonify({"status": "error", "message": "打开文件夹失败"}), 500
 
 
-def _reset_wishlist_for_cleared_jobs(status_filter):
-    """将指定状态的 job 对应的 wishlist 状态重置为 'none'（单条 SQL 避免 N+1）"""
-    if isinstance(status_filter, str):
-        status_filter = [status_filter]
-    placeholders = ",".join("?" for _ in status_filter)
-    try:
-        from core.database import get_db
-        conn = get_db()
-        conn.execute(
-            f"""UPDATE wishlist SET download_status='none'
-                WHERE album_id IN (
-                    SELECT DISTINCT album_id FROM jobs WHERE status IN ({placeholders})
-                )""",
-            status_filter
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        log.warning(f"重置 wishlist 状态失败 status_filter={status_filter} error={e}")
 
 
 # ─── 批量清理 ───
@@ -314,7 +295,6 @@ def _reset_wishlist_for_cleared_jobs(status_filter):
 @api_jobs_bp.post("/api/jobs/clear/completed")
 def clear_completed():
     """清空所有 completed 状态的任务记录(只删记录,不删文件)"""
-    _reset_wishlist_for_cleared_jobs("completed")
     deleted = clear_jobs_by_status("completed")
     log.info(f"API清空已完成任务 deleted={deleted}")
     return jsonify({"status": "ok", "deleted": deleted})
@@ -323,7 +303,6 @@ def clear_completed():
 @api_jobs_bp.post("/api/jobs/clear/failed")
 def clear_failed():
     """清空所有 failed 状态的任务记录"""
-    _reset_wishlist_for_cleared_jobs("failed")
     deleted = clear_jobs_by_status("failed")
     log.info(f"API清空失败任务 deleted={deleted}")
     return jsonify({"status": "ok", "deleted": deleted})
@@ -332,7 +311,6 @@ def clear_failed():
 @api_jobs_bp.post("/api/jobs/clear/canceled")
 def clear_canceled():
     """清空所有 canceled 状态的任务记录"""
-    _reset_wishlist_for_cleared_jobs("canceled")
     deleted = clear_jobs_by_status("canceled")
     log.info(f"API清空已取消任务 deleted={deleted}")
     return jsonify({"status": "ok", "deleted": deleted})
@@ -341,7 +319,6 @@ def clear_canceled():
 @api_jobs_bp.post("/api/jobs/clear/finished")
 def clear_finished():
     """清空所有已完成或已结束的记录(completed/failed/canceled), 保留 queued/running"""
-    _reset_wishlist_for_cleared_jobs(["completed", "failed", "canceled"])
     deleted = clear_jobs_by_status(["completed", "failed", "canceled"])
     log.info(f"API清空已结束任务 deleted={deleted}")
     return jsonify({"status": "ok", "deleted": deleted})
