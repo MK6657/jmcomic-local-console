@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} - JMComic 下载控制台{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h4><i class="bi bi-bookmark-heart"></i> 收藏清单</h4>
+    <div>
+        <button class="btn btn-outline-info btn-sm" onclick="exportWishlist()" title="导出收藏清单">
+            <i class="bi bi-download"></i> 导出
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('import-file-input').click()" title="导入收藏清单">
+            <i class="bi bi-upload"></i> 导入
+        </button>
+        <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importWishlistFile(this)">
+        <button class="btn btn-outline-primary btn-sm" onclick="showImportModal()">
+            <i class="bi bi-upload"></i> 批量导入
+        </button>
+        <button class="btn btn-outline-success btn-sm" onclick="refreshList()">
+            <i class="bi bi-arrow-clockwise"></i> 刷新
+        </button>
+    </div>
+</div>
+
+<!-- 搜索栏 -->
+<div class="row g-2 mb-3">
+    <div class="col-md-6">
+        <input type="text" id="wishlist-search" class="form-control" placeholder="搜索标题/作者/车号..."
+               onkeydown="if(event.key==='Enter') searchWishlist()">
+    </div>
+    <div class="col-md-3">
+        <select id="wishlist-sort" class="form-select">
+            <option value="added_at">添加时间</option>
+            <option value="title">标题</option>
+            <option value="author">作者</option>
+        </select>
+    </div>
+    <div class="col-md-3">
+        <button class="btn btn-primary w-100" onclick="searchWishlist()">
+            <i class="bi bi-search"></i> 搜索
+        </button>
+    </div>
+</div>
+
+<!-- 收藏列表 -->
+<div class="table-responsive">
+    <table class="table table-hover align-middle" id="wishlist-table">
+        <thead class="table-dark">
+            <tr>
+                <th style="width:40px;"><input type="checkbox" id="select-all" onchange="toggleSelectAll()"></th>
+                <th>专辑 ID</th>
+                <th>标题</th>
+                <th>作者</th>
+                <th>下载状态</th>
+                <th>添加时间</th>
+                <th style="width:160px;">操作</th>
+            </tr>
+        </thead>
+        <tbody id="wishlist-body">
+            <tr><td colspan="7" class="text-center text-muted py-4">加载中...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- 分页 -->
+<nav id="wishlist-pagination" class="d-none">
+    <ul class="pagination pagination-sm justify-content-center"></ul>
+</nav>
+
+<!-- 批量操作按钮 -->
+<div id="batch-actions" class="d-none mb-3">
+    <button class="btn btn-success btn-sm" onclick="batchDownload()">
+        <i class="bi bi-download"></i> 批量下载
+    </button>
+    <button class="btn btn-danger btn-sm" onclick="batchRemove()">
+        <i class="bi bi-trash"></i> 批量移除
+    </button>
+    <span class="text-muted ms-2" id="selected-count">已选择 0 项</span>
+</div>
+
+<!-- 批量导入弹窗 -->
+<div class="modal fade" id="importModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">批量导入收藏</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">输入车号，支持逗号、空格、换行分隔，最多 50 个。</p>
+                <textarea class="form-control" id="import-raw" rows="6" placeholder="例如：&#10;123456, 789012&#10;345678"></textarea>
+                <div id="import-result" class="mt-2 d-none"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button class="btn btn-primary" onclick="doImport()">导入</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts_extra %}
+<script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/wishlist.js') }}"></script>
+{% endblock %}

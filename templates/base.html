@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}JMComic 下载控制台{% endblock %}</title>
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="{{ asset_url('favicon.svg') }}">
+    <link rel="alternate icon" href="/static/favicon.ico">
+
+    <!-- Bootstrap 5 CSS (本地) -->
+    <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css">
+    <!-- 自定义样式（Eye-care 护眼主题） -->
+    <link rel="stylesheet" href="{{ asset_url('css/style.css') }}">
+
+    {% block head_extra %}{% endblock %}
+</head>
+<body>
+
+<!-- ===== 顶部导航栏（Eye-care 护眼风格） ===== -->
+<nav class="navbar navbar-expand-lg navbar-eye-care">
+    <div class="container">
+        <a class="navbar-brand" href="/">
+            <i class="bi bi-download"></i> JMComic 下载控制台
+        </a>
+        <button class="navbar-toggler" type="button"
+                data-bs-toggle="collapse" data-bs-target="#mainNav"
+                aria-controls="mainNav" aria-expanded="false"
+                aria-label="切换导航">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <ul class="navbar-nav ms-auto">
+                <li class="nav-item">
+                    <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="/">
+                        <i class="bi bi-house-door"></i> 首页
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if request.path == '/search' %}active{% endif %}" href="/search">
+                        <i class="bi bi-search"></i> 搜索
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if request.path == '/downloads' %}active{% endif %}" href="/downloads">
+                        <i class="bi bi-list-ul"></i> 下载管理
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if request.path == '/wishlist' %}active{% endif %}" href="/wishlist">
+                        <i class="bi bi-bookmark-heart"></i> 收藏
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if request.path == '/library' %}active{% endif %}" href="/library">
+                        <i class="bi bi-collection"></i> 资源库
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if request.path == '/settings' %}active{% endif %}" href="/settings">
+                        <i class="bi bi-gear"></i> 设置
+                    </a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+<!-- ===== 全局提示容器 ===== -->
+<div id="global-alert-container" class="container mt-3" style="display:none;"></div>
+
+<!-- ===== 主内容区 ===== -->
+<div class="main-container container">
+    {% block content %}
+    <!-- 子模板填充 -->
+    {% endblock %}
+</div>
+
+<!-- ===== 页脚 ===== -->
+<footer class="footer">
+    <div class="container text-center">
+        <small>&copy; 2024 JMComic 下载控制台 · 仅供学习交流使用</small>
+    </div>
+</footer>
+
+<!-- ===== Toast 通知容器 ===== -->
+<div class="toast-container position-fixed bottom-0 end-0 p-3"
+     id="toast-container" style="z-index: 1080;"
+     aria-live="polite" aria-atomic="true">
+</div>
+
+<!-- Bootstrap 5 JS (本地) -->
+<script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+
+<!-- 全局 Toast 通知函数 -->
+<script>
+/** 转义 HTML 防止 XSS */
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  var div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+/**
+ * 显示 Bootstrap toast 通知
+ * @param {string} message - 显示内容
+ * @param {string} type    - 'success' | 'danger' | 'warning' | 'info'
+ */
+window.showToast = function (message, type) {
+  type = type || 'success';
+  var bgClass, icon;
+  switch (type) {
+    case 'danger':
+      bgClass = 'bg-danger text-white';
+      icon = 'bi-x-circle-fill';
+      break;
+    case 'warning':
+      bgClass = 'bg-warning text-dark';
+      icon = 'bi-exclamation-triangle-fill';
+      break;
+    case 'info':
+      bgClass = 'bg-info text-white';
+      icon = 'bi-info-circle-fill';
+      break;
+    default:
+      bgClass = 'bg-success text-white';
+      icon = 'bi-check-circle-fill';
+      break;
+  }
+
+  var container = document.getElementById('toast-container');
+  if (!container) return;
+
+  var toastEl = document.createElement('div');
+  toastEl.className = 'toast align-items-center border-0 ' + bgClass;
+  toastEl.setAttribute('role', 'alert');
+  toastEl.setAttribute('aria-live', 'assertive');
+  toastEl.setAttribute('aria-atomic', 'true');
+
+  toastEl.innerHTML = '<div class="d-flex">'
+    + '<div class="toast-body"><i class="bi ' + icon + ' me-2"></i>' + escapeHtml(message) + '</div>'
+    + '<button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="关闭"></button>'
+    + '</div>';
+
+  container.appendChild(toastEl);
+
+  if (typeof bootstrap !== 'undefined' && bootstrap.Toast) {
+    var bsToast = new bootstrap.Toast(toastEl, { autohide: true, delay: 5000 });
+    bsToast.show();
+  } else {
+    toastEl.classList.add('show');
+    setTimeout(function () {
+      toastEl.classList.remove('show');
+      setTimeout(function () { toastEl.remove(); }, 300);
+    }, 5000);
+  }
+
+  toastEl.addEventListener('hidden.bs.toast', function () {
+    toastEl.remove();
+  });
+};
+</script>
+
+<!-- 页面自定义 JS (在子模板中按需追加) -->
+{% block scripts_extra %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}JMComic 下载控制台 - 图片预览{% endblock %}
+
+{% block head_extra %}
+<style>
+/* ── 预览页专用样式 ── */
+.preview-container { max-width: 1200px; margin: 0 auto; padding: 1rem 0; }
+.preview-header { text-align: center; margin-bottom: 1.5rem; }
+.preview-header h4 { font-weight: 600; word-break: break-all; }
+.preview-header .album-title { font-size: 1.1rem; color: var(--text-secondary); }
+
+/* ── 图片加载中的 spinner 定位 ── */
+.preview-image-wrapper .loading-spinner {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1;
+}
+
+/* ── 翻页按钮 ── */
+.preview-nav .btn-nav { min-width: 120px; padding: 0.5rem 1.25rem; font-weight: 500; }
+
+/* ── 缩略图滚动条自定义 ── */
+.thumbnail-bar .thumb-container::-webkit-scrollbar { height: 6px; }
+.thumbnail-bar .thumb-container::-webkit-scrollbar-track { background: transparent; }
+.thumbnail-bar .thumb-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ── 缩略图「加载更多」按钮 ── */
+.thumbnail-bar .load-more-item {
+    flex: 0 0 auto; width: 72px; height: 96px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; border-radius: 6px;
+    border: 2px dashed var(--border);
+    transition: border-color 0.2s, background-color 0.2s;
+}
+.thumbnail-bar .load-more-item:hover {
+    border-color: var(--primary);
+    background: var(--primary-bg);
+}
+.thumbnail-bar .load-more-item i { font-size: 1.5rem; color: var(--text-tertiary); }
+.thumbnail-bar .load-more-item:hover i { color: var(--primary); }
+
+/* ── 空状态 / 错误 ── */
+.preview-error { text-align: center; padding: 4rem 1rem; }
+.preview-error i { font-size: 4rem; color: var(--text-tertiary); margin-bottom: 1rem; }
+.preview-error h5 { color: var(--text-secondary); }
+
+/* ── 跳转输入 ── */
+.page-jump { display: inline-flex; align-items: center; gap: 0.35rem; }
+.page-jump input { width: 60px; text-align: center; padding: 0.2rem 0.3rem; font-size: 0.9rem; }
+
+/* ── 预览页专用响应式（仅覆写 style.css 中的默认值） ── */
+@media (max-width: 768px) {
+    .preview-nav .btn-nav { min-width: 90px; padding: 0.4rem 0.8rem; font-size: 0.85rem; }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="preview-container">
+    <!-- 标题栏 -->
+    <div class="preview-header">
+        <div class="text-start mb-2">
+            <a href="javascript:history.back()" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-arrow-left"></i> 返回
+            </a>
+        </div>
+        <h4><i class="bi bi-book"></i> 本地阅读器</h4>
+        <div class="album-title" id="album-title">加载中...</div>
+    </div>
+
+    <!-- 错误提示（初始隐藏） -->
+    <div class="preview-error d-none" id="preview-error">
+        <i class="bi bi-emoji-frown"></i>
+        <h5 id="error-message">无法加载预览</h5>
+        <a href="/downloads" class="btn btn-outline-primary mt-3">
+            <i class="bi bi-arrow-left"></i> 返回下载管理
+        </a>
+    </div>
+
+    <!-- 加载中 -->
+    <div class="text-center py-5" id="preview-loading">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">加载中...</span>
+        </div>
+        <p class="mt-2 text-muted">正在扫描本地图片...</p>
+    </div>
+
+    <!-- 阅读器主体（初始隐藏） -->
+    <div id="reader-content" class="d-none">
+
+        <!-- 缩略图导航 -->
+        <div class="thumbnail-bar" id="thumbnail-bar">
+            <div class="thumb-container" id="thumb-container">
+                <!-- JS 动态生成 -->
+            </div>
+        </div>
+
+        <!-- 图片显示区 -->
+        <div class="preview-image-wrapper" id="image-wrapper">
+            <div class="loading-spinner d-none" id="img-spinner">
+                <div class="spinner-border text-light" role="status">
+                    <span class="visually-hidden">加载中...</span>
+                </div>
+            </div>
+            <img id="preview-image"
+                 src=""
+                 alt="预览图片"
+                 style="display:none;" />
+            <div id="no-image-hint" class="text-light" style="display:none;">
+                <i class="bi bi-image" style="font-size:3rem;"></i>
+                <p class="mt-2">选择左侧缩略图开始阅读</p>
+            </div>
+        </div>
+
+        <!-- 翻页导航 -->
+        <div class="preview-nav">
+            <button class="btn btn-outline-secondary btn-nav" id="btn-first" onclick="goPage(1)" title="首页">
+                <i class="bi bi-chevron-double-left"></i>
+            </button>
+            <button class="btn btn-outline-primary btn-nav" id="btn-prev" onclick="goPage(currentPage - 1)">
+                <i class="bi bi-chevron-left"></i> 上一页
+            </button>
+
+            <div class="page-info">
+                <span id="page-current">0</span> / <span id="page-total">0</span>
+                <span class="page-jump ms-2">
+                    <input type="number" class="form-control form-control-sm" id="page-jump-input"
+                           min="1" placeholder="跳转" onkeydown="if(event.key==='Enter')jumpToPage()" />
+                    <button class="btn btn-sm btn-outline-secondary" onclick="jumpToPage()" title="跳转">
+                        <i class="bi bi-arrow-right"></i>
+                    </button>
+                </span>
+            </div>
+
+            <button class="btn btn-outline-primary btn-nav" id="btn-next" onclick="goPage(currentPage + 1)">
+                下一页 <i class="bi bi-chevron-right"></i>
+            </button>
+            <button class="btn btn-outline-secondary btn-nav" id="btn-last" onclick="goPage(totalPages)" title="末页">
+                <i class="bi bi-chevron-double-right"></i>
+            </button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts_extra %}
+<script>var albumId = {{ album_id|tojson }};</script>
+<script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/preview.js') }}"></script>
+{% endblock %}

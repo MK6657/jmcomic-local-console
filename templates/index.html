@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}JMComic 下载控制台 - 首页{% endblock %}
+
+{% block content %}
+
+<!-- ===== 大搜索框 ===== -->
+<div class="hero-search">
+    <div class="row justify-content-center">
+        <div class="col-lg-10 col-xl-8">
+            <div class="card search-card">
+                <div class="card-body">
+                    <h4 class="text-center mb-3">
+                        <i class="bi bi-search"></i> 搜索漫画
+                    </h4>
+                    <form id="hero-search-form" action="/search" method="GET" class="row g-2">
+                        <div class="col-12 col-md-8">
+                            <input type="text"
+                                   id="hero-keyword"
+                                   name="keyword"
+                                   class="form-control form-control-lg"
+                                   placeholder="输入关键词或车号..."
+                                   autofocus>
+                        </div>
+                        <div class="col-6 col-md-2">
+                            <button type="submit" class="btn btn-primary w-100">
+                                <i class="bi bi-search"></i> 搜索
+                            </button>
+                        </div>
+                        <div class="col-6 col-md-2">
+                            <button type="button" id="hero-download-btn"
+                               class="btn btn-outline-primary w-100"
+                               onclick="window.location.href='/search?keyword=' + encodeURIComponent(document.getElementById('hero-keyword').value.trim())">
+                                <i class="bi bi-download"></i> 车号下载
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <!-- ===== 当前任务卡片 ===== -->
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-activity"></i> 当前任务</span>
+                <a href="/downloads" class="btn btn-sm btn-outline-primary">查看全部</a>
+            </div>
+            <div class="card-body">
+                {% if running_jobs %}
+                    {% for job in running_jobs %}
+                    <div class="mb-3" data-job-id="{{ job.job_id }}" data-status="running">
+                        <div class="d-flex justify-content-between mb-1">
+                            <strong>{{ job.title }}</strong>
+                            <span id="pct-{{ job.job_id }}" class="badge bg-primary">{{ job.percentage }}%</span>
+                        </div>
+                        <div class="progress">
+                            <div id="progress-{{ job.job_id }}"
+                                 class="progress-bar progress-bar-striped progress-bar-animated"
+                                 role="progressbar"
+                                 style="width: {{ job.percentage }}%"
+                                 aria-valuenow="{{ job.percentage }}"
+                                 aria-valuemin="0"
+                                 aria-valuemax="100">
+                            </div>
+                        </div>
+                        <small class="text-muted">
+                            <span id="info-{{ job.job_id }}">{{ job.current_page }} / {{ job.total_pages }} 页</span>
+                        </small>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="text-center text-muted py-4">
+                        <i class="bi bi-check-circle" style="font-size: 2rem;"></i>
+                        <p class="mt-2 mb-0">当前没有进行中的任务</p>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== 最近下载列表 ===== -->
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-clock-history"></i> 最近下载</span>
+                <a href="/downloads" class="btn btn-sm btn-outline-primary">查看全部</a>
+            </div>
+            <div class="card-body p-0">
+                {% if recent_jobs %}
+                    <div class="list-group list-group-flush">
+                    {% for job in recent_jobs %}
+                        <div class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+                            <div class="me-2 text-truncate">
+                                <strong>{{ job.title }}</strong>
+                                <br>
+                                <small class="text-muted">{{ job.completed_at }}</small>
+                            </div>
+                            <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                                {% if job.status == 'completed' %}
+                                    <span class="badge bg-success">已完成</span>
+                                {% elif job.status == 'failed' %}
+                                    <span class="badge bg-danger">失败</span>
+                                {% else %}
+                                    <span class="badge bg-secondary">{{ job.status }}</span>
+                                {% endif %}
+                                {% if job.output_path %}
+                                <a href="javascript:void(0)"
+                                   onclick="window.openFolder({{ job.job_id | tojson }})"
+                                   class="btn btn-sm btn-outline-secondary"
+                                   title="打开文件夹">
+                                    <i class="bi bi-folder-open"></i>
+                                </a>
+                                {% endif %}
+                            </div>
+                        </div>
+                    {% endfor %}
+                    </div>
+                {% else %}
+                    <div class="text-center text-muted py-4">
+                        <i class="bi bi-inbox" style="font-size: 2rem;"></i>
+                        <p class="mt-2 mb-0">暂无下载记录</p>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts_extra %}
+<script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/sse-client.js') }}"></script>
+<script src="{{ asset_url('js/home.js') }}"></script>
+{% endblock %}

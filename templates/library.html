@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}资源库 - JMComic 下载控制台{% endblock %}
+
+{% block content %}
+
+<!-- ===== 标题栏 ===== -->
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div>
+        <h4 class="mb-0"><i class="bi bi-collection"></i> 资源库</h4>
+        <div class="library-stats mt-1" id="library-stats">
+            <span class="stat-item"><i class="bi bi-book"></i> 共 <strong id="stat-total">-</strong> 条</span>
+            <span class="stat-item"><i class="bi bi-bookmark"></i> 收藏 <strong id="stat-wishlist">-</strong></span>
+            <span class="stat-item"><i class="bi bi-download"></i> 已下载 <strong id="stat-downloaded">-</strong></span>
+            <span class="stat-item"><i class="bi bi-tags"></i> 标签 <strong id="stat-tags">-</strong></span>
+        </div>
+    </div>
+    <div class="d-flex gap-2">
+        <button class="btn btn-outline-info btn-sm" onclick="reSyncAll()" title="从 18comic 重新同步所有标签">
+            <i class="bi bi-arrow-repeat"></i> 同步所有标签
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="refreshLibrary()" title="刷新">
+            <i class="bi bi-arrow-clockwise"></i> 刷新
+        </button>
+    </div>
+</div>
+
+<!-- ===== 标签云（可折叠） ===== -->
+<div class="card mb-3">
+    <div class="card-body py-2 px-3">
+        <div class="tag-cloud-header" onclick="toggleTagCloud()" id="tag-cloud-toggle">
+            <i class="bi bi-chevron-down"></i>
+            <strong><i class="bi bi-tags"></i> 按标签筛选</strong>
+            <span class="text-muted small ms-2" id="tag-filter-hint"></span>
+        </div>
+        <div id="tag-cloud-container">
+            <div class="tag-cloud" id="tag-cloud"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== 筛选栏 ===== -->
+<div class="library-filters">
+    <div class="flex-fill" style="min-width:180px;">
+        <input type="text" id="library-search" class="form-control" placeholder="搜索标题/作者/车号/标签..."
+               oninput="debouncedSearch()">
+    </div>
+    <div style="min-width:130px;">
+        <select id="library-status" class="form-select" onchange="loadLibrary(1)">
+            <option value="">状态：全部</option>
+            <option value="downloaded">已下载</option>
+            <option value="undownloaded">未下载</option>
+        </select>
+    </div>
+    <div style="min-width:130px;">
+        <select id="library-sort" class="form-select" onchange="loadLibrary(1)">
+            <option value="updated_at">排序：更新时间</option>
+            <option value="title">排序：标题</option>
+            <option value="added_at">排序：添加时间</option>
+        </select>
+    </div>
+    <button class="btn btn-outline-danger btn-sm" onclick="clearFilters()" title="清除筛选" id="clear-filters-btn" style="display:none;">
+        <i class="bi bi-x-circle"></i> 清除筛选
+    </button>
+</div>
+
+<!-- ===== 漫画网格列表 ===== -->
+<div id="library-grid" class="library-grid"></div>
+
+<!-- ===== 分页 ===== -->
+<div id="library-pagination" class="pagination-container"></div>
+
+{% endblock %}
+
+{% block head_extra %}{% endblock %}
+
+{% block scripts_extra %}
+<script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/library.js') }}"></script>
+{% endblock %}

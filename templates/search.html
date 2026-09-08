@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}JMComic 下载控制台 - 搜索{% endblock %}
+
+{% block content %}
+
+<!-- ===== 搜索栏 ===== -->
+<div class="card mb-4">
+    <div class="card-body">
+        <form id="search-form" class="row g-3 align-items-end">
+            <div class="col-12 col-md-5">
+                <label for="search-input" class="form-label">关键词或车号</label>
+                <input type="text"
+                       id="search-input"
+                       class="form-control"
+                       placeholder="输入关键词或车号..."
+                       value="{{ keyword or '' }}">
+            </div>
+            <div class="col-6 col-md-3">
+                <label for="sort-select" class="form-label">排序</label>
+                <select id="sort-select" class="form-select">
+                    <option value="latest" {% if sort == 'latest' %}selected{% endif %}>最新</option>
+                    <option value="views" {% if sort == 'views' %}selected{% endif %}>最多观看</option>
+                    <option value="likes" {% if sort == 'likes' %}selected{% endif %}>最多点赞</option>
+                </select>
+            </div>
+            <div class="col-6 col-md-2">
+                <label for="page-size-select" class="form-label">每页数量</label>
+                <select id="page-size-select" class="form-select">
+                    <option value="20" {% if page_size == 20 %}selected{% endif %}>20</option>
+                    <option value="50" {% if page_size == 50 %}selected{% endif %}>50</option>
+                    <option value="100" {% if page_size == 100 %}selected{% endif %}>100</option>
+                </select>
+            </div>
+            <div class="col-12 col-md-2">
+                <button type="button" id="search-btn" class="btn btn-primary w-100">
+                    <i class="bi bi-search"></i> 搜索
+                </button>
+            </div>
+        </form>
+        <div class="form-text mt-2">支持 18comic 搜索语法：<code>全彩 人妻</code>（OR）<code>+全彩 +人妻</code>（AND）<code>全彩 -人妻</code>（排除）</div>
+    </div>
+</div>
+
+<!-- ===== 搜索历史 ===== -->
+<div id="search-history-container" class="mb-4 d-none">
+    <div class="card">
+        <div class="card-body">
+            <h6 class="card-subtitle mb-2 text-muted">
+                <i class="bi bi-clock-history"></i> 搜索历史
+            </h6>
+            <div id="search-history-tags" class="d-flex flex-wrap gap-2"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== 搜索状态 ===== -->
+<div id="search-status" class="text-muted mb-2 d-none"></div>
+
+<!-- ===== 搜索结果容器 ===== -->
+<div id="search-results">
+    <div class="text-center text-muted py-5">
+        <i class="bi bi-search" style="font-size: 3rem;"></i>
+        <p class="mt-3">在上方输入关键词开始搜索</p>
+    </div>
+</div>
+
+<!-- ===== 分页容器 ===== -->
+<div id="pagination"></div>
+
+{% endblock %}
+
+{% block scripts_extra %}
+<script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/search.js') }}"></script>
+{% endblock %}

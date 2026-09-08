@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}服务器错误 - JMComic 下载控制台{% endblock %}
+
+{% block content %}
+<div class="text-center py-5">
+    <div class="mb-4" style="font-size: 5rem; color: var(--error);">
+        <i class="bi bi-exclamation-triangle"></i>
+    </div>
+    <h3 class="mb-3">服务器内部错误</h3>
+    <p class="text-muted mb-4">服务遇到了问题，请稍后重试。如问题持续，请查看应用日志。</p>
+    <div class="d-flex justify-content-center gap-3">
+        <a href="/" class="btn btn-primary">
+            <i class="bi bi-house-door"></i> 返回首页
+        </a>
+        <a href="/downloads" class="btn btn-outline-secondary">
+            <i class="bi bi-list-ul"></i> 查看下载管理
+        </a>
+    </div>
+</div>
+{% endblock %}

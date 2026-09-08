@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% block title %}JMComic 下载控制台 - 设置{% endblock %}
+
+{% block content %}
+
+<h4 class="mb-4"><i class="bi bi-gear"></i> 设置</h4>
+
+<div id="settings-alert" class="d-none"></div>
+
+<form id="settings-form" novalidate>
+
+    <!-- ===== A. 基础设置 ===== -->
+    <div class="settings-section">
+        <h5><i class="bi bi-sliders"></i> 基础设置</h5>
+        <div class="row g-3">
+            <div class="col-12" data-setting-key="download_root">
+                <label for="download_root" class="form-label">下载目录</label>
+                <div class="input-group">
+                    <input type="text" id="download_root" name="download_root"
+                           class="form-control" value="{{ settings.download_root or '' }}" readonly>
+                </div>
+                <div class="form-text">第一版下载目录固定为项目根目录下的 <code>downloads/</code> 文件夹</div>
+            </div>
+            <div class="col-12" data-setting-key="skip_existing">
+                <div class="form-check">
+                    <input type="checkbox" id="skip_existing" name="skip_existing"
+                           class="form-check-input" value="true"
+                           {% if settings.skip_existing == 'true' %}checked{% endif %}>
+                    <label class="form-check-label" for="skip_existing">跳过已存在的文件</label>
+                </div>
+                <div class="form-text">启用后，已下载的图片将自动跳过，避免重复下载</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== B. 网络设置 ===== -->
+    <div class="settings-section">
+        <h5><i class="bi bi-globe"></i> 网络设置</h5>
+        <div class="row g-3">
+            <div class="col-12 col-md-6" data-setting-key="proxy">
+                <label for="proxy" class="form-label">代理地址</label>
+                <input type="text" id="proxy" name="proxy" class="form-control"
+                       placeholder="例如: http://127.0.0.1:7890"
+                       value="{{ settings.proxy or '' }}">
+                <div class="form-text">
+                    HTTP 代理（留空则不使用代理）<br>
+                    <strong>格式示例：</strong>
+                    <code>http://127.0.0.1:7890</code>、
+                    <code>http://user:pass@proxy.example.com:8080</code>
+                </div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="col-6 col-md-3" data-setting-key="timeout">
+                <label for="timeout" class="form-label">超时（秒）</label>
+                <input type="number" id="timeout" name="timeout" class="form-control"
+                       min="5" max="120" value="{{ settings.timeout or 30 }}">
+                <div class="form-text">建议范围：<strong>10-60</strong> 秒。网络较差时可适当调高</div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="col-6 col-md-3" data-setting-key="retry_times">
+                <label for="retry_times" class="form-label">重试次数</label>
+                <input type="number" id="retry_times" name="retry_times" class="form-control"
+                       min="0" max="20" value="{{ settings.retry_times or 3 }}">
+                <div class="form-text">建议范围：<strong>1-5</strong> 次。设为 0 表示不重试</div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="col-12 col-md-6" data-setting-key="client_type">
+                <label for="client_type" class="form-label">客户端类型</label>
+                <select id="client_type" name="client_type" class="form-select">
+                    <option value="html" {% if settings.client_type == 'html' %}selected{% endif %}>HTML（网页端，推荐）</option>
+                    <option value="api"  {% if settings.client_type == 'api' %}selected{% endif %}>API（接口端）</option>
+                </select>
+                <div class="form-text">
+                    <strong>HTML</strong>（网页端）兼容性更好，推荐使用；
+                    <strong>API</strong>（接口端）速度更快但可能不稳定
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== C. 下载设置 ===== -->
+    <div class="settings-section">
+        <h5><i class="bi bi-download"></i> 下载设置</h5>
+        <div class="row g-3">
+            <div class="col-12 col-md-6" data-setting-key="max_running_jobs">
+                <label for="max_running_jobs" class="form-label">最大同时任务数</label>
+                <input type="number" id="max_running_jobs" name="max_running_jobs"
+                       class="form-control" min="1" max="5"
+                       value="{{ settings.max_running_jobs or 1 }}">
+                <div class="form-text">
+                    建议范围：<strong>1-3</strong>。<br>
+                    <span class="text-warning"><i class="bi bi-exclamation-triangle"></i> 建议保持为 1，避免触发风控</span>
+                </div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="col-6 col-md-3" data-setting-key="image_threads">
+                <label for="image_threads" class="form-label">图片并发数</label>
+                <input type="number" id="image_threads" name="image_threads"
+                       class="form-control" min="1" max="50"
+                       value="{{ settings.image_threads or 20 }}">
+                <div class="form-text">同时下载的图片数量，建议 10-30</div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="col-6 col-md-3" data-setting-key="photo_threads">
+                <label for="photo_threads" class="form-label">章节并发数</label>
+                <input type="number" id="photo_threads" name="photo_threads"
+                       class="form-control" min="1" max="10"
+                       value="{{ settings.photo_threads or 1 }}">
+                <div class="form-text">同时下载的章节数量，建议保持为 1</div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="col-12 col-md-6">
+                <label class="form-label">图片格式</label>
+                <input type="text" class="form-control" value="WebP" readonly>
+                <div class="form-text">第一版统一保存为 WebP 格式</div>
+            </div>
+            <div class="col-12 col-md-6" data-setting-key="organize_mode">
+                <label for="organize_mode" class="form-label">下载后自动整理目录</label>
+                <select id="organize_mode" name="organize_mode" class="form-select">
+                    <option value="none" {% if settings.organize_mode == 'none' %}selected{% endif %}>不整理（保持现有结构）</option>
+                    <option value="by_author" {% if settings.organize_mode == 'by_author' %}selected{% endif %}>按作者整理（作者名/漫画名/章节）</option>
+                    <option value="flat" {% if settings.organize_mode == 'flat' %}selected{% endif %}>扁平化（去掉章节子目录）</option>
+                </select>
+                <div class="form-text">
+                    下载完成后自动调整目录结构。<br>
+                    <strong>不整理：</strong>保持 <code>downloads/漫画名/章节/图片</code> 结构；<br>
+                    <strong>按作者整理：</strong>重组为 <code>downloads/作者名/漫画名/章节/图片</code>；<br>
+                    <strong>扁平化：</strong>合并为 <code>downloads/漫画名/图片</code>（章节前缀命名）。
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== D. 下载后处理 ===== -->
+    <div class="settings-section">
+        <h5><i class="bi bi-archive"></i> 下载后处理</h5>
+        <div class="row g-3">
+            <div class="col-12" data-setting-key="auto_pack">
+                <div class="form-text mb-3">下载完成后自动将漫画打包为 .cbz 格式</div>
+                <div class="form-check form-switch mb-3">
+                    <input type="checkbox" id="auto_pack" name="auto_pack"
+                           class="form-check-input" role="switch" value="true"
+                           {% if settings.auto_pack == 'true' %}checked{% endif %}>
+                    <label class="form-check-label" for="auto_pack">
+                        <strong>自动打包 CBZ</strong>
+                    </label>
+                </div>
+                <div class="form-check form-switch ms-4" id="delete_originals_wrapper" data-setting-key="delete_originals">
+                    <input type="checkbox" id="delete_originals" name="delete_originals"
+                           class="form-check-input" role="switch" value="true"
+                           {% if settings.delete_originals == 'true' %}checked{% endif %}
+                           {% if settings.auto_pack != 'true' %}disabled{% endif %}>
+                    <label class="form-check-label" for="delete_originals">
+                        打包后删除原文件
+                    </label>
+                    <div class="form-text text-muted small">仅在自动打包开启时可配置</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== E. 定时下载设置 ===== -->
+    <div class="settings-section">
+        <h5><i class="bi bi-clock-history"></i> 定时下载</h5>
+        <div class="row g-3">
+            <div class="col-12" data-setting-key="schedule_enabled">
+                <div class="form-check form-switch">
+                    <input type="checkbox" id="schedule_enabled" name="schedule_enabled"
+                           class="form-check-input" role="switch" value="true"
+                           {% if settings.schedule_enabled == 'true' %}checked{% endif %}>
+                    <label class="form-check-label" for="schedule_enabled">
+                        <strong>启用定时下载</strong>
+                    </label>
+                </div>
+                <div class="form-text">
+                    启用后，系统将在设定的时间段内自动启动队列中的 queued 任务。
+                    未启用时，queued 任务会立即自动开始下载（现有行为）。
+                </div>
+            </div>
+            <div class="col-6 col-md-3" data-setting-key="schedule_start">
+                <label for="schedule_start" class="form-label">开始时间（时）</label>
+                <select id="schedule_start" name="schedule_start" class="form-select">
+                    {% for h in range(24) %}
+                    <option value="{{ h }}" {% if settings.schedule_start|string == h|string %}selected{% endif %}>{{ "%02d"|format(h) }}:00</option>
+                    {% endfor %}
+                </select>
+                <div class="form-text">下载窗口的起始小时（24小时制）</div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="col-6 col-md-3" data-setting-key="schedule_end">
+                <label for="schedule_end" class="form-label">结束时间（时）</label>
+                <select id="schedule_end" name="schedule_end" class="form-select">
+                    {% for h in range(24) %}
+                    <option value="{{ h }}" {% if settings.schedule_end|string == h|string %}selected{% endif %}>{{ "%02d"|format(h) }}:00</option>
+                    {% endfor %}
+                </select>
+                <div class="form-text">下载窗口的结束小时（24小时制）</div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="col-12">
+                <div class="alert alert-info mb-0 py-2" role="alert">
+                    <i class="bi bi-info-circle"></i>
+                    <strong>说明：</strong>
+                    默认时间段为 <strong>23:00 ~ 07:00</strong>（夜间），
+                    适合在空闲时段自动下载。
+                    开始时间大于结束时间表示跨天（例如 23:00 ~ 07:00）。
+                    启用定时下载后，只有在此时间段内才会自动启动队列中的 queued 任务。
+                    您仍可随时手动启动下载，不受时间段限制。
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== 操作按钮 ===== -->
+    <div class="d-grid gap-2 d-md-flex justify-content-md-end mb-4">
+        <button type="button" id="export-settings-btn" class="btn btn-outline-secondary btn-lg px-4">
+            <i class="bi bi-download"></i> 导出设置
+        </button>
+        <button type="button" id="import-settings-btn" class="btn btn-outline-info btn-lg px-4">
+            <i class="bi bi-upload"></i> 导入设置
+        </button>
+        <input type="file" id="import-settings-file" accept=".json,application/json" style="display:none">
+        <button type="button" id="save-settings-btn" class="btn btn-primary btn-lg px-5">
+            <i class="bi bi-floppy"></i> 保存设置
+        </button>
+    </div>
+
+</form>
+
+{% endblock %}
+
+{% block scripts_extra %}
+<script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/settings.js') }}"></script>
+{% endblock %}

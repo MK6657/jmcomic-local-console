@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+# Build
+build/
+dist/
+releases/
+
+# Runtime data（整目录忽略，仅保留占位文件；
+# 旧规则漏掉了轮转日志 app.log.2026-07-18 这类不以 .log 结尾的文件）
+runtime/data/*
+!runtime/data/.gitkeep
+runtime/logs/
+
+# Downloads (user content)
+downloads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Hermes / AI tools
+.hermes/
+.codebase-memory/
+
+# Temporary
+_preview/
+
+# Local environments, secrets and nested repositories
+.venv/
+venv/
+.worktrees/
+.pytest_cache/
+.env
+.env.*
+*.pem
+*.key
+参考项目/
+docs/reports/
+tests/_test_export_data/
+tests/*_report.json

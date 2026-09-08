@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}页面未找到 - JMComic 下载控制台{% endblock %}
+
+{% block content %}
+<div class="text-center py-5">
+    <div class="mb-4" style="font-size: 5rem; color: var(--warning);">
+        <i class="bi bi-emoji-frown"></i>
+    </div>
+    <h3 class="mb-3">页面未找到</h3>
+    <p class="text-muted mb-4">你访问的页面不存在，请检查 URL 是否正确。</p>
+    <div class="d-flex justify-content-center gap-3">
+        <a href="/" class="btn btn-primary">
+            <i class="bi bi-house-door"></i> 返回首页
+        </a>
+        <a href="javascript:history.back()" class="btn btn-outline-secondary">
+            <i class="bi bi-arrow-left"></i> 返回上一页
+        </a>
+    </div>
+</div>
+{% endblock %}
