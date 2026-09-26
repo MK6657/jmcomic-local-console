@@ -20,7 +20,7 @@ from jmcomic import (
 )
 
 from . import database as db
-from .logger import log
+from .logger import log, bind_request_id
 from .progress import progress_manager
 from .settings import get_settings, build_jmcomic_option
 from .validation import safe_dirname as _safe_dirname
@@ -44,6 +44,8 @@ _clients_lock = threading.Lock()
 # 标记随对象存活，invalidate_option_cache() 并发清缓存也不会误判。
 _JM_SHARED_ATTR = "_jm_downloader_shared"
 _JM_CLOSED_ATTR = "_jm_downloader_closed"
+# invalidate_option_cache() 每调用一次加 1：长期持有 client 的一方（在线阅读的取图连接池）据此丢弃按旧设置建的 client
+_option_generation = 0
 
 
 def _get_or_create_option():
@@ -59,9 +61,10 @@ def _get_or_create_option():
 
 def invalidate_option_cache():
     """Retire the old shared client; close it only after its last request releases it."""
-    global _global_option, _global_client
+    global _global_option, _global_client, _option_generation
     with _option_lock:
         previous = _global_client
+        _option_generation += 1
         _global_option = None
         _global_client = None
         if previous is not None:
@@ -88,6 +91,26 @@ def get_client(shared=True):
         with _clients_lock:
             _active_independent_clients += 1
         return client, option
+
+
+def option_generation() -> int:
+    """当前 jmcomic 设置的版本号；设置保存（invalidate_option_cache）后变化。"""
+    return _option_generation
+
+
+def new_image_client():
+    """在线阅读取图用的 client：由 online_reader 的连接池长期持有、逐个请求独占复用，用完 close_client() 关闭。
+
+    与 get_client() 用同一份 option（代理、impersonate、请求头规则都一样），只多一项：curl 句柄不绑定线程。
+    curl_cffi 的 Session 默认每个线程一个 curl 句柄，换一个线程用同一个 client 仍是新连接、新 TLS 握手；
+    池里的 client 会被不同的请求线程轮流使用，所以改用 client 自己的句柄，连接随 client 复用。
+    不计入 get_active_client_count()（池的大小有上限，不是泄漏）。"""
+    with _option_lock:
+        option = _get_or_create_option()
+        overrides = {}
+        if option.client.postman.src_dict.get("type") == "curl_cffi_session":
+            overrides["use_thread_local_curl"] = False
+        return option.new_jm_client(**overrides)
 
 
 def get_active_client_count() -> int:
@@ -183,21 +206,24 @@ def _download_image_single_attempt(
     client, job_id, album_id, album, output_path,
     photo, idx, img, img_url, img_path, scramble_id,
     done_pages, total_pages, failed_pages, pending_images,
-    tracker, photo_dir, pass_num, timeout, lock,
+    tracker, photo_dir, pass_num, timeout, lock, refetch_gif=False,
 ):
     """单张图片单次下载尝试。
     成功 → done_pages +1
     超时且是首趟 → 记录到 pending_images
     失败且是末趟 → 记录到 failed_pages
     使用传入的每任务锁 lock，避免跨任务争用模块级 _download_lock。
+    GIF 页（image_is_gif）不切片，保存为保留全部帧的动画 WebP（文件名仍是 NNNNN.webp）。
     """
     img_name = f"{idx + 1:05d}.webp"
     img_path = photo_dir / img_name if not str(img_path).startswith(str(photo_dir)) else img_path
     if not is_safe_path(img_path) or not is_safe_path(photo_dir):
         raise ValueError("图片输出路径越权")
 
+    gif = image_is_gif(img)
     skip = get_settings().get("skip_existing", "true") == "true"
-    if skip and pass_num == 1 and _valid_image(img_path):
+    # refetch_gif：章节目录是旧版本下载的（GIF 页被切片/只剩第一帧），GIF 页不能按“已存在”跳过
+    if skip and pass_num == 1 and not (gif and refetch_gif) and _valid_image(img_path):
         with lock:
             done_pages[0] += 1
         if tracker:
@@ -209,18 +235,32 @@ def _download_image_single_attempt(
             })
         return
 
-    tmp_path = None
+    tmp_path = raw_gif = None
     try:
         # Never overwrite a previous valid image before a replacement is verified.
         fd, name = tempfile.mkstemp(prefix=img_path.stem + ".", suffix=img_path.suffix, dir=photo_dir)
         os.close(fd)
         tmp_path = Path(name)
-        client.download_image(
-            img_url=img_url,
-            img_save_path=str(tmp_path),
-            scramble_id=scramble_id,
-            decode_image=True,
-        )
+        if gif:
+            # GIF 页：先按 .gif 原样保存（不解码、不切片；扩展名相同 jmcomic 就不经 PIL 转换），
+            # 再由 _save_gif_as_webp 把全部帧写成动画 WebP。直接让 jmcomic 存成 .webp 只会留下第一帧。
+            fd, name = tempfile.mkstemp(prefix=img_path.stem + ".", suffix=".gif", dir=photo_dir)
+            os.close(fd)
+            raw_gif = Path(name)
+            client.download_image(
+                img_url=img_url,
+                img_save_path=str(raw_gif),
+                scramble_id=None,
+                decode_image=False,
+            )
+            _save_gif_as_webp(raw_gif, tmp_path)
+        else:
+            client.download_image(
+                img_url=img_url,
+                img_save_path=str(tmp_path),
+                scramble_id=scramble_id,
+                decode_image=True,
+            )
         # 下载成功但文件可能为空（jmcomic 静默失败），校验后纠正
         if not _valid_image(tmp_path):
             raise IOError("下载结果不是完整有效的图片")
@@ -252,6 +292,12 @@ def _download_image_single_attempt(
                 log.warning(f"图片下载最终失败 job_id={job_id} error={err_msg}")
                 failed_pages.append(err_msg)
                 db.update_job(job_id, error_message=err_msg[:500])
+    finally:
+        if raw_gif is not None:
+            try:
+                raw_gif.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     with lock:
         progress_pct = round(done_pages[0] / total_pages * 100, 1) if total_pages > 0 else 0
@@ -265,6 +311,25 @@ def _download_image_single_attempt(
             })
 
 
+def _save_gif_as_webp(gif_path, webp_path) -> None:
+    """把原样取回的 GIF 页写成 WebP：多帧的写成动画 WebP（逐帧时长与循环次数照搬），单帧的写成普通 WebP。
+
+    jmcomic 按扩展名转换时只调用 Image.save(path)（没有 save_all），GIF 只会剩下第一帧；本地阅读器、
+    CBZ/ZIP 打包都按 .webp 处理这些页面，动画 WebP 在浏览器里照常播放，PDF 导出只取首帧。"""
+    from PIL import Image, ImageSequence
+    with Image.open(gif_path) as image:
+        if getattr(image, "n_frames", 1) <= 1:
+            image.save(webp_path, "WEBP")
+            return
+        # GIF 没有循环扩展时只播放一次（WebP loop=1）；loop=0 两者都表示无限循环
+        loop = image.info.get("loop", 1)
+        # 浏览器把 ≤10ms（含 0）的 GIF 帧按 100ms 播放；WebP 不做这个修正，照搬会快得看不清
+        durations = [frame.info.get("duration") or 0 for frame in ImageSequence.Iterator(image)]
+        durations = [duration if duration > 10 else 100 for duration in durations]
+        image.seek(0)
+        image.save(webp_path, "WEBP", save_all=True, duration=durations, loop=loop)
+
+
 def _valid_image(path):
     try:
         from PIL import Image
@@ -276,13 +341,14 @@ def _valid_image(path):
 
 
 def _submit_client_call(pool, client, fn, *args, **kwargs):
-    """Keep a shared transport leased until the future actually finishes/cancels."""
+    """Keep a shared transport leased until the future actually finishes/cancels.
+    The worker thread inherits the caller's request_id, so jmcomic's retry/failure records join its trace."""
     shared = client is not None and getattr(client, _JM_SHARED_ATTR, False)
     if shared:
         with _option_lock:
             client._jm_users += 1
     try:
-        future = pool.submit(fn, *args, **kwargs)
+        future = pool.submit(bind_request_id(fn), *args, **kwargs)
     except Exception:
         if shared:
             close_client(client)
@@ -304,7 +370,8 @@ def _call_with_timeout(label: str, timeout: float, timeout_msg: str, fn, *args, 
     try:
         result = fut.result(timeout=timeout)
     except Exception as e:
-        log.warning(f"{label} 超时或失败 error={e}")
+        # 超时的 TimeoutError() 没有文字，带上类型才看得出是超时还是上游报错
+        log.warning(f"{label} 超时或失败 error={type(e).__name__}: {e}")
         pool.shutdown(wait=False)  # 不阻塞请求线程；挂起的工作线程由其自身超时终结
         raise TimeoutError(timeout_msg)
     pool.shutdown(wait=True)
@@ -364,6 +431,56 @@ def search_albums(keyword: str, page: int = 1, page_size: int = 20, sort: str = 
     }
 
 
+def check_album_photos(client, album, timeout: float = 15, failed: list | None = None) -> list:
+    """并行补全各章节的图片列表（page_arr），避免逐章串行 HTTP 请求。
+
+    check_photo 原地更新 photo；失败或超时的章节保留原样（page_arr 为空，页数按 0 计）。
+    传入 failed 列表时，把这些没取到的章节追加进去（调用方据此区分“网络失败”和“确实没有页面”）。
+    详情页与在线阅读共用。
+    """
+    photo_list = list(album)
+    # 预先设置 from_album，避免 check_photo 内部重复调用 get_album_detail
+    for photo in photo_list:
+        if getattr(photo, 'from_album', None) is None:
+            photo.from_album = album
+    # 已有 page_arr 的章节直接跳过 check
+    pending = [photo for photo in photo_list if not getattr(photo, 'page_arr', None)]
+    if not pending:
+        return photo_list
+    # 独立线程池 + 手动 shutdown(wait=False)：
+    # 不能用 with 语法 —— __exit__ 会 shutdown(wait=True)，
+    # 阻塞等待挂起的 check_photo，让超时保护形同虚设。
+    check_pool = ThreadPoolExecutor(max_workers=min(len(pending), 10))
+    fut_map = {_submit_client_call(check_pool, client, client.check_photo, photo): photo for photo in pending}
+    try:
+        for fut in as_completed(fut_map, timeout=timeout):
+            try:
+                fut.result()
+            except Exception as e:
+                log.warning(f"获取 photo 详情失败 photo_id={fut_map[fut].photo_id} error={type(e).__name__}: {e}")
+    except TimeoutError:
+        unfinished = sum(1 for fut in fut_map if not fut.done())
+        log.warning(f"check_photo 超时（{timeout}s），album_id={getattr(album, 'album_id', '?')}，"
+                    f"已跳过 {unfinished} 个未完成章节")
+    finally:
+        check_pool.shutdown(wait=False, cancel_futures=True)
+    if failed is not None:
+        failed.extend(photo for fut, photo in fut_map.items()
+                      if not fut.done() or fut.cancelled() or fut.exception() is not None)
+    return photo_list
+
+
+def image_is_gif(image) -> bool:
+    """GIF 页没有加扰：jmcomic 自己的下载器（JmOption.decide_download_image_decode）从不解码 GIF。
+    按加扰切片处理会把它切成错位的横条；按扩展名直接转存成 .webp 也只剩第一帧。所以在线阅读原样缓存 GIF，
+    下载任务原样取回后由 _save_gif_as_webp 写成动画 WebP。"""
+    flag = getattr(image, "is_gif", None)
+    if isinstance(flag, bool):
+        return flag
+    url = str(getattr(image, "download_url", "") or "")
+    return url.split("?", 1)[0].lower().endswith(".gif")
+
+
 def get_album_detail(album_id: str) -> dict:
     """获取漫画详情，带 20 秒超时防止阻塞 Waitress 线程"""
     log.info(f"获取专辑详情 album_id={album_id}")
@@ -376,50 +493,7 @@ def get_album_detail(album_id: str) -> dict:
         )
 
         photos = []
-        # 并行检查所有 photo，避免逐章串行 HTTP 请求
-        photo_list = list(album)
-        checked = {}
-        # 预先设置 from_album，避免 check_photo 内部重复调用 get_album_detail
-        for photo in photo_list:
-            if not hasattr(photo, 'from_album') or photo.from_album is None:
-                photo.from_album = album
-        # 已有 page_arr 的章节直接跳过 check
-        pending_photos = []
-        for photo in photo_list:
-            if hasattr(photo, 'page_arr') and photo.page_arr:
-                checked[id(photo)] = photo
-            else:
-                pending_photos.append(photo)
-        # 独立线程池 + 手动 shutdown(wait=False)：
-        # 不能用 with 语法 —— __exit__ 会 shutdown(wait=True)，
-        # 阻塞等待挂起的 check_photo，让 15s 超时保护形同虚设。
-        check_pool = None
-        fut_map = {}
-        try:
-            if pending_photos:
-                check_pool = ThreadPoolExecutor(max_workers=min(len(pending_photos), 10))
-                for photo in pending_photos:
-                    fut = _submit_client_call(check_pool, client, client.check_photo, photo)
-                    fut_map[fut] = photo
-                for fut in as_completed(fut_map, timeout=15):
-                    photo = fut_map[fut]
-                    try:
-                        fut.result()
-                        checked[id(photo)] = photo
-                    except Exception:
-                        checked[id(photo)] = photo  # 失败也保留，page_count 为 0
-                        log.warning(f"获取 photo 详情失败 photo_id={photo.photo_id}")
-        except TimeoutError:
-            log.warning(f"check_photo 超时（15s），album_id={album_id}，已跳过 {len(fut_map)} 个未完成章节")
-            for photo in photo_list:
-                if id(photo) not in checked:
-                    checked[id(photo)] = photo
-        finally:
-            if check_pool is not None:
-                check_pool.shutdown(wait=False, cancel_futures=True)
-
-        for photo in photo_list:
-            p = checked.get(id(photo), photo)
+        for p in check_album_photos(client, album):
             page_count = len(p) if hasattr(p, '__len__') and hasattr(p, 'page_arr') and p.page_arr else 0
             photos.append({
                 "photo_id": str(p.photo_id),
@@ -575,6 +649,48 @@ def _remove_empty_dir(path: Path):
         pass  # 目录非空或无权删除，忽略
 
 
+# 章节目录标记 .jm-chapter.json：{"photo_id": ..., "format": N}。format 2 起 GIF 页不切片、保留全部帧；
+# 没有 format（旧版本创建）的目录里 GIF 页可能被切成错位横条或只剩第一帧，重新下载时这些页不能按
+# “已存在”跳过（skip_existing）。整本下载成功后由 _mark_chapter_current 升级标记，之后不再重取。
+_CHAPTER_MARKER = ".jm-chapter.json"
+_CHAPTER_FORMAT = 2
+
+
+def _chapter_format(directory) -> int:
+    """章节目录的格式版本；读不到或旧标记（只有 photo_id）视为 1。"""
+    import json
+    try:
+        value = json.loads((Path(directory) / _CHAPTER_MARKER).read_text(encoding="utf-8")).get("format", 1)
+    except (OSError, ValueError, AttributeError):
+        return 1
+    return value if isinstance(value, int) and not isinstance(value, bool) else 1
+
+
+def _mark_chapter_current(album_dir, photo) -> None:
+    """本章节的每一页都已按当前格式写好：把标记升级到 _CHAPTER_FORMAT。先写临时文件再替换——
+    写坏的标记会让 _chapter_output_dir 不再认领这个目录。失败只记录，下次重新下载会再重取 GIF 页。"""
+    import json
+    tmp = None
+    try:
+        directory = _chapter_output_dir(album_dir, photo)
+        if _chapter_format(directory) >= _CHAPTER_FORMAT:
+            return
+        fd, name = tempfile.mkstemp(prefix=_CHAPTER_MARKER + ".", suffix=".tmp", dir=directory)
+        tmp = Path(name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"photo_id": str(photo.photo_id), "format": _CHAPTER_FORMAT}, handle)
+        os.replace(tmp, directory / _CHAPTER_MARKER)
+        tmp = None
+    except (OSError, ValueError) as e:
+        log.warning(f"更新章节目录标记失败 photo_id={getattr(photo, 'photo_id', '')} error={e}")
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def _chapter_output_dir(album_dir, photo):
     """Identify folders by chapter ID; never adopt or overwrite an unmarked old folder."""
     import json
@@ -587,7 +703,7 @@ def _chapter_output_dir(album_dir, photo):
     while True:
         name = base_name if suffix == 1 else f"{base_name}_{suffix}"
         directory = Path(album_dir) / name
-        marker = directory / ".jm-chapter.json"
+        marker = directory / _CHAPTER_MARKER
         if not is_safe_path(directory) or not is_safe_path(marker):
             raise ValueError("章节输出路径越权")
         if directory.exists():
@@ -603,7 +719,7 @@ def _chapter_output_dir(album_dir, photo):
             directory.mkdir()
         except FileExistsError:
             continue
-        marker.write_text(json.dumps({"photo_id": photo_id}), encoding="utf-8")
+        marker.write_text(json.dumps({"photo_id": photo_id, "format": _CHAPTER_FORMAT}), encoding="utf-8")
         return directory
 
 
@@ -614,6 +730,8 @@ def _download_chapter(
     """下载单个章节的所有图片（支持章节内多图并行，每图独立 client）"""
     image_threads = int(get_settings().get("image_threads", "3"))
     photo_dir = _chapter_output_dir(album_dir, photo)
+    # 旧版本下载的章节：GIF 页可能已被切片/只剩第一帧，首趟不按“已存在”跳过它们
+    refetch_gif = _chapter_format(photo_dir) < _CHAPTER_FORMAT
 
     photo_images = list(enumerate(photo))
     if len(photo_images) <= 1 or image_threads <= 1:
@@ -622,7 +740,7 @@ def _download_chapter(
             _download_chapter_image(
                 None, job_id, album_id, album, photo, photo_dir,
                 i, img, total_pages, done_pages, pending_images,
-                failed_pages, tracker, pause_ev, lock, pass_num, timeout,
+                failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif,
             )
     else:
         # 多图并行：每个线程独立 client，避免 HTTP 非线程安全问题
@@ -630,10 +748,10 @@ def _download_chapter(
             img_futs = []
             for i, img in photo_images:
                 fut = img_pool.submit(
-                    _download_chapter_image,
+                    bind_request_id(_download_chapter_image),
                     None, job_id, album_id, album, photo, photo_dir,
                     i, img, total_pages, done_pages, pending_images,
-                    failed_pages, tracker, pause_ev, lock, pass_num, timeout,
+                    failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif,
                 )
                 img_futs.append(fut)
             for fut in as_completed(img_futs):
@@ -651,7 +769,7 @@ def _download_chapter(
 def _download_chapter_image(
     _, job_id, album_id, album, photo, photo_dir,
     i, img, total_pages, done_pages, pending_images,
-    failed_pages, tracker, pause_ev, lock, pass_num, timeout,
+    failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif=False,
 ):
     """下载单张图片（每个线程独立 client，避免 HTTP 非线程安全问题）"""
     # _should_stop 内部已持锁（db 查询），无需额外保护
@@ -662,13 +780,14 @@ def _download_chapter_image(
         img_url = img.download_url
         img_name = f"{i + 1:05d}.webp"
         img_path = photo_dir / img_name
-        scramble_id = int(img.scramble_id) if img.scramble_id else None
+        # GIF 不加扰：不传 scramble_id（不切片）；_download_image_single_attempt 原样取回后存成动画 WebP
+        scramble_id = int(img.scramble_id) if img.scramble_id and not image_is_gif(img) else None
         _download_image_single_attempt(
             img_client, job_id, album_id, album, "",
             photo, i, img, img_url, img_path, scramble_id,
             done_pages, total_pages, failed_pages,
             pending_images if pass_num == 1 else None,
-            tracker, photo_dir, pass_num=pass_num, timeout=timeout, lock=lock,
+            tracker, photo_dir, pass_num=pass_num, timeout=timeout, lock=lock, refetch_gif=refetch_gif,
         )
     finally:
         close_client(img_client)
@@ -759,7 +878,7 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
             futs = []
             for photo in photos_to_download:
                 fut = pool.submit(
-                    _download_chapter,
+                    bind_request_id(_download_chapter),
                     job_id, album_id, album, album_dir, photo, total_pages,
                     done_pages, pending_images, failed_pages,
                     tracker, pause_ev, _lock, 1, _FIRST_PASS_TIMEOUT,
@@ -811,6 +930,10 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
             return
         if done_pages[0] != total_pages:
             failed_pages.append(f"下载不完整：{done_pages[0]}/{total_pages} 页")
+        if not failed_pages:
+            # 每一页都已按当前格式写好（旧目录里的 GIF 页已重新取回）：升级章节标记，以后不再重取
+            for photo in photos_to_download:
+                _mark_chapter_current(album_dir, photo)
 
         # -- 以下为 CBZ 打包、元数据写入、完成标记等（不变）--
         organize_mode = get_settings().get("organize_mode", "none")

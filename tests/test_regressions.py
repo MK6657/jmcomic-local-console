@@ -117,7 +117,7 @@ def test_launcher_cleans_child_after_startup_failure(monkeypatch):
     import launcher
     proc = Mock()
     cleanup = Mock()
-    monkeypatch.setattr(launcher, "get_running_port", lambda: None)
+    monkeypatch.setattr(launcher, "get_running_server", lambda: None)
     monkeypatch.setattr(launcher, "launch_flask", lambda: proc)
     monkeypatch.setattr(launcher, "cleanup", cleanup)
     monkeypatch.setattr(launcher, "wait_until_ready", Mock(side_effect=TimeoutError))
@@ -144,7 +144,10 @@ def test_launcher_opens_existing_instance_without_spawning(monkeypatch):
     import launcher
     spawn = Mock()
     browser = Mock()
-    monkeypatch.setattr(launcher, "get_running_port", lambda: 5003)
+    # A server started after the program files were written is current: reuse it.
+    import time
+    monkeypatch.setattr(launcher, "get_running_server", lambda: (5003, {"pid": 42, "timestamp": time.time() + 3600}))
+    monkeypatch.setattr(launcher, "stop_outdated_server", Mock(side_effect=AssertionError("must not stop")))
     monkeypatch.setattr(launcher, "launch_flask", spawn)
     monkeypatch.setattr(launcher.webbrowser, "open", browser)
     assert launcher.main([]) == 0
@@ -191,7 +194,7 @@ def test_launcher_wait_stops_its_own_process(monkeypatch):
     import launcher
     proc = Mock()
     cleanup = Mock()
-    monkeypatch.setattr(launcher, "get_running_port", lambda: None)
+    monkeypatch.setattr(launcher, "get_running_server", lambda: None)
     monkeypatch.setattr(launcher, "launch_flask", lambda: proc)
     monkeypatch.setattr(launcher, "wait_until_ready", lambda child: 5001)
     monkeypatch.setattr(launcher, "cleanup", cleanup)

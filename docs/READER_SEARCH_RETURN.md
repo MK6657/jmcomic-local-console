@@ -23,7 +23,9 @@ also cleared an otherwise valid result list to issue another search.
 - Only the first image retains the page/chapter caption. Hidden reading tools include accessible
   top/bottom icons: top returns to the document start, bottom renders remaining batches and aligns
   with the last image's lower edge. Position is maintained while lazy images finish loading.
-- No automatic download or remote image streaming. Missing/deleted local images produce a clear explanation.
+- The local reader (`/read`) never downloads or streams remote images; missing/deleted local images produce a clear
+  explanation. Online reading is a separate, explicit mode (`/online/<id>`, the detail page's Read online button):
+  the same reader UI, fed by `/api/online` and `/api/online-img`, with its own page memory and no paged-mode link.
 - The paged preview now has a Continuous mode link; the continuous reader offers Paged mode in its hidden tools.
   Both share the current page through URL/session state and replace the mode's history entry, preserving Back navigation.
 - Paged thumbnails constrain image dimensions with `object-fit: contain`, show page numbers and have horizontal arrows.
@@ -34,6 +36,31 @@ also cleared an otherwise valid result list to issue another search.
 每批 20 张图片并按需加载，支持跳页、重试与阅读位置记忆。保留原翻页预览，不自动下载或在线播放。
 标题不吸顶，返回和跳页默认隐藏；轻触画面/空白处、按 M 或点击页首阅读工具可唤出，Esc/收起/跳页后隐藏。
 只有第一页显示页码与章节说明；工具内新增一键到顶、到底小图标，到底会补齐剩余批次并定位末页图片底部。
+
+## Follow-up review (2026-09-25) / 复查
+
+Fixes, each reproduced on the previous commit in headless Chrome and confirmed fixed:
+
+- **Search history script injection.** Keywords were spliced into `onclick="searchHistoryClick('…')"`.
+  `encodeURIComponent` leaves `'`, `(` and `)` untouched, so opening `/search?keyword='-alert(1)-'` stored a
+  keyword whose history chip ran script when clicked. Chips now keep the keyword in `data-*` attributes and a
+  delegated listener reads it; search.js no longer builds any inline handler (cards, pagination, history).
+- **Jump anchor ignored scrollbar drags.** After a jump, re-alignment only stopped on wheel/touch/pointer/keys.
+  Dragging the scrollbar fires none of those, so lazy images loading at the new position snapped the view back
+  to the jumped page and the page counter stayed stale. A scroll that moves the anchored page away now releases it.
+- **Alt+← swallowed in paged mode.** Arrow keys with modifiers turned the page and cancelled the browser's Back
+  shortcut; modified keys are now left to the browser.
+- **Failed load forgot the page.** A continuous-reader visit whose load failed wrote page 1 on `pagehide`,
+  replacing the page remembered by either mode.
+
+Refactoring: both modes share `static/js/reading-nav.js` (page memory, `?page=` sync, mode switch, Back);
+preview.js keeps its state local instead of `window.currentPage/totalPages` for inline handlers; paged styles
+moved from three layers (style.css, inline `<style>`, overrides) into `css/preview.css`; `/preview/<id>` validates
+the id like `/read/<id>`; the preview API reuses `core.validation` image types/MIME map.
+
+修复（均在上一提交上复现并验证）：搜索历史关键词拼进内联 onclick 可被 `'` `(` `)` 打断而执行脚本，改为
+data-* 属性＋事件委托；跳页后拖动滚动条不会触发锚点释放，图片加载时被拉回原页，现以滚动偏移判断释放；
+单页模式 Alt+← 被当成上一页并阻止了浏览器后退；连续阅读加载失败时 pagehide 把记忆页码覆盖为 1。
 
 ## Validation / 验证
 

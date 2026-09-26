@@ -177,6 +177,12 @@ def job_events(job_id: str):
         client_queue = tracker.subscribe()
         try:
             yield from tracker.iter_events(client_queue)
+        except Exception:
+            # 在这里记录：仍处于 stream_with_context 的请求上下文中，记录带本请求的 request_id，
+            # “只看此请求”能看到流为什么中断。异常一旦离开生成器，请求上下文先被弹出，waitress 随后写的
+            # "Exception while serving" 就不带 request_id 了。记录后正常结束本条流（前端 EventSource 会按
+            # onerror 的规则重连），不再抛给 waitress，同一个异常不会记两遍。
+            log.exception(f"SSE 推送异常，已结束本条事件流 job_id={job_id}")
         finally:
             tracker.unsubscribe(client_queue)
 

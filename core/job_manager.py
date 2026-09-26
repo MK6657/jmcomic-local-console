@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from . import database as db
-from .logger import log
+from .logger import log, set_request_id, clear_request_id
 from .progress import progress_manager
 from .jm_service import download_album_job
 
@@ -100,7 +100,8 @@ class JobManager:
             try:
                 photo_ids = json.loads(next_job["selected_photo_ids"] or "[]")
             except Exception:
-                log.warning(f"Job {job_id} 的 selected_photo_ids 解析失败，标记为 failed")
+                # 写成 job_id=…：去重只保留 *_id= 形式的编号，不同任务的这条警告才不会被合并掉
+                log.warning(f"selected_photo_ids 解析失败，标记为 failed job_id={job_id} album_id={album_id}")
                 db.transition_job_status(job_id, ["running"], "failed")
                 return
             title = next_job.get("title", "")
@@ -135,6 +136,9 @@ class JobManager:
 
     def _run_job_wrapper(self, job_id: str, album_id: str, photo_ids: list[str]):
         """下载线程结束前才从 _running_jobs 移除"""
+        # 本任务的记录（含章节/图片工作线程与 jmcomic 库的重试/失败记录）共用一个 request_id，
+        # 日志查看器的“只看此请求”可以串起整个任务的经过
+        set_request_id()
         try:
             download_album_job(job_id, album_id, photo_ids)
             log.info(f"任务完成 job_id={job_id} album_id={album_id}")
@@ -162,6 +166,7 @@ class JobManager:
             if tracker:
                 tracker.close()
                 progress_manager.remove_tracker(job_id)
+            clear_request_id()
 
     def cancel_job(self, job_id: str) -> tuple[bool, str]:
         """

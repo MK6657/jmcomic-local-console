@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify, request, Response
 from core import database as db
 from core.jm_service import get_album_detail, get_album_detail_cached
 from core.job_manager import job_manager
-from core.logger import log
+from core.logger import bind_request_id, log
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 
 api_wishlist_bp = Blueprint("api_wishlist", __name__)
@@ -92,7 +92,7 @@ def add_wishlist():
         # 真正的后台异步同步标签（不阻塞 HTTP 响应）
         try:
             t = threading.Thread(
-                target=_sync_tags_for_wishlist,
+                target=bind_request_id(_sync_tags_for_wishlist),  # 记录归入添加收藏的请求
                 args=(album_id,),
                 daemon=True,
             )

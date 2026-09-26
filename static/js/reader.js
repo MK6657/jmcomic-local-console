@@ -1,47 +1,86 @@
-/* Local-only, continuous reader. No remote image URLs or automatic downloads. */
+/* Continuous reader. Local mode (/read) shows downloaded files only; online mode (/online) shows pages
+   this app fetches on demand. Neither starts a download. */
 (function () {
   'use strict';
   var root = document.querySelector('.continuous-reader');
   if (!root) return;
   var albumId = root.getAttribute('data-album-id');
+  var online = root.getAttribute('data-source') === 'online';
+  var positionKey = online ? 'online:' + albumId : albumId;   // online page memory stays separate
+  var imagePrefix = online ? '/api/online-img/' : '/api/preview-img/';
+  var AUTO_RETRY_MS = 3000;   // online mode: one automatic retry of a failed page before showing the error
+  var nav = window.readingNav;
   var pages = [];
   var rendered = 0;
-  var current = 1;
+  var current = 0;
   var loading = false;
   var loadSerial = 0;
   var pageObserver;
   var moreObserver;
   var visiblePages = new Set();
-  var storageKey = 'jm-reader-page:' + albumId;
   var byId = function (id) { return document.getElementById(id); };
   var tools = byId('reader-tools');
+  var toolsToggle = byId('reader-tools-toggle');
+  var pageInput = byId('reader-page-input');
+  var pagedLink = byId('reader-paged');
+
+  // After a jump, lazy images around the target keep loading and shift the layout.
+  // The anchor re-aligns the target after every load until the reader scrolls on their own.
   var jumpAnchor = null;
   var jumpAlignment = 'start';
+  var anchorOffset = 0;   // viewport position of the anchored edge at the last baseline
+  var anchorScrollY = 0;  // scrollY at the last baseline
   var alignFrame = 0;
+  function anchorPosition() {
+    // The anchored edge relative to the viewport: the document top for 'top', else the page's top/bottom.
+    if (jumpAlignment === 'top') return -window.scrollY;
+    var bounds = byId('reader-page-' + jumpAnchor).getBoundingClientRect();
+    return jumpAlignment === 'end' ? bounds.bottom : bounds.top;
+  }
+  function recordAnchor() {
+    anchorOffset = anchorPosition();
+    anchorScrollY = window.scrollY;
+  }
   function positionJump() {
     if (jumpAlignment === 'top') window.scrollTo({ top: 0, behavior: 'instant' });
     else byId('reader-page-' + jumpAnchor).scrollIntoView({ block: jumpAlignment, behavior: 'instant' });
+    recordAnchor();
   }
   function alignJump() {
     if (jumpAnchor === null || alignFrame) return;
     alignFrame = requestAnimationFrame(function () {
       alignFrame = 0;
-      if (jumpAnchor !== null) {
-        positionJump();
-      }
+      if (jumpAnchor !== null) positionJump();
     });
   }
+  function releaseJump() {
+    if (jumpAnchor === null) return;
+    jumpAnchor = null;
+    // Pages already in view produce no new intersection events, so sync the counter now.
+    if (visiblePages.size) setCurrent(Math.min.apply(null, Array.from(visiblePages)));
+  }
   ['wheel', 'touchstart', 'pointerdown'].forEach(function (name) {
-    window.addEventListener(name, function () { jumpAnchor = null; }, { passive: true });
+    window.addEventListener(name, releaseJump, { passive: true });
   });
+  // Scrollbar drags and arrow clicks fire no pointer events, so scrolling itself must release the anchor.
+  // When the reader scrolls, the page moves exactly as far as the viewport did. Images loading above move
+  // the page without scrolling, and browser scroll anchoring scrolls without moving it; those only reset
+  // the baseline. Small scrolls accumulate, so slow drags release too.
+  window.addEventListener('scroll', function () {
+    if (jumpAnchor === null || alignFrame) return;
+    var scrolled = window.scrollY - anchorScrollY;
+    var moved = anchorPosition() - anchorOffset;
+    if (Math.abs(moved + scrolled) >= 48) recordAnchor();
+    else if (Math.abs(scrolled) > 48) releaseJump();
+  }, { passive: true });
 
   function showTools(visible, focus) {
     tools.hidden = !visible;
-    byId('reader-tools-toggle').setAttribute('aria-expanded', String(visible));
+    toolsToggle.setAttribute('aria-expanded', String(visible));
     if (visible && focus) byId('reader-back').focus({ preventScroll: true });
     if (!visible && tools.contains(document.activeElement)) root.focus({ preventScroll: true });
   }
-  byId('reader-tools-toggle').addEventListener('click', function () { showTools(tools.hidden, true); });
+  toolsToggle.addEventListener('click', function () { showTools(tools.hidden, true); });
   byId('reader-tools-close').addEventListener('click', function () { showTools(false); });
   document.addEventListener('click', function (event) {
     if (event.target.closest('a, button, input, select, textarea, nav, footer, .reader-toolbar, .reader-tools')) return;
@@ -49,10 +88,10 @@
     showTools(tools.hidden);
   });
   document.addEventListener('keydown', function (event) {
-    if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].indexOf(event.key) >= 0) jumpAnchor = null;
+    if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].indexOf(event.key) >= 0) releaseJump();
     if (event.key === 'Escape') { showTools(false); return; }
     if (event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
-    if (event.key.toLowerCase() === 'm' && !event.ctrlKey && !event.altKey && !event.metaKey && !event.repeat) {
+    if ((event.key === 'm' || event.key === 'M') && !event.ctrlKey && !event.altKey && !event.metaKey && !event.repeat) {
       event.preventDefault(); showTools(tools.hidden, true);
     }
   });
@@ -63,22 +102,13 @@
     }, { passive: true });
   });
 
-  function remember() {
-    try { sessionStorage.setItem(storageKey, String(current)); } catch (_) {}
-  }
   function setCurrent(number) {
+    if (number === current) return;
     current = number;
-    byId('reader-paged').href = '/preview/' + encodeURIComponent(albumId) + '?page=' + current;
-    if (new URLSearchParams(location.search).has('page')) {
-      try {
-        var locationUrl = new URL(location.href);
-        locationUrl.searchParams.set('page', current);
-        history.replaceState(history.state, '', locationUrl.pathname + locationUrl.search);
-      } catch (_) {}
-    }
-    byId('reader-progress').textContent = '第 ' + current + ' / ' + pages.length + ' 页 · 向下滚动阅读';
-    if (document.activeElement !== byId('reader-page-input')) byId('reader-page-input').value = current;
-    remember();
+    if (pagedLink) pagedLink.href = '/preview/' + encodeURIComponent(albumId) + '?page=' + current;
+    byId('reader-progress').textContent = '第 ' + current + ' / ' + pages.length + ' 页';
+    if (document.activeElement !== pageInput) pageInput.value = current;
+    nav.remember(positionKey, current, false);
   }
   function disconnect() {
     if (pageObserver) pageObserver.disconnect();
@@ -102,10 +132,10 @@
     }, { rootMargin: '800px' });
     moreObserver.observe(byId('reader-more'));
   }
-  function localImageUrl(value) {
+  function readerImageUrl(value) {
     try {
       var url = new URL(value, location.origin);
-      return url.origin === location.origin && url.pathname.indexOf('/api/preview-img/') === 0 ? url.href : null;
+      return url.origin === location.origin && url.pathname.indexOf(imagePrefix) === 0 ? url.href : null;
     } catch (_) { return null; }
   }
   function appendPages() {
@@ -113,38 +143,64 @@
     var fragment = document.createDocumentFragment();
     for (; rendered < end; rendered++) {
       (function (page, index) {
+        var label = '第 ' + (index + 1) + ' 页';
         var figure = document.createElement('figure');
         figure.className = 'reader-page';
         figure.id = 'reader-page-' + (index + 1);
         figure.dataset.page = index + 1;
-        figure.setAttribute('aria-label', '第 ' + (index + 1) + ' 页');
-        var caption = document.createElement('figcaption');
-        caption.textContent = '第 ' + (index + 1) + ' 页' + (page.chapter ? ' · ' + page.chapter : '');
+        figure.setAttribute('aria-label', label);
         var img = document.createElement('img');
-        img.alt = '第 ' + (index + 1) + ' 页';
+        img.alt = label;
         img.loading = index < 2 ? 'eager' : 'lazy';
         img.decoding = 'async';
         var error = document.createElement('div');
         error.className = 'reader-page-error d-none';
-        var label = document.createElement('p');
-        label.textContent = '这张图片加载失败，可以重试。';
+        var message = document.createElement('p');
+        if (online) {
+          // The server logs why the upstream fetch failed; point there instead of guessing.
+          var logs = document.createElement('a');
+          logs.href = '/settings#logs';
+          logs.className = 'ms-2 small';
+          logs.textContent = '查看日志';
+          message.append('在线获取这张图片失败，可以重试。', logs);
+        } else {
+          message.textContent = '这张图片加载失败，可以重试。';
+        }
         var retry = document.createElement('button');
         retry.type = 'button';
         retry.className = 'btn btn-outline-primary btn-sm';
         retry.textContent = '重新加载图片';
-        error.append(label, retry);
-        var src = localImageUrl(page.url);
+        error.append(message, retry);
+        var src = readerImageUrl(page.url);
+        var autoRetried = false;
+        function reload() {
+          var url = new URL(src);
+          url.searchParams.set('retry', Date.now());
+          img.src = url.href;
+        }
         img.onload = function () { error.classList.add('d-none'); img.classList.remove('d-none'); alignJump(); };
-        img.onerror = function () { img.classList.add('d-none'); error.classList.remove('d-none'); alignJump(); };
+        img.onerror = function () {
+          // Online pages come from upstream on demand and a brief hiccup is common: try once more by itself
+          // after a short pause before asking the reader to retry.
+          if (online && src && !autoRetried) {
+            autoRetried = true;
+            setTimeout(reload, AUTO_RETRY_MS);
+            return;
+          }
+          img.classList.add('d-none'); error.classList.remove('d-none'); alignJump();
+        };
         retry.addEventListener('click', function () {
           if (!src) return;
           error.classList.add('d-none');
           img.classList.remove('d-none');
-          var url = new URL(src);
-          url.searchParams.set('retry', Date.now());
-          img.src = url.href;
+          reload();
         });
-        if (index === 0) figure.appendChild(caption);
+        // Only the first page carries the page/chapter caption; later pages keep it in alt text.
+        if (index === 0) {
+          var caption = document.createElement('figcaption');
+          caption.textContent = label + (page.chapter ? ' · ' + page.chapter : '');
+          figure.appendChild(caption);
+        }
         figure.append(img, error);
         fragment.appendChild(figure);
         if (src) img.src = src;
@@ -172,37 +228,57 @@
     var serial = ++loadSerial;
     byId('reader-empty').classList.add('d-none');
     byId('reader-loading').classList.remove('d-none');
-    window.apiFetch('/api/preview/' + encodeURIComponent(albumId), { abortKey: 'continuous-reader' })
+    // Online lists need the album plus every chapter's page list from upstream, so allow longer.
+    window.apiFetch((online ? '/api/online/' : '/api/preview/') + encodeURIComponent(albumId),
+      { abortKey: 'continuous-reader', timeoutMs: online ? 60000 : 30000 })
       .then(function (data) {
         if (serial !== loadSerial) return;
-        if (!Array.isArray(data.pages) || !data.pages.length) throw new Error('本地没有可阅读的图片。');
+        if (!Array.isArray(data.pages) || !data.pages.length) throw new Error(online ? '没有可在线阅读的页面。' : '本地没有可阅读的图片。');
+        // Read the start page before setCurrent(1) overwrites the remembered one.
+        var start = nav.initialPage(positionKey);
+        // ?chapter=<photo_id> (chapter links on the detail page) opens at that chapter's first page and
+        // becomes ?page=, so later scrolling keeps the address current and a reload resumes in place.
+        var chapter = new URLSearchParams(location.search).get('chapter');
+        if (chapter) {
+          var first = data.pages.findIndex(function (page) { return page.photo_id === chapter; });
+          if (first >= 0) start = first + 1;
+          try {
+            var url = new URL(location.href);
+            url.searchParams.delete('chapter');
+            url.searchParams.set('page', start);
+            history.replaceState(history.state, '', url.pathname + url.search);
+          } catch (_) {}
+        }
+        if (data.skipped_chapters && typeof window.showToast === 'function') {
+          window.showToast('有 ' + data.skipped_chapters + ' 个章节暂时无法获取，已跳过', 'warning');
+        }
+        var title = data.title || (online ? '在线阅读' : '连续阅读');
         pages = data.pages;
         rendered = 0;
+        current = 0;
         disconnect();
         byId('reader-pages').replaceChildren();
-        byId('reader-title').textContent = data.title || '连续阅读';
-        document.title = (data.title || '连续阅读') + ' - JMComic';
+        byId('reader-title').textContent = title;
+        document.title = title + ' - JMComic';
         byId('reader-jump').classList.remove('d-none');
-        byId('reader-page-input').max = pages.length;
+        pageInput.max = pages.length;
         byId('reader-top').disabled = false;
         byId('reader-bottom').disabled = false;
         appendPages();
-        var saved = 1;
-        try { saved = Number(sessionStorage.getItem(storageKey)) || 1; } catch (_) {}
-        var requested = Number(new URLSearchParams(location.search).get('page'));
-        if (requested > 0 && Number.isFinite(requested)) saved = requested;
         setCurrent(1);
         observe();
-        if (saved > 1) requestAnimationFrame(function () { jump(saved); });
+        // Next frame: the loading card is hidden by then, so the jump measures the final layout.
+        if (start > 1) requestAnimationFrame(function () { jump(start); });
       })
       .catch(function (err) {
         if (serial !== loadSerial) return;
         if (err.name === 'AbortError') return;
         byId('reader-empty').classList.remove('d-none');
-        byId('reader-message').textContent = err.status === 404
+        if (online) byId('reader-message').textContent = err.message || '在线加载失败，请稍后重试。';
+        else byId('reader-message').textContent = err.status === 404
           ? '未找到可阅读的本地图片。请先下载漫画；如果原图已删除，需要重新下载。此按钮不会自动下载。'
           : err.message || '读取失败，请稍后重试。';
-        byId('reader-progress').textContent = '本地阅读';
+        byId('reader-progress').textContent = online ? '在线阅读' : '本地阅读';
       })
       .finally(function () {
         if (serial !== loadSerial) return;
@@ -212,7 +288,7 @@
   }
   byId('reader-jump').addEventListener('submit', function (event) {
     event.preventDefault();
-    var number = byId('reader-page-input').value;
+    var number = pageInput.value;
     showTools(false);
     jump(number);
   });
@@ -220,19 +296,12 @@
   byId('reader-bottom').addEventListener('click', function () { showTools(false); jump(pages.length, 'end'); });
   byId('reader-load-more').addEventListener('click', appendPages);
   byId('reader-retry').addEventListener('click', load);
-  byId('reader-paged').addEventListener('click', function (event) {
-    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
-    event.preventDefault(); remember(); location.replace(this.href);
-  });
-  byId('reader-back').addEventListener('click', function (event) {
-    try {
-      if (new URL(document.referrer).origin === location.origin && history.length > 1) {
-        event.preventDefault(); history.back();
-      }
-    } catch (_) {}
-  });
+  if (pagedLink) nav.bindModeSwitch(pagedLink, function () { if (current) nav.remember(positionKey, current, false); });
+  nav.bindBack(byId('reader-back'));
   window.addEventListener('pagehide', function () {
-    remember(); disconnect(); showTools(false); jumpAnchor = null; loading = false; loadSerial += 1;
+    // current stays 0 until pages load, so a failed visit never overwrites the remembered page.
+    if (current) nav.remember(positionKey, current, false);
+    disconnect(); showTools(false); releaseJump(); loading = false; loadSerial += 1;
   });
   window.addEventListener('pageshow', function (event) {
     if (event.persisted) { if (pages.length) observe(); else load(); }

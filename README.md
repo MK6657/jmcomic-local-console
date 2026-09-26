@@ -44,7 +44,10 @@ For foreground operation without automatically opening a browser:
 Open [http://127.0.0.1:5000](http://127.0.0.1:5000). If occupied, the server tries
 5001–5003; use the URL printed in the terminal. Other programs are never killed
 to free a port. The launcher verifies application identity and PID before opening
-an existing service. Stop old running versions manually before using the updated launcher.
+an existing service. Running start.bat again reuses a running server, unless `app.py`, `core/`, `routes/` or
+`templates/` differ from the files it started with (compared by content, so an update copied over the old
+folder counts too): then it stops only that verified server and starts the updated one
+(interrupted downloads are re-queued at startup). Static CSS/JS changes need no restart.
 
 After installing dependencies, `launcher.pyw` offers a windowless launch.
 `launcher.py` without `--wait` also leaves the server in the background; to stop it,
@@ -60,10 +63,24 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   Page/chapter captions appear only on the first image; the hidden tools also include one-click top/bottom icons.
   Switch between paged and continuous reading while keeping the current page. Paged thumbnails show
   the full image with page numbers, horizontal browse arrows and automatic loading of later-page thumbnails.
+  In paged mode the whole page and its controls fit one desktop screen (thumbnails follow below); page turns keep
+  the current image until the next one is ready, and the following page is preloaded. Arrow keys with Alt/Ctrl
+  are left to the browser, so Alt+← still goes back.
+- The album detail page has a **Read online** button (and a per-chapter link) that opens the same continuous reader
+  without downloading: this app fetches and unscrambles each page on demand through its own connection (same proxy
+  and domains as downloads) and keeps recent pages in `runtime/cache/online/` (512 MB, least recently read pages
+  evicted first; cleared by `POST /api/system/clear-cache`). Nothing is added to the library. A page that cannot
+  be fetched gives up after the Settings timeout (at least 15 s), trying the other image hosts within that time; a
+  slow page that is still arriving is not cut off early. The local reader stays local-only. On the detail page the cover is vertically centred against the information card; covers keep
+  their proportions within the column width (max 300 px) and 400 px height, and small covers are not enlarged.
 - Returning from details or the reader restores the search query, sort, result page, results and scroll position.
   Results are cached only in browser-session/history state and reused for up to 30 minutes.
 
 - Search and detail pages; queued downloads, retry/cancel and SSE progress.
+- Animated GIF pages are downloaded without unscrambling and saved as animated WebP (still `NNNNN.webp`), so the
+  local reader keeps the animation; PDF export uses the first frame. Chapters downloaded by earlier versions (whose
+  GIF pages may be sliced or reduced to one frame) get only their GIF pages fetched again the next time the album
+  is downloaded, even with "skip existing" on.
 - Bookmarks, a downloaded library and local image reader.
 - ZIP/PDF export and optional automatic CBZ/ZIP packaging.
 - Scheduling, concurrency, timeout, retries and proxy configuration.
@@ -89,8 +106,25 @@ keep it disabled unless intended.
 Keep the service on `127.0.0.1`. There is no user authentication: do not expose it
 through port forwarding, a public proxy, or a shared server. Logs may contain
 searches, titles and local paths even when authentication details are masked.
-`runtime/logs/launcher.log` captures startup/output errors; unlike the app logs,
-it is not automatically rotated. Archive it manually while the app is stopped.
+`runtime/logs/launcher.log` captures startup/output errors. The launcher archives it before each start,
+and like the app logs it is kept for 7 days.
+
+### Logs and troubleshooting
+
+- **Settings → 日志与诊断** (`/settings#logs`) shows recent problems (warnings and errors) or all entries,
+  with search, a per-request filter (request id) and a button that opens the log folder.
+  A page that fails in the online reader links straight there.
+- Files in `runtime/logs/`: `app.log` (everything from INFO), `error.log` (warnings and errors),
+  `launcher.log` (startup output). `app.log` and `error.log` roll over daily or at 20 MB into
+  `<name>.YYYY-MM-DD[.N]` (a higher N is newer). `launcher.log` is archived by the launcher before each start
+  when it is over 5 MB or was last written on an earlier day, so a server left running keeps writing to it.
+- Repeated messages are merged: the first one is written in full, repeats of the same kind (messages that differ
+  only in numbers such as page numbers or durations) are counted and written as one line
+  `↑ 同类消息 N 次已合并（…）`. Ids written as `job_id=` / `album_id=` / `photo_id=` (any `…_id=`) are kept apart;
+  other numbers, including ids inside request paths such as `/api/online-img/<photo_id>/<n>`, are merged like page
+  numbers. A merged line that covers several requests lists their request ids, so the per-request filter finds it.
+- Log files older than 7 days are deleted automatically at startup and daily, with a 100 MB total cap.
+  Routine static-file and health-check requests are not logged.
 
 ## Development and checks
 

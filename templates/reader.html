@@ -1,25 +1,27 @@
 {% extends "base.html" %}
-{% block title %}JMComic 下载控制台 - 连续阅读{% endblock %}
+{% block title %}JMComic 下载控制台 - {{ title }}{% endblock %}
 {% block head_extra %}
 <link rel="stylesheet" href="{{ asset_url('css/reader.css') }}">
 {% endblock %}
 {% block content %}
-<main class="continuous-reader" data-album-id="{{ album_id }}" tabindex="-1">
+<main class="continuous-reader" data-album-id="{{ album_id }}" data-source="{{ 'online' if online else 'local' }}" tabindex="-1">
     <header class="reader-toolbar">
         <div class="reader-heading">
-            <h1 id="reader-title">连续阅读</h1>
-            <p class="text-muted small mb-0">轻触画面或空白处，或按 M 显示阅读工具；Esc 收起。</p>
+            <h1 id="reader-title">{{ title }}</h1>
+            <p class="text-muted small mb-0">{% if online %}在线阅读：页面实时从网络加载，不下载、不保存到资源库。{% endif %}轻触画面或空白处，或按 M 显示阅读工具；Esc 收起。</p>
         </div>
         <button type="button" class="btn btn-outline-secondary btn-sm" id="reader-tools-toggle" aria-controls="reader-tools" aria-expanded="false">阅读工具</button>
     </header>
     <section id="reader-tools" class="reader-tools" aria-label="阅读工具" hidden>
-        <a class="btn btn-outline-secondary btn-sm" href="/search" id="reader-back"><i class="bi bi-arrow-left"></i> 返回</a>
-        <div class="d-flex gap-2" role="group" aria-label="快速定位">
-            <button type="button" class="btn btn-outline-primary btn-sm" id="reader-top" title="一键到顶" aria-label="一键到顶" disabled><i class="bi bi-chevron-bar-up" aria-hidden="true"></i></button>
-            <button type="button" class="btn btn-outline-primary btn-sm" id="reader-bottom" title="一键到底" aria-label="一键到底" disabled><i class="bi bi-chevron-bar-down" aria-hidden="true"></i></button>
+        <span class="reader-progress" id="reader-progress" aria-live="polite">{{ '正在获取在线页面…' if online else '正在读取本地图片…' }}</span>
+        <div class="reader-tools-group">
+            <a class="btn btn-outline-secondary btn-sm" href="{{ '/album/' ~ album_id if online else '/search' }}" id="reader-back"><i class="bi bi-arrow-left" aria-hidden="true"></i> 返回</a>
+            <div class="btn-group btn-group-sm" role="group" aria-label="快速定位">
+                <button type="button" class="btn btn-outline-primary" id="reader-top" title="一键到顶" aria-label="一键到顶" disabled><i class="bi bi-chevron-bar-up" aria-hidden="true"></i></button>
+                <button type="button" class="btn btn-outline-primary" id="reader-bottom" title="一键到底" aria-label="一键到底" disabled><i class="bi bi-chevron-bar-down" aria-hidden="true"></i></button>
+            </div>
+            {% if not online %}<a class="btn btn-outline-primary btn-sm" id="reader-paged" href="/preview/{{ album_id }}" title="切换阅读方式并保留当前页">单页翻页</a>{% endif %}
         </div>
-        <span class="text-muted small" id="reader-progress" aria-live="polite">正在读取本地图片…</span>
-        <a class="btn btn-outline-primary btn-sm" id="reader-paged" href="/preview/{{ album_id }}" title="切换阅读方式并保留当前页">单页翻页</a>
         <form class="reader-jump d-none" id="reader-jump">
             <label class="visually-hidden" for="reader-page-input">跳转页码</label>
             <input class="form-control form-control-sm" id="reader-page-input" type="number" min="1" value="1" aria-label="跳转页码">
@@ -27,14 +29,17 @@
         </form>
         <button type="button" class="btn btn-outline-secondary btn-sm" id="reader-tools-close" aria-label="收起阅读工具">收起</button>
     </section>
-    <div class="card my-3" id="reader-loading" role="status"><div class="card-body text-center">正在读取本地图片…</div></div>
-    <div class="card my-3 d-none" id="reader-empty" role="status">
-        <div class="card-body text-center">
+    <div class="card reader-state" id="reader-loading" role="status"><div class="card-body">{{ '正在获取在线页面…' if online else '正在读取本地图片…' }}</div></div>
+    <div class="card reader-state d-none" id="reader-empty" role="status">
+        <div class="card-body">
+            <i class="bi bi-journal-x reader-state-icon" aria-hidden="true"></i>
             <h2 class="h5">暂时无法阅读</h2>
-            <p id="reader-message" class="text-muted mb-3"></p>
-            <a class="btn btn-outline-primary btn-sm" href="/album/{{ album_id }}">查看详情</a>
-            <a class="btn btn-outline-secondary btn-sm" href="/downloads">下载管理</a>
-            <button class="btn btn-outline-primary btn-sm" type="button" id="reader-retry">重试</button>
+            <p id="reader-message" class="text-muted"></p>
+            <div class="reader-state-actions">
+                <a class="btn btn-outline-primary btn-sm" href="/album/{{ album_id }}">查看详情</a>
+                <a class="btn btn-outline-secondary btn-sm" href="/downloads">下载管理</a>
+                <button class="btn btn-outline-primary btn-sm" type="button" id="reader-retry">重试</button>
+            </div>
         </div>
     </div>
     <div id="reader-pages" aria-label="漫画页面"></div>
@@ -46,5 +51,6 @@
 {% endblock %}
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/reading-nav.js') }}"></script>
 <script src="{{ asset_url('js/reader.js') }}"></script>
 {% endblock %}

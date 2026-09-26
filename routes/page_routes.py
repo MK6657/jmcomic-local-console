@@ -1,10 +1,11 @@
 """
 页面路由 —— 返回 Jinja2 模板，传入必要数据
 """
-from flask import Blueprint, render_template, request, abort
-from core.database import get_all_jobs
+from flask import Blueprint, render_template, request, abort, redirect
+from core.database import get_all_jobs, get_job
 from core.logger import log
 from core.settings import get_settings
+from core.validation import validate_numeric
 
 page_bp = Blueprint("page", __name__)
 
@@ -73,23 +74,31 @@ def downloads():
 
 @page_bp.get("/preview/<album_id>")
 def preview_page(album_id: str):
-    """图片预览页"""
+    """图片预览页（单页翻页）；与连续阅读一样只接受纯数字 album_id"""
+    if not validate_numeric(album_id):
+        abort(400)
     return render_template("preview.html", title="图片预览", album_id=album_id)
 
 
 @page_bp.get("/read/<album_id>")
 def continuous_reader(album_id: str):
     """Continuous scrolling over existing local images; never starts a download."""
-    from core.validation import validate_numeric
     if not validate_numeric(album_id):
         abort(400)
-    return render_template("reader.html", title="连续阅读", album_id=album_id)
+    return render_template("reader.html", title="连续阅读", album_id=album_id, online=False)
+
+
+@page_bp.get("/online/<album_id>")
+def online_reader_page(album_id: str):
+    """在线阅读：同一连续阅读页，图片经本程序按需从上游获取；不下载、不写入资源库"""
+    if not validate_numeric(album_id):
+        abort(400)
+    return render_template("reader.html", title="在线阅读", album_id=album_id, online=True)
 
 
 @page_bp.get("/preview/job/<job_id>")
 def preview_by_job(job_id: str):
     """从 job_id 跳转到预览页"""
-    from core.database import get_job
     job = get_job(job_id)
     if not job:
         log.warning(f"预览页: 不存在的 job_id={job_id}")
@@ -121,5 +130,4 @@ def settings_page():
 @page_bp.get("/favicon.ico")
 def favicon_ico():
     """浏览器默认请求 favicon.ico → 重定向到 SVG 版本"""
-    from flask import redirect
     return redirect("/static/favicon.svg")

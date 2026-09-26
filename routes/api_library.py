@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify, request
 
 import core.database as db
 from core.jm_service import get_album_detail, get_album_detail_cached
-from core.logger import log
+from core.logger import bind_request_id, log
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 
 api_library_bp = Blueprint("api_library", __name__, url_prefix="/api/library")
@@ -230,7 +230,8 @@ def album_tags_sync(album_id: str):
         return jsonify({"status": "error", "message": "album_id 必须是纯数字"}), 400
     try:
         pool = ThreadPoolExecutor(max_workers=1)
-        fut = pool.submit(get_album_detail_cached, album_id)
+        # 工作线程沿用本请求的 request_id：上游失败的原因（及 jmcomic 的重试记录）进入同一条“只看此请求”
+        fut = pool.submit(bind_request_id(get_album_detail_cached), album_id)
         try:
             data = fut.result(timeout=20)
         except FuturesTimeout:
@@ -334,7 +335,8 @@ def sync_all_tags():
             _bulk_sync_lock.release()
 
     try:
-        t = threading.Thread(target=_sync_worker, daemon=True)
+        # 后台同步的全部记录沿用发起它的请求的 request_id，可以从“已接受”那条记录一路追到结果
+        t = threading.Thread(target=bind_request_id(_sync_worker), daemon=True)
         t.start()
     except Exception:
         _bulk_sync_lock.release()

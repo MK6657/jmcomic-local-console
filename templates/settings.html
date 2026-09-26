@@ -227,9 +227,43 @@
 
 </form>
 
+<!-- ===== F. 日志与诊断（放在表单之外，永远不会随设置一起提交；由 js/logs.js 驱动） ===== -->
+<section class="settings-section log-viewer" id="logs" aria-labelledby="logs-heading">
+    <h5 id="logs-heading"><i class="bi bi-journal-text" aria-hidden="true"></i> 日志与诊断</h5>
+    <p class="log-viewer-summary" id="log-summary">
+        日志位置：<code id="log-dir">—</code>
+        <span class="log-viewer-summary-sep" aria-hidden="true">·</span>
+        总大小 <span id="log-total-size">—</span>
+        <span class="log-viewer-summary-sep" aria-hidden="true">·</span>
+        保留 <span id="log-retention">—</span> 天
+        <span class="log-viewer-summary-sep" aria-hidden="true">·</span>
+        重复消息自动合并
+    </p>
+    <div class="log-viewer-toolbar">
+        <div class="btn-group" role="group" aria-label="日志范围">
+            <button type="button" class="btn btn-primary" data-log-source="error" aria-pressed="true">只看问题</button>
+            <button type="button" class="btn btn-outline-primary" data-log-source="app" aria-pressed="false">全部</button>
+        </div>
+        <input type="search" id="log-search" class="form-control log-viewer-search"
+               placeholder="搜索消息、漫画名或请求 ID" aria-label="搜索日志" maxlength="200" autocomplete="off">
+        <button type="button" id="log-refresh-btn" class="btn btn-outline-secondary">
+            <i class="bi bi-arrow-clockwise" aria-hidden="true"></i> 刷新
+        </button>
+        <button type="button" id="log-open-folder-btn" class="btn btn-outline-secondary">
+            <i class="bi bi-folder2-open" aria-hidden="true"></i> 打开日志文件夹
+        </button>
+    </div>
+    <div class="log-viewer-status" id="log-status" role="status" aria-live="polite">滚动到这里时自动读取日志。</div>
+    <ol class="log-list" id="log-list" aria-label="日志条目，最新在前" hidden></ol>
+    <div class="log-viewer-more" id="log-more" hidden>
+        <button type="button" id="log-more-btn" class="btn btn-outline-secondary btn-sm">显示更多（最多 500 条）</button>
+    </div>
+</section>
+
 {% endblock %}
 
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
 <script src="{{ asset_url('js/settings.js') }}"></script>
+<script src="{{ asset_url('js/logs.js') }}"></script>
 {% endblock %}
