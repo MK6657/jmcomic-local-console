@@ -3,7 +3,8 @@
 
 {% block content %}
 
-<div class="row" id="album-detail-container">
+<!-- 封面与信息卡片在 JS 渲染的 .row 内并排、顶端对齐；章节列表在下方占满整行 -->
+<div class="pt-3" id="album-detail-container">
     <!-- 加载中 -->
     <div class="text-center py-5" id="loading-spinner">
         <div class="spinner-border text-primary" role="status">

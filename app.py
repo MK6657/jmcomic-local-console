@@ -20,6 +20,15 @@ if str(_root) not in sys.path:
 # 确保运行时目录存在（data/ downloads/ logs/ 在 exe 同级）
 ensure_dirs()
 
+# 本进程启动时的程序文件指纹（内容哈希），写入 flask.json。start.bat（launcher.py）据此判断正在运行的
+# 服务是否为当前代码——覆盖复制进来的更新保留旧的创建时间、修改时间也可能更早，只比时间会漏掉。
+# 在导入其余模块之前计算：若之后文件又变了，指纹不一致只会让 launcher 多重启一次，而不会漏掉更新。
+try:
+    from launcher import code_fingerprint as _code_fingerprint
+    _CODE_FINGERPRINT = _code_fingerprint()
+except Exception:
+    _CODE_FINGERPRINT = ""  # 缺失时 launcher 回退为比较修改时间
+
 # ── PID 锁文件：防止多实例冲突 ──────────────────────────────────
 _PID_FILE = get_app_root() / "runtime" / "data" / "flask.pid"
 _PORT_FILE = get_app_root() / "runtime" / "data" / "flask.json"
@@ -161,7 +170,11 @@ def _release_lock():
 from flask import Flask
 
 # ── 初始化日志系统 ─────────────────────────────────────
-from core.logger import log, MAX_LOG_AGE_DAYS, MAX_TOTAL_SIZE_MB
+# 导入即配置好 app.log / error.log（不删除任何文件）；过期日志清理在 main() 中启动。
+from core.logger import (
+    log, MAX_LOG_AGE_DAYS, MAX_TOTAL_SIZE_MB,
+    adopt_logger, claim_library_loggers, install_process_hooks, start_log_maintenance,
+)
 log.info("=== JMComic 下载控制台 启动 ===")
 
 # ── 先导入核心模块（确保全局实例就绪） ─────────────────────
@@ -171,7 +184,10 @@ from core.scheduler import start as start_scheduler, stop as stop_scheduler
 
 # ── jmcomic 库全局优化（必须在任何 client 创建前设置）──
 from jmcomic import JmModuleConfig
-JmModuleConfig.FLAG_ENABLE_JM_LOG = False               # 关闭库内部日志，减少 I/O 开销
+# 库日志由 core.logger 接管：去掉 jmcomic 自带的 stdout handler（不再重复进 launcher.log），
+# 逐请求/逐图片的常规进度被丢弃，只有重试/失败/异常经去重 + 脱敏写入 app.log / error.log。
+JmModuleConfig.FLAG_ENABLE_JM_LOG = True
+claim_library_loggers()  # 与导入顺序无关：若 jmcomic 先于 core.logger 被导入，这里移除它的 stdout handler
 JmModuleConfig.FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN = False  # 跳过启动时的域名更新请求
 JmModuleConfig.FLAG_API_CLIENT_REQUIRE_COOKIES = False     # 公开内容无需 cookie，避免 /setting 请求用过期域名失败
 
@@ -182,6 +198,7 @@ from routes.api_album import api_album_bp
 from routes.api_jobs import api_jobs_bp
 from routes.api_settings import api_settings_bp
 from routes.api_preview import api_preview_bp
+from routes.api_online import api_online_bp
 from routes.api_export import api_export_bp
 from routes.api_wishlist import api_wishlist_bp
 from routes.api_library import api_library_bp
@@ -198,6 +215,10 @@ def create_app() -> Flask:
         template_folder=str(_root / "templates"),
         static_folder=str(_root / "static"),
     )
+
+    # Flask 自身的异常日志（"Exception on /path [GET]" + traceback）写入 app.log / error.log，
+    # 而不是只打印到 stderr（launcher.log）
+    adopt_logger(app.logger)
 
     # 全局限制请求体大小，防止 DoS（最大 10MB）
     app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
@@ -221,8 +242,13 @@ def create_app() -> Flask:
         return f"/static/{filename}?v={version}"
 
     # ── 请求 ID + 计时初始化（每个请求执行一次） ──
-    from core.logger import set_request_id
+    from core.logger import set_request_id, clear_request_id
     import time as _time
+
+    @app.teardown_request
+    def _end_request_id(_exc):
+        # 请求结束后本线程不再属于该请求（SSE 用 stream_with_context，生成器结束后才会走到这里）
+        clear_request_id()
 
     @app.before_request
     def _init_request():
@@ -256,6 +282,7 @@ def create_app() -> Flask:
     app.register_blueprint(api_jobs_bp)
     app.register_blueprint(api_settings_bp)
     app.register_blueprint(api_preview_bp)
+    app.register_blueprint(api_online_bp)
     app.register_blueprint(api_export_bp)
     app.register_blueprint(api_wishlist_bp)
     app.register_blueprint(api_library_bp)
@@ -287,18 +314,28 @@ def create_app() -> Flask:
         return render_template("500.html", title="服务器错误"), 500
 
     # ── 请求日志中间件 ──────────────────────────────────
+    # 成功（2xx / 304）的静态资源与 launcher 的健康检查不写访问日志，否则每次打开页面都会刷出几十行；
+    # 其余请求照常记录，4xx/5xx 一律记录（5xx 为 WARNING，同时进入 error.log）。
+    _quiet_paths = frozenset({"/favicon.ico", "/api/system/health"})
+
     @app.after_request
     def _log_request(response):
-        """记录每个 HTTP 请求的 method、path、状态码、耗时"""
+        """记录 HTTP 请求的 method、path、状态码、耗时"""
         try:
             from flask import request
+            status = response.status_code
+            path = request.path
+            if (200 <= status < 300 or status == 304) and (
+                    path.startswith("/static/") or path in _quiet_paths):
+                return response
             duration_ms = round((_time.time() - request._request_start_time) * 1000) if hasattr(request, '_request_start_time') else -1
-            log.info(
-                f"HTTP {request.method} {request.path} → {response.status_code} ({duration_ms}ms)",
+            # response.status 带原因短语（"404 NOT FOUND"），使去重模板能区分不同结果
+            (log.warning if status >= 500 else log.info)(
+                f"HTTP {request.method} {path} → {response.status} ({duration_ms}ms)",
                 extra={
                     "method": request.method,
-                    "path": request.path,
-                    "status": response.status_code,
+                    "path": path,
+                    "status": status,
                     "duration_ms": duration_ms,
                 },
             )
@@ -309,9 +346,31 @@ def create_app() -> Flask:
     return app
 
 
+def _startup_record(port: int) -> dict:
+    """runtime/data/flask.json 的内容：launcher 用它核实服务身份、决定复用还是重启。"""
+    return {
+        "pid": os.getpid(),
+        "port": port,
+        "timestamp": time.time(),
+        "launch_token": os.environ.get("JMCONSOLE_LAUNCH_TOKEN", ""),
+        "code_fingerprint": _CODE_FINGERPRINT,
+    }
+
+
 def main():
+    # 日志：未捕获异常（含启动失败）写入 error.log
+    install_process_hooks()
+
     # 获取单实例锁
-    _acquire_lock()
+    try:
+        _acquire_lock()
+    except SystemExit as exc:
+        # 另一实例仍在运行/启动中（“重启未生效”的常见原因）：写入日志，而不只是打印到 launcher.log
+        log.error(f"启动中止：{exc}")
+        raise
+
+    # 清理 7 天前/超出总上限的历史日志，之后每天及每次轮转后自动清理
+    start_log_maintenance()
 
     # 初始化数据库
     db.init_db()
@@ -359,12 +418,7 @@ def main():
             job_manager.start()
             start_scheduler()
             # 记录实际端口
-            _PORT_FILE.write_text(json.dumps({
-                "pid": os.getpid(),
-                "port": actual_port,
-                "timestamp": time.time(),
-                "launch_token": os.environ.get("JMCONSOLE_LAUNCH_TOKEN", ""),
-            }))
+            _PORT_FILE.write_text(json.dumps(_startup_record(actual_port)))
             log.info(f"服务已启动 → http://127.0.0.1:{actual_port}")
             serve(app, sockets=[sock], threads=128)
         except ImportError:

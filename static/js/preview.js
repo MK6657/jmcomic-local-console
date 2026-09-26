@@ -1,40 +1,33 @@
 /**
- * 图片预览页 JavaScript
- * 依赖: utils.js (window.escapeHtml, window.escapeHtmlAttr)
- * 外部变量: albumId (由模板内联 <script> 注入)
+ * 图片预览页（单页翻页）JavaScript
+ * 依赖: utils.js (window.apiFetch, window.escapeHtmlAttr)、reading-nav.js (window.readingNav)
+ * album_id 取自 .preview-container[data-album-id]
  */
 (function () {
     'use strict';
 
+    var container = document.querySelector('.preview-container');
+    if (!container) return;
+    var albumId = container.getAttribute('data-album-id');
+    var nav = window.readingNav;
+
     // ── 状态 ──
-    var pages = [];          // {page, url, chapter}
-    var totalPages = 0;
-    window.currentPage = 0;
-    var albumTitle = '';
+    var pages = [];          // {page, url, chapter}，page 与下标一一对应（page = 下标 + 1）
+    var currentPage = 0;
     var THUMBNAILS_PER_PAGE = 100;
     var thumbnailsLoaded = 0;
-    var storageKey = 'jm-reader-page:' + albumId;
+    var activeThumb = null;
+    var spinnerTimer = 0;
+    var preloader = new Image();   // 预读下一页，翻页时直接命中缓存
 
     // ── DOM 引用 ──
     var $ = function (id) { return document.getElementById(id); };
     var previewImage = $('preview-image');
     var imgSpinner = $('img-spinner');
-    var noImageHint = $('no-image-hint');
-    var imgWrapper = $('image-wrapper');
-    var albumTitleEl = $('album-title');
-    var pageCurrent = $('page-current');
-    var pageTotal = $('page-total');
+    var imageHint = $('no-image-hint');
     var thumbContainer = $('thumb-container');
-    var loadingEl = $('preview-loading');
-    var readerContent = $('reader-content');
-    var errorEl = $('preview-error');
-    var errorMsg = $('error-message');
     var jumpInput = $('page-jump-input');
-
-    // 暴露给 HTML onclick
-    window.goPage = goPage;
-    window.jumpToPage = jumpToPage;
-    window.onImageError = onImageError;
+    var continuousLink = $('preview-continuous');
 
     // ── 加载数据 ──
     function loadPreview() {
@@ -46,33 +39,19 @@
                     return;
                 }
                 pages = data.pages || [];
-                totalPages = data.total_pages || 0;
-                window.totalPages = totalPages;
-                albumTitle = data.title || '';
+                var albumTitle = data.title || '';
 
                 // 显示阅读器
-                loadingEl.classList.add('d-none');
-                readerContent.classList.remove('d-none');
-                albumTitleEl.textContent = albumTitle;
-
-                // 更新页面信息
-                pageTotal.textContent = totalPages;
-                jumpInput.max = totalPages;
+                $('preview-loading').classList.add('d-none');
+                $('reader-content').classList.remove('d-none');
+                $('album-title').textContent = albumTitle;
+                $('page-total').textContent = pages.length;
+                jumpInput.max = pages.length;
                 document.title = albumTitle + ' - JMComic 图片预览';
 
-                // 生成缩略图
                 renderThumbnails();
-
-                // 跳转到第一页
-                if (totalPages > 0) {
-                    var saved = 1;
-                    try { saved = Number(sessionStorage.getItem(storageKey)) || 1; } catch (_) {}
-                    var requested = Number(new URLSearchParams(location.search).get('page'));
-                    if (requested > 0 && Number.isFinite(requested)) saved = requested;
-                    goPage(saved, true);
-                } else {
-                    noImageHint.style.display = 'block';
-                }
+                if (pages.length) goPage(nav.initialPage(albumId), true);
+                else showImageHint('本地没有找到图片', false);
             })
             .catch(function (err) {
                 if (err && err.name === 'AbortError') return; // pagehide 中止，静默
@@ -85,222 +64,181 @@
             });
     }
 
-    // ── 渲染缩略图（分页加载） ──
+    // ── 缩略图（分批渲染，点击由容器统一委托） ──
     function renderThumbnails() {
         thumbContainer.innerHTML = '';
         thumbnailsLoaded = 0;
+        activeThumb = null;
         loadMoreThumbnails();
     }
 
     function loadMoreThumbnails() {
-        // 移除旧的"加载更多"按钮（如果存在）
         var oldBtn = thumbContainer.querySelector('.load-more-item');
+        var hadFocus = oldBtn && oldBtn === document.activeElement;
         if (oldBtn) oldBtn.remove();
 
         var start = thumbnailsLoaded;
         var end = Math.min(start + THUMBNAILS_PER_PAGE, pages.length);
         var html = '';
         for (var i = start; i < end; i++) {
-            var p = pages[i];
             html += '<button type="button" class="thumb-item" data-page="' + (i + 1)
-                  + '" onclick="goPage(' + (i + 1) + ')" aria-label="第 ' + (i + 1) + ' 页" title="第 ' + (i + 1) + ' 页">'
-                  + '<img src="' + window.escapeHtmlAttr(p.url) + '" alt="第' + p.page + '页" loading="lazy" />'
+                  + '" aria-label="第 ' + (i + 1) + ' 页" title="第 ' + (i + 1) + ' 页">'
+                  + '<img src="' + window.escapeHtmlAttr(pages[i].url) + '" alt="" loading="lazy" decoding="async">'
                   + '<span class="thumb-number">' + (i + 1) + '</span></button>';
         }
-        // 用 insertAdjacentHTML 追加而非覆盖
         thumbContainer.insertAdjacentHTML('beforeend', html);
         thumbnailsLoaded = end;
 
-        // 如果还有更多，追加"加载更多"按钮
         if (thumbnailsLoaded < pages.length) {
-            var remaining = pages.length - thumbnailsLoaded;
             var loadBtn = document.createElement('button');
             loadBtn.type = 'button';
             loadBtn.className = 'load-more-item';
             loadBtn.textContent = '加载更多';
-            loadBtn.title = '剩余 ' + remaining + ' 页缩略图';
-            loadBtn.addEventListener('click', loadMoreThumbnails);
+            loadBtn.title = '剩余 ' + (pages.length - thumbnailsLoaded) + ' 页缩略图';
             thumbContainer.appendChild(loadBtn);
         }
+        // 键盘用户点了「加载更多」后，焦点落在新一批的第一张上，而不是丢回页面顶部
+        if (hadFocus) {
+            var firstNew = thumbContainer.querySelector('.thumb-item[data-page="' + (start + 1) + '"]');
+            if (firstNew) firstNew.focus({ preventScroll: true });
+        }
+    }
+
+    function highlightThumb(page) {
+        while (thumbnailsLoaded < page) loadMoreThumbnails();
+        if (activeThumb) {
+            activeThumb.classList.remove('active');
+            activeThumb.removeAttribute('aria-current');
+        }
+        activeThumb = thumbContainer.querySelector('.thumb-item[data-page="' + page + '"]');
+        if (!activeThumb) return;
+        activeThumb.classList.add('active');
+        activeThumb.setAttribute('aria-current', 'page');
+        centerActiveThumb();
+    }
+
+    function centerActiveThumb() {
+        if (!activeThumb) return;
+        var bounds = activeThumb.getBoundingClientRect();
+        var rail = thumbContainer.getBoundingClientRect();
+        thumbContainer.scrollTo({ left: thumbContainer.scrollLeft + bounds.left - rail.left - (rail.width - bounds.width) / 2, behavior: 'instant' });
     }
 
     // ── 翻页 ──
     function goPage(page, force) {
-        // 边界检查
-        if (totalPages === 0) return;
-        page = Math.floor(Number(page)) || 1;
-        if (page < 1) page = 1;
-        if (page > totalPages) page = totalPages;
-
+        if (!pages.length) return;
+        page = Math.min(pages.length, Math.max(1, Math.floor(Number(page)) || 1));
         if (page === currentPage && !force) return;
         currentPage = page;
-        try { sessionStorage.setItem(storageKey, String(page)); } catch (_) {}
-        $('preview-continuous').href = '/read/' + encodeURIComponent(albumId) + '?page=' + page;
-        try {
-            var url = new URL(location.href);
-            url.searchParams.set('page', page);
-            history.replaceState(history.state, '', url.pathname + url.search);
-        } catch (_) {}
-        while (thumbnailsLoaded < page) loadMoreThumbnails();
+        nav.remember(albumId, page, true);
+        continuousLink.href = '/read/' + encodeURIComponent(albumId) + '?page=' + page;
 
-        // 更新页码显示
-        pageCurrent.textContent = currentPage;
-        jumpInput.value = currentPage;
+        $('page-current').textContent = page;
+        jumpInput.value = page;
+        $('btn-first').disabled = $('btn-prev').disabled = page <= 1;
+        $('btn-next').disabled = $('btn-last').disabled = page >= pages.length;
 
-        // 查找对应页
-        var pageData = null;
-        for (var i = 0; i < pages.length; i++) {
-            if (pages[i].page === currentPage) {
-                pageData = pages[i];
-                break;
-            }
-        }
-
-        if (!pageData) {
-            showImageError('页面数据丢失');
-            return;
-        }
-
-        // ── 清除旧图片，释放内存 ──
-        previewImage.onload = null;
-        previewImage.onerror = null;
-        previewImage.removeAttribute('src');
-        // 清空 src 后强制重置，避免浏览器缓存旧图片数据
-        previewImage.src = '';
-
-        // 显示加载中
-        imgSpinner.classList.remove('d-none');
-        previewImage.style.display = 'none';
-        noImageHint.style.display = 'none';
-
-        // 加载图片
-        previewImage.onload = function () {
-            imgSpinner.classList.add('d-none');
-            previewImage.style.display = 'inline';
-        };
-        previewImage.onerror = function () {
-            imgSpinner.classList.add('d-none');
-            previewImage.style.display = 'none';
-            noImageHint.innerHTML = '<i class="bi bi-exclamation-circle" style="font-size:3rem;"></i>'
-                                  + '<p class="mt-2">图片加载失败</p>'
-                                  + '<button class="btn btn-sm btn-outline-primary mt-2" onclick="goPage(' + currentPage + ', true)">'
-                                  + '<i class="bi bi-arrow-clockwise"></i> 重试</button>';
-            noImageHint.style.display = 'block';
-        };
-        previewImage.src = pageData.url;
-
-        // 更新缩略图高亮
-        var thumbs = thumbContainer.querySelectorAll('.thumb-item');
-        for (var j = 0; j < thumbs.length; j++) {
-            var t = thumbs[j];
-            if (parseInt(t.getAttribute('data-page')) === currentPage) {
-                t.classList.add('active');
-                t.setAttribute('aria-current', 'page');
-                // 滚动到可视区
-                var bounds = t.getBoundingClientRect();
-                var rail = thumbContainer.getBoundingClientRect();
-                thumbContainer.scrollTo({ left: thumbContainer.scrollLeft + bounds.left - rail.left - (rail.width - bounds.width) / 2, behavior: 'instant' });
-            } else {
-                t.classList.remove('active');
-                t.removeAttribute('aria-current');
-            }
-        }
-
-        // 更新按钮状态
-        updateNavButtons();
+        showImage(false);
+        highlightThumb(page);
     }
 
-    function updateNavButtons() {
-        var btnFirst = $('btn-first');
-        var btnPrev = $('btn-prev');
-        var btnNext = $('btn-next');
-        var btnLast = $('btn-last');
-
-        btnFirst.disabled = (currentPage <= 1);
-        btnPrev.disabled = (currentPage <= 1);
-        btnNext.disabled = (currentPage >= totalPages);
-        btnLast.disabled = (currentPage >= totalPages);
+    // 旧图保留到新图加载完成（浏览器会继续显示当前图片），超过 200ms 才显示加载指示，避免翻页闪烁
+    function showImage(retry) {
+        var pageData = pages[currentPage - 1];
+        var src = pageData.url;
+        if (retry) {
+            var url = new URL(src, location.origin);
+            url.searchParams.set('retry', Date.now());
+            src = url.pathname + url.search;
+        }
+        imageHint.classList.add('d-none');
+        clearTimeout(spinnerTimer);
+        spinnerTimer = setTimeout(function () { imgSpinner.classList.remove('d-none'); }, 200);
+        previewImage.alt = '第 ' + currentPage + ' 页';
+        previewImage.src = src;
     }
 
-    // ── 跳转页 ──
-    function jumpToPage() {
-        var val = parseInt(jumpInput.value, 10);
-        if (isNaN(val) || val < 1) val = 1;
-        if (val > totalPages) val = totalPages;
-        goPage(val);
-    }
-
-    // ── 图片错误 ──
-    function onImageError() {
+    previewImage.addEventListener('load', function () {
+        clearTimeout(spinnerTimer);
         imgSpinner.classList.add('d-none');
-        previewImage.style.display = 'none';
-        noImageHint.innerHTML = '<i class="bi bi-exclamation-circle" style="font-size:3rem;"></i>'
-                              + '<p class="mt-2">图片加载失败</p>'
-                              + '<button class="btn btn-sm btn-outline-primary mt-2" onclick="goPage(' + currentPage + ', true)">'
-                              + '<i class="bi bi-arrow-clockwise"></i> 重试</button>';
-        noImageHint.style.display = 'block';
-    }
+        imageHint.classList.add('d-none');
+        previewImage.classList.remove('d-none');
+        var next = pages[currentPage];
+        if (next) preloader.src = next.url;
+    });
+    previewImage.addEventListener('error', function () {
+        if (previewImage.getAttribute('src')) showImageHint('图片加载失败', true);
+    });
 
-    function showImageError(msg) {
+    function showImageHint(message, canRetry) {
+        clearTimeout(spinnerTimer);
         imgSpinner.classList.add('d-none');
-        previewImage.style.display = 'none';
-        noImageHint.innerHTML = '<i class="bi bi-exclamation-circle" style="font-size:3rem;"></i>'
-                              + '<p class="mt-2">' + window.escapeHtml(msg) + '</p>';
-        noImageHint.style.display = 'block';
+        previewImage.classList.add('d-none');
+        var icon = document.createElement('i');
+        icon.className = 'bi bi-exclamation-circle';
+        icon.setAttribute('aria-hidden', 'true');
+        var text = document.createElement('p');
+        text.className = 'mt-2 mb-0';
+        text.textContent = message;
+        imageHint.replaceChildren(icon, text);
+        if (canRetry) {
+            var retry = document.createElement('button');
+            retry.type = 'button';
+            retry.className = 'btn btn-sm btn-outline-primary mt-2';
+            retry.innerHTML = '<i class="bi bi-arrow-clockwise" aria-hidden="true"></i> 重试';
+            retry.addEventListener('click', function () { showImage(true); });
+            imageHint.appendChild(retry);
+        }
+        imageHint.classList.remove('d-none');
     }
 
     // ── 错误 ──
     function showError(msg) {
-        loadingEl.classList.add('d-none');
-        readerContent.classList.add('d-none');
-        errorEl.classList.remove('d-none');
-        errorMsg.textContent = msg;
+        $('preview-loading').classList.add('d-none');
+        $('reader-content').classList.add('d-none');
+        $('preview-error').classList.remove('d-none');
+        $('error-message').textContent = msg;
     }
 
-    // ── 键盘事件 ──
-    document.addEventListener('keydown', function (e) {
-        // 不在输入框中触发
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-        if (e.key === 'ArrowLeft') {
-            e.preventDefault();
-            goPage(currentPage - 1);
-        } else if (e.key === 'ArrowRight') {
-            e.preventDefault();
-            goPage(currentPage + 1);
-        } else if (e.key === 'Home') {
-            e.preventDefault();
-            goPage(1);
-        } else if (e.key === 'End') {
-            e.preventDefault();
-            goPage(totalPages);
-        }
+    // ── 事件绑定 ──
+    $('btn-first').addEventListener('click', function () { goPage(1); });
+    $('btn-prev').addEventListener('click', function () { goPage(currentPage - 1); });
+    $('btn-next').addEventListener('click', function () { goPage(currentPage + 1); });
+    $('btn-last').addEventListener('click', function () { goPage(pages.length); });
+    $('page-jump').addEventListener('submit', function (e) {
+        e.preventDefault();
+        goPage(jumpInput.value);
     });
-
-    $('preview-continuous').addEventListener('click', function (event) {
-        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
-        event.preventDefault(); location.replace(this.href);
+    thumbContainer.addEventListener('click', function (e) {
+        var thumb = e.target.closest('.thumb-item');
+        if (thumb) goPage(Number(thumb.getAttribute('data-page')));
+        else if (e.target.closest('.load-more-item')) loadMoreThumbnails();
     });
     $('thumb-prev').addEventListener('click', function () { thumbContainer.scrollBy({ left: -thumbContainer.clientWidth * 0.8, behavior: 'instant' }); });
     $('thumb-next').addEventListener('click', function () { thumbContainer.scrollBy({ left: thumbContainer.clientWidth * 0.8, behavior: 'instant' }); });
+
+    // 方向键翻页；带修饰键时交给浏览器（Alt+← 是后退），输入框内不拦截
+    document.addEventListener('keydown', function (e) {
+        if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || !pages.length) return;
+        if (e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+        var target = { ArrowLeft: currentPage - 1, ArrowRight: currentPage + 1, Home: 1, End: pages.length }[e.key];
+        if (target === undefined) return;
+        e.preventDefault();
+        goPage(target);
+    });
+
+    var resizeFrame = 0;
     window.addEventListener('resize', function () {
-        requestAnimationFrame(function () {
-            var selected = thumbContainer.querySelector('.thumb-item.active');
-            if (!selected) return;
-            var bounds = selected.getBoundingClientRect();
-            var rail = thumbContainer.getBoundingClientRect();
-            thumbContainer.scrollTo({ left: thumbContainer.scrollLeft + bounds.left - rail.left - (rail.width - bounds.width) / 2, behavior: 'instant' });
-        });
+        if (resizeFrame) return;
+        resizeFrame = requestAnimationFrame(function () { resizeFrame = 0; centerActiveThumb(); });
     });
     window.addEventListener('pageshow', function (event) { if (event.persisted && !pages.length) loadPreview(); });
 
+    nav.bindModeSwitch(continuousLink);
+    nav.bindBack($('preview-back'));
+
     // ── 启动 ──
-    document.addEventListener('DOMContentLoaded', function () {
-        if (typeof albumId !== 'undefined' && albumId) {
-            loadPreview();
-        } else {
-            showError('缺少 album_id 参数');
-        }
-    });
+    if (albumId) loadPreview();
+    else showError('缺少 album_id 参数');
 
 })();

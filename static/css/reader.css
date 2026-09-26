@@ -1,24 +1,23 @@
-/* Uses the locked eye-care colors, typography, spacing and radius tokens. */
-.continuous-reader { max-width: 64rem; margin: 0 auto; }
-.reader-toolbar {
-  position: static;
-  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
-  padding: 16px; margin-bottom: 16px;
-  background: var(--bg-secondary); border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-}
-.reader-heading { flex: 1; min-width: 0; }
-.reader-heading h1 { font-size: 20px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
-.reader-jump { display: flex; gap: 8px; }
-.reader-jump input { width: 5rem; }
+/* Continuous reader. Uses the locked eye-care colors, typography, spacing and radius tokens.
+   The page header (.reader-toolbar) is shared with the paged reader and lives in style.css. */
+.continuous-reader { max-width: 64rem; margin: 0 auto; padding-top: 16px; }
+.continuous-reader:focus { outline: none; }
 .reader-tools {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 10;
   width: max-content; max-width: calc(100% - 32px);
-  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px;
-  padding: 16px; background: var(--bg-secondary); border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px 16px;
+  padding: 8px 16px; background: var(--bg-secondary); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-md);
 }
 .reader-tools[hidden] { display: none; }
+.reader-tools-group { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.reader-progress { color: var(--text-primary); font-size: 14px; font-weight: 500; white-space: nowrap; }
+.reader-jump { display: flex; gap: 8px; }
+.reader-jump input { width: 5rem; }
+.reader-state { margin: 16px 0; text-align: center; color: var(--text-secondary); }
+.reader-state .card-body { padding: 24px 16px; }
+.reader-state-icon { display: block; margin-bottom: 8px; font-size: 32px; color: var(--text-tertiary); }
+.reader-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .reader-page {
   min-height: 12rem; margin: 0 0 16px;
   background: var(--bg-secondary); border: 1px solid var(--border);
@@ -29,7 +28,6 @@
 .reader-page figcaption { padding: 8px 16px; color: var(--text-secondary); font-size: 14px; }
 .reader-page-error { padding: 24px 16px; text-align: center; color: var(--text-secondary); }
 @media (max-width: 576px) {
-  .reader-toolbar { padding: 8px; }
-  .reader-heading h1 { font-size: 16px; }
-  .reader-tools { padding: 8px; width: calc(100% - 32px); }
+  .reader-tools { width: calc(100% - 32px); padding: 8px; gap: 8px; }
+  .reader-progress { flex-basis: 100%; text-align: center; }
 }

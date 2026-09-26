@@ -1,7 +1,8 @@
 /**
  * JMComic 搜索页 JavaScript — 搜索 + 渲染 + 分页
  * 使用 Bootstrap alert 替代原生 alert()
- * 依赖: utils.js (window.apiFetch — 自带 AbortController/超时/pagehide 清理)
+ * 依赖: utils.js (window.apiFetch — 自带 AbortController/超时/pagehide 清理；window.escapeHtml / escapeHtmlAttr)
+ * 动态内容不使用内联 onclick：按钮带 data-* 属性，由容器统一委托处理
  */
 (function () {
   'use strict';
@@ -16,6 +17,9 @@
   var statusDiv = document.getElementById('search-status');
 
   if (!searchForm || !resultsDiv) return;
+
+  var escapeHtml = window.escapeHtml;
+  var escapeHtmlAttr = window.escapeHtmlAttr;
 
   var currentQuery = '';
   var currentPage = 1;
@@ -63,8 +67,9 @@
         && Date.now() - saved.savedAt < 30 * 60 * 1000) {
       lastResults = saved.data;
       renderResults(lastResults);
+      // instant：Bootstrap 的 :root { scroll-behavior: smooth } 会让返回时从顶部滑动到原位置
       requestAnimationFrame(function () {
-        requestAnimationFrame(function () { window.scrollTo(0, saved.scrollY || 0); });
+        requestAnimationFrame(function () { window.scrollTo({ top: saved.scrollY || 0, behavior: 'instant' }); });
       });
     } else {
       fetchResults(currentPage);
@@ -77,9 +82,22 @@
     requestSerial += 1;
   });
   resultsDiv.addEventListener('click', function (event) {
+    var action = event.target.closest('[data-action]');
+    if (action) {
+      if (action.getAttribute('data-action') === 'download') quickDownload(action);
+      else if (action.getAttribute('data-action') === 'wishlist') toggleWishlist(action);
+      return;
+    }
     if (event.target.closest('a, button, input')) return;
     var card = event.target.closest('[data-album-url]');
     if (card) window.location.href = card.getAttribute('data-album-url');
+  });
+  paginationDiv.addEventListener('click', function (event) {
+    var button = event.target.closest('button[data-page]');
+    if (!button || button.disabled) return;
+    fetchResults(Number(button.getAttribute('data-page')));
+    // 翻页后回到结果顶部（instant，避免平滑滚动动画）
+    if (resultsDiv.getBoundingClientRect().top < 0) resultsDiv.scrollIntoView({ block: 'start', behavior: 'instant' });
   });
 
   // ── 全局 alert 管理 ──
@@ -232,23 +250,23 @@
       return;
     }
 
-    // 渲染卡片（网格布局，每行4个）——整个卡片可点击
+    // 渲染卡片（网格布局，每行4个）——整个卡片可点击；封面链接与标题同址，移出 Tab 顺序避免重复
     var html = '<div class="row row-cols-1 row-cols-sm-2 row-cols-lg-3 row-cols-xl-4 g-3 mb-4">';
     items.forEach(function (item) {
       var albumUrl = '/album/' + encodeURIComponent(item.album_id);
       html += '<div class="col">';
-      html += '<div class="card album-card h-100 shadow-sm" data-album-url="' + albumUrl + '">';
-      html += '<a href="' + albumUrl + '" class="text-decoration-none text-reset">';
+      html += '<div class="card album-card h-100" data-album-url="' + albumUrl + '">';
+      html += '<a href="' + albumUrl + '" class="card-cover-link" tabindex="-1" aria-hidden="true">';
 
       // 封面
       if (item.cover_url) {
-        html += '<img src="' + escapeHtmlAttr(item.cover_url) + '" class="card-img-top" alt="' + escapeHtmlAttr(item.title) + '" loading="lazy">';
+        html += '<img src="' + escapeHtmlAttr(item.cover_url) + '" class="card-img-top" alt="" loading="lazy" decoding="async">';
       } else {
         html += '<div class="cover-placeholder"><i class="bi bi-image"></i></div>';
       }
 
       html += '</a><div class="card-body d-flex flex-column">';
-      html += '<h6 class="card-title"><a class="text-decoration-none text-reset" href="' + albumUrl + '">' + escapeHtml(item.title) + '</a></h6>';
+      html += '<h6 class="card-title" title="' + escapeHtmlAttr(item.title) + '"><a class="text-decoration-none text-reset" href="' + albumUrl + '">' + escapeHtml(item.title) + '</a></h6>';
       html += '<div class="mb-2 small text-muted">';
       if (item.author) html += '<div><i class="bi bi-person"></i> ' + escapeHtml(item.author) + '</div>';
       if (item.album_id) html += '<div><i class="bi bi-hash"></i> ' + escapeHtml(item.album_id) + '</div>';
@@ -263,13 +281,13 @@
         html += '</div>';
       }
 
-      // 按钮（需 stopPropagation 防止触发父 <a> 导航）
+      // 按钮：详情 / 阅读为链接；下载 / 收藏由 resultsDiv 的委托处理（data-action）
       html += '<div class="mt-auto"><div class="d-flex gap-2 mb-2">';
       html += '<a href="' + albumUrl + '" class="btn btn-outline-primary btn-sm flex-fill"><i class="bi bi-info-circle"></i> 详情</a>';
       html += '<a href="/read/' + encodeURIComponent(item.album_id) + '" class="btn btn-outline-primary btn-sm flex-fill reader-link"><i class="bi bi-book"></i> 阅读</a>';
       html += '</div><div class="d-flex gap-2">';
-      html += '<button type="button" class="btn btn-success btn-sm flex-fill" data-album-id="' + escapeHtmlAttr(item.album_id) + '" onclick="event.stopPropagation();quickDownload(this)"><i class="bi bi-download"></i> 下载</button>';
-      html += '<button type="button" class="btn btn-sm wishlist-btn btn-outline-warning" data-album-id="' + escapeHtmlAttr(item.album_id) + '" data-title="' + escapeHtmlAttr(item.title) + '" data-author="' + escapeHtmlAttr(item.author) + '" data-cover="' + escapeHtmlAttr(item.cover_url) + '" onclick="event.stopPropagation();toggleWishlist(this)" title="收藏"><i class="bi bi-star"></i></button>';
+      html += '<button type="button" class="btn btn-success btn-sm flex-fill" data-action="download" data-album-id="' + escapeHtmlAttr(item.album_id) + '"><i class="bi bi-download"></i> 下载</button>';
+      html += '<button type="button" class="btn btn-sm wishlist-btn btn-outline-warning" data-action="wishlist" data-album-id="' + escapeHtmlAttr(item.album_id) + '" data-title="' + escapeHtmlAttr(item.title) + '" data-author="' + escapeHtmlAttr(item.author) + '" data-cover="' + escapeHtmlAttr(item.cover_url) + '" title="收藏" aria-label="收藏"><i class="bi bi-star"></i></button>';
       html += '</div></div>';
 
       html += '</div></div></div>';
@@ -281,17 +299,22 @@
     renderPagination(currentPage, totalPages);
   }
 
+  function pageButton(page, label, ariaLabel, disabled, current) {
+    return '<button type="button" class="page-link" data-page="' + page + '"'
+      + (ariaLabel ? ' aria-label="' + ariaLabel + '"' : '') + (current ? ' aria-current="page"' : '')
+      + (disabled ? ' disabled' : '') + '>' + label + '</button>';
+  }
+
   function renderPagination(page, totalPages) {
     if (totalPages <= 1) {
       paginationDiv.innerHTML = '';
       return;
     }
 
-    var html = '<nav><ul class="pagination justify-content-center">';
+    var html = '<nav aria-label="搜索结果分页"><ul class="pagination justify-content-center">';
 
     // 上一页
-    html += '<li class="page-item ' + (page <= 1 ? 'disabled' : '') + '">';
-    html += '<button class="page-link" onclick="searchGoTo(' + (page - 1) + ')" aria-label="上一页">&laquo;</button></li>';
+    html += '<li class="page-item' + (page <= 1 ? ' disabled' : '') + '">' + pageButton(page - 1, '&laquo;', '上一页', page <= 1) + '</li>';
 
     // 页码
     var start = Math.max(1, page - 2);
@@ -299,36 +322,29 @@
     start = Math.max(1, end - 4);
 
     if (start > 1) {
-      html += '<li class="page-item"><button class="page-link" onclick="searchGoTo(1)">1</button></li>';
+      html += '<li class="page-item">' + pageButton(1, '1') + '</li>';
       if (start > 2) html += '<li class="page-item disabled"><span class="page-link">...</span></li>';
     }
 
     for (var p = start; p <= end; p++) {
-      html += '<li class="page-item ' + (p === page ? 'active' : '') + '">';
-      html += '<button class="page-link" onclick="searchGoTo(' + p + ')" aria-label="第 ' + p + ' 页">' + p + '</button></li>';
+      html += '<li class="page-item' + (p === page ? ' active' : '') + '">' + pageButton(p, p, '第 ' + p + ' 页', false, p === page) + '</li>';
     }
 
     if (end < totalPages) {
       if (end < totalPages - 1) html += '<li class="page-item disabled"><span class="page-link">...</span></li>';
-      html += '<li class="page-item"><button class="page-link" onclick="searchGoTo(' + totalPages + ')" aria-label="末页">' + totalPages + '</button></li>';
+      html += '<li class="page-item">' + pageButton(totalPages, totalPages, '末页') + '</li>';
     }
 
     // 下一页
-    html += '<li class="page-item ' + (page >= totalPages ? 'disabled' : '') + '">';
-    html += '<button class="page-link" onclick="searchGoTo(' + (page + 1) + ')" aria-label="下一页">&raquo;</button></li>';
+    html += '<li class="page-item' + (page >= totalPages ? ' disabled' : '') + '">' + pageButton(page + 1, '&raquo;', '下一页', page >= totalPages) + '</li>';
 
     html += '</ul></nav>';
     paginationDiv.innerHTML = html;
   }
 
-  // ── 全局分页函数 ──
+  // ── 卡片操作 ──
 
-  window.searchGoTo = function (page) {
-    fetchResults(page);
-  };
-
-  window.quickDownload = function (btn) {
-    if (!btn) return;
+  function quickDownload(btn) {
     var albumId = btn.getAttribute('data-album-id');
     var title = '';
     // 从按钮所在卡片获取标题
@@ -337,6 +353,7 @@
       var titleEl = card.querySelector('.card-title');
       if (titleEl) title = titleEl.textContent || '';
     }
+    btn.disabled = true; // 防止连点重复建任务
     window.apiFetch('/api/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -368,28 +385,30 @@
       } else {
         showGlobalAlert(msg === '网络错误' ? '网络错误，请检查网络连接' : msg, 'danger');
       }
-    });
-  };
+    })
+    .finally(function () { btn.disabled = false; });
+  }
 
   // ── 收藏操作 ──
 
-  window.toggleWishlist = function (btn) {
+  function setWishlistButton(btn, starred) {
+    btn.querySelector('i').className = starred ? 'bi bi-star-fill' : 'bi bi-star';
+    btn.classList.toggle('btn-warning', starred);
+    btn.classList.toggle('btn-outline-warning', !starred);
+    btn.title = starred ? '取消收藏' : '收藏';
+    btn.setAttribute('aria-label', btn.title);
+  }
+
+  function toggleWishlist(btn) {
     var albumId = btn.getAttribute('data-album-id');
-    var title = btn.getAttribute('data-title') || '';
-    var author = btn.getAttribute('data-author') || '';
-    var coverUrl = btn.getAttribute('data-cover') || '';
-    var iconEl = btn.querySelector('i');
-    var isStarred = iconEl.classList.contains('bi-star-fill');
+    var isStarred = btn.querySelector('i').classList.contains('bi-star-fill');
 
     if (isStarred) {
       // 取消收藏
       window.apiFetch('/api/wishlist/' + encodeURIComponent(albumId), { method: 'DELETE', timeoutMs: 15000 })
         .then(function (data) {
           if (data.status === 'ok') {
-            iconEl.className = 'bi bi-star';
-            btn.classList.remove('btn-warning');
-            btn.classList.add('btn-outline-warning');
-            btn.title = '收藏';
+            setWishlistButton(btn, false);
             if (typeof showToast === 'function') showToast('已取消收藏', 'info');
             delete _wishlistCache[albumId];
           } else {
@@ -407,18 +426,15 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           album_id: albumId,
-          title: title || '',
-          author: author || '',
-          cover_url: coverUrl || ''
+          title: btn.getAttribute('data-title') || '',
+          author: btn.getAttribute('data-author') || '',
+          cover_url: btn.getAttribute('data-cover') || ''
         }),
         timeoutMs: 15000
       })
       .then(function (data) {
         if (data.status === 'ok') {
-          iconEl.className = 'bi bi-star-fill';
-          btn.classList.remove('btn-outline-warning');
-          btn.classList.add('btn-warning');
-          btn.title = '取消收藏';
+          setWishlistButton(btn, true);
           if (typeof showToast === 'function') showToast('已添加收藏', 'success');
           _wishlistCache[albumId] = 'none';
         } else {
@@ -430,25 +446,13 @@
         if (typeof showToast === 'function') showToast(toastErr(err, '收藏失败'), 'danger');
       });
     }
-  };
+  }
 
-  window.updateWishlistButtons = function () {
-    document.querySelectorAll('.wishlist-btn').forEach(function (btn) {
-      var albumId = btn.getAttribute('data-album-id');
-      var iconEl = btn.querySelector('i');
-      if (_wishlistCache[albumId] !== undefined) {
-        iconEl.className = 'bi bi-star-fill';
-        btn.classList.remove('btn-outline-warning');
-        btn.classList.add('btn-warning');
-        btn.title = '取消收藏';
-      } else {
-        iconEl.className = 'bi bi-star';
-        btn.classList.remove('btn-warning');
-        btn.classList.add('btn-outline-warning');
-        btn.title = '收藏';
-      }
+  function updateWishlistButtons() {
+    resultsDiv.querySelectorAll('.wishlist-btn').forEach(function (btn) {
+      setWishlistButton(btn, _wishlistCache[btn.getAttribute('data-album-id')] !== undefined);
     });
-  };
+  }
 
   // ── 事件绑定 ──
 
@@ -473,50 +477,57 @@
   });
 
   // ── 搜索历史 ──
+  // 关键词只放在 data-* 属性里（escapeHtmlAttr 对属性值是安全的）；拼进内联 JS 字符串则会被
+  // encodeURIComponent 不编码的 ' ( ) 打断，形成可存储的脚本注入。
+
+  var historyContainer = document.getElementById('search-history-container');
+  var historyTags = document.getElementById('search-history-tags');
 
   function loadSearchHistory() {
-    var container = document.getElementById('search-history-container');
-    var tagsDiv = document.getElementById('search-history-tags');
-    var clearBtn = document.getElementById('clear-search-history');
-    if (!container || !tagsDiv) return;
+    if (!historyContainer || !historyTags) return;
 
     window.apiFetch('/api/search-history', { timeoutMs: 15000 })
       .then(function (data) {
         if (data.status !== 'ok' || !data.items || data.items.length === 0) {
-          container.classList.add('d-none');
+          historyContainer.classList.add('d-none');
           return;
         }
         // 渲染去重后的标签 + 删除按钮
         var html = '';
         data.items.forEach(function (item) {
-          var kw = escapeHtml(item.keyword);
-          var kwEnc = encodeURIComponent(item.keyword);
-          html += '<span class="search-history-tag badge bg-light text-dark border px-3 py-2 me-1 mb-1" style="cursor:default;font-weight:normal;">'
-            + '<span class="search-history-text" style="cursor:pointer;" onclick="searchHistoryClick(\'' + kwEnc + '\')">' + kw + '</span>'
-            + ' <i class="bi bi-x-circle-fill text-danger search-history-del" style="cursor:pointer;" onclick="deleteSearchHistory(\'' + kwEnc + '\')" title="删除"></i>'
+          var kwAttr = escapeHtmlAttr(item.keyword);
+          html += '<span class="search-history-tag badge bg-light text-dark border px-3 py-2">'
+            + '<button type="button" class="search-history-text" data-history-search="' + kwAttr + '">' + escapeHtml(item.keyword) + '</button>'
+            + '<button type="button" class="search-history-del" data-history-delete="' + kwAttr + '" title="删除" aria-label="删除搜索历史 ' + kwAttr + '"><i class="bi bi-x-circle-fill" aria-hidden="true"></i></button>'
             + '</span>';
         });
         // 清空按钮
-        html += '<button class="btn btn-outline-danger btn-sm ms-2" onclick="clearSearchHistory()" title="清空全部"><i class="bi bi-trash"></i></button>';
-        tagsDiv.innerHTML = html;
-        container.classList.remove('d-none');
-        if (clearBtn) clearBtn.classList.remove('d-none');
+        html += '<button type="button" class="btn btn-outline-danger btn-sm" data-history-clear title="清空全部" aria-label="清空全部搜索历史"><i class="bi bi-trash" aria-hidden="true"></i></button>';
+        historyTags.innerHTML = html;
+        historyContainer.classList.remove('d-none');
       })
       .catch(function (err) {
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默（保留现有 UI）
-        container.classList.add('d-none');
+        historyContainer.classList.add('d-none');
       });
   }
 
-  // ── 搜索历史点击重新搜索 ──
-  window.searchHistoryClick = function (keyword) {
-    searchInput.value = decodeURIComponent(keyword);
-    doSearch();
-  };
+  if (historyTags) historyTags.addEventListener('click', function (event) {
+    var el = event.target.closest('[data-history-search], [data-history-delete], [data-history-clear]');
+    if (!el) return;
+    if (el.hasAttribute('data-history-search')) {
+      // 点击历史关键词重新搜索
+      searchInput.value = el.getAttribute('data-history-search');
+      doSearch();
+    } else if (el.hasAttribute('data-history-delete')) {
+      deleteSearchHistory(el.getAttribute('data-history-delete'));
+    } else {
+      clearSearchHistory();
+    }
+  });
 
   // ── 删除单条搜索历史 ──
-  window.deleteSearchHistory = function (keyword) {
-    keyword = decodeURIComponent(keyword);
+  function deleteSearchHistory(keyword) {
     if (!confirm('确定删除 "' + keyword + '" 的搜索历史？')) return;
     window.apiFetch('/api/search-history/' + encodeURIComponent(keyword), { method: 'DELETE', timeoutMs: 15000 })
       .then(function (data) {
@@ -529,10 +540,10 @@
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         console.warn('操作搜索历史失败');
       });
-  };
+  }
 
   // ── 清空全部搜索历史 ──
-  window.clearSearchHistory = function () {
+  function clearSearchHistory() {
     if (!confirm('确定清空全部搜索历史？')) return;
     window.apiFetch('/api/search-history/clear', { method: 'POST', timeoutMs: 15000 })
       .then(function (data) {
@@ -545,7 +556,7 @@
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         console.warn('操作搜索历史失败');
       });
-  };
+  }
 
   // URL is the source of truth; snapshots preserve results across both reload and bfcache.
   restoreSearchState();
@@ -560,19 +571,5 @@
 
   // ── 页面加载时获取搜索历史 ──
   loadSearchHistory();
-
-  // ── 工具 ──
-
-  function escapeHtml(text) {
-    if (!text) return '';
-    var d = document.createElement('div');
-    d.textContent = text;
-    return d.innerHTML;
-  }
-
-  function escapeHtmlAttr(text) {
-    if (!text) return '';
-    return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
 
 })();

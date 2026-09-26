@@ -33,6 +33,9 @@ def offline(monkeypatch):
         raise AssertionError("Network access is forbidden in regression tests")
     monkeypatch.setattr(socket.socket, "connect", blocked)
     monkeypatch.setattr(socket, "create_connection", blocked)
+    # jmcomic's HTTP goes through curl_cffi (libcurl), which never touches Python sockets
+    from curl_cffi.curl import Curl
+    monkeypatch.setattr(Curl, "perform", blocked)
 
 
 @pytest.fixture

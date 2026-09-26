@@ -55,24 +55,31 @@
             }
         });
 
+    // 无封面或封面加载失败（CDN 不可达）时显示的占位，尺寸与封面一致
+    var COVER_PLACEHOLDER = '<div class="detail-cover detail-cover-placeholder" role="img" aria-label="暂无封面"><i class="bi bi-image" aria-hidden="true"></i></div>';
+
     function renderAlbum(album) {
         spinner.classList.add('d-none');
         container.classList.remove('d-none');
 
+        var onlineUrl = '/online/' + encodeURIComponent(album.album_id);
         var html = '';
 
+        // 封面 + 信息：同一个 .row 内的两列，垂直居中对齐——封面比信息卡片矮时封面居中，高时信息卡片居中
+        html += '<div class="row g-4 mb-4 align-items-center">';
+
         // 左侧封面
-        html += '<div class="col-12 col-md-4 col-lg-3 mb-4">';
+        html += '<div class="col-12 col-md-4 col-lg-3">';
         if (album.cover) {
-            html += '<img src="' + window.escapeHtmlAttr(album.cover) + '" class="detail-cover shadow" alt="' + window.escapeHtmlAttr(album.title) + '">';
+            html += '<img src="' + window.escapeHtmlAttr(album.cover) + '" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title) + '" decoding="async">';
         } else {
-            html += '<div class="placeholder-cover" style="width:100%;max-width:350px;height:450px;"><i class="bi bi-image" style="font-size:3rem;"></i></div>'
+            html += COVER_PLACEHOLDER;
         }
         html += '</div>';
 
         // 右侧信息
         html += '<div class="col-12 col-md-8 col-lg-9">';
-        html += '<div class="card mb-4"><div class="card-body">';
+        html += '<div class="card"><div class="card-body">';
         html += '<h3 class="card-title">' + window.escapeHtml(album.title) + ' <button type="button" id="wishlist-toggle-btn" class="btn btn-sm btn-outline-warning ms-2" title="收藏"><i class="bi bi-star"></i></button></h3>';
         html += '<div class="row mt-3">';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-person"></i> 作者：</strong> ' + window.escapeHtml(album.author || '-') + '</div>';
@@ -115,9 +122,11 @@
             html += '</div>';
         }
 
-        html += '</div></div>';
+        html += '</div></div>'; // 信息卡片结束
+        html += '</div>';       // 右侧列结束
+        html += '</div>';       // 封面 + 信息行结束
 
-        // 章节列表
+        // 章节列表（整行）
         html += '<div class="card">';
         html += '<div class="card-header d-flex justify-content-between align-items-center">';
         html += '<span><i class="bi bi-list-ol"></i> 章节列表 <span class="badge bg-secondary">' + (album.photos ? album.photos.length : 0) + '</span></span>';
@@ -126,7 +135,7 @@
 
         html += '<div class="card-body p-0">';
         if (album.photos && album.photos.length > 0) {
-            html += '<table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" title="全选"></th><th style="width:60px">序号</th><th>章节名</th><th style="width:80px">页数</th></tr></thead><tbody>';
+            html += '<table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" title="全选"></th><th style="width:60px">序号</th><th>章节名</th><th style="width:80px">页数</th><th class="chapter-online"><span class="visually-hidden">在线观看</span></th></tr></thead><tbody>';
 
             album.photos.forEach(function (photo, idx) {
                 html += '<tr>';
@@ -134,6 +143,8 @@
                 html += '<td>' + (idx + 1) + '</td>';
                 html += '<td>' + window.escapeHtml(photo.title || '-') + '</td>';
                 html += '<td>' + window.escapeHtml(String(photo.page_count || '?')) + '</td>';
+                // 从本章第一页开始在线阅读（同一阅读页，可继续往后读其他章节）
+                html += '<td class="chapter-online"><a class="btn btn-sm btn-outline-primary" href="' + onlineUrl + '?chapter=' + encodeURIComponent(photo.photo_id) + '" title="在线观看本章" aria-label="在线观看第 ' + (idx + 1) + ' 章"><i class="bi bi-globe2" aria-hidden="true"></i></a></td>';
                 html += '</tr>';
             });
 
@@ -143,17 +154,20 @@
         }
         html += '</div>';
 
-        // 底部按钮
-        html += '<div class="card-footer"><div class="d-flex gap-2">';
+        // 底部按钮（窄屏自动换行）
+        html += '<div class="card-footer"><div class="d-flex flex-wrap gap-2">';
         html += '<button type="button" id="download-selected-btn" class="btn btn-primary"><i class="bi bi-download"></i> 下载选中章节</button>';
         html += '<button type="button" id="download-all-btn" class="btn btn-success"><i class="bi bi-download"></i> 下载全部</button>';
+        html += '<a href="' + onlineUrl + '" id="online-read-btn" class="btn btn-outline-primary" title="页面实时从网络加载，不下载、不保存"><i class="bi bi-globe2"></i> 在线观看</a>';
         html += '<a href="/search" class="btn btn-outline-secondary ms-auto"><i class="bi bi-arrow-left"></i> 返回搜索</a>';
         html += '</div></div>';
 
         html += '</div>'; // 章节卡片结束
-        html += '</div>'; // 右侧列结束
 
         container.innerHTML = html;
+
+        var cover = container.querySelector('img.detail-cover');
+        if (cover) cover.addEventListener('error', function () { cover.outerHTML = COVER_PLACEHOLDER; }, { once: true });
 
         // 绑定事件
         bindEvents(album);
