@@ -57,7 +57,7 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
 
 - Search cards now have a **Read** button opening a continuous scrolling local reader.
   It loads images in batches, supports page jumps/retry and remembers the page within the browser session.
-  Undownloaded albums show an explanation instead of starting a download or streaming upstream content.
+  It never starts a download; for an album that isn't downloaded, **Read** opens online reading instead (see below).
   The title scrolls away; return/jump controls stay hidden until you tap the picture/margin or press M.
   Press Escape to hide them again. A Reading tools button at the page top provides keyboard access.
   Page/chapter captions appear only on the first image; the hidden tools also include one-click top/bottom icons.
@@ -66,6 +66,19 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   In paged mode the whole page and its controls fit one desktop screen (thumbnails follow below); page turns keep
   the current image until the next one is ready, and the following page is preloaded. Arrow keys with Alt/Ctrl
   are left to the browser, so Alt+← still goes back.
+- The **搜索 / 收藏 / 资源库** links in the top bar return to where you left them in this tab (for 12 hours): the same
+  search results and page (shown from memory, without searching the site again), the same filters, sort and page, and
+  the same place in the list — even if you scrolled back up to reach the menu. Typing `/search` directly still opens a
+  fresh search page.
+- Comics you can read offline are marked "✓ 已下载 · 可离线阅读" everywhere: on search result covers, the detail
+  page, library cards, favourites and 下载管理 (which also offers 预览 for them). "Readable" means the
+  latest download's folder still exists and contains page images; deleted or emptied folders are shown as 文件已删除.
+- Every comic in search results, the library, favourites and 下载管理 (completed and failed tasks) has a **阅读**
+  button: a downloaded comic opens its local files (filled button, book icon), anything else opens online reading
+  (outlined button, globe icon). The choice is made when you click, so it is right even if the files changed after
+  the page was opened. The detail page keeps its **在线观看** button and adds **阅读** once the comic is downloaded.
+- Favourites can be filtered by download status and sorted by newest/oldest, title, author or status; the library
+  has matching status groups, sorting by author and a click-an-author filter. Choices are kept in the address bar.
 - The album detail page has a **Read online** button (and a per-chapter link) that opens the same continuous reader
   without downloading: this app fetches and unscrambles each page on demand through its own connection (same proxy
   and domains as downloads) and keeps recent pages in `runtime/cache/online/` (512 MB, least recently read pages
@@ -74,7 +87,8 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   slow page that is still arriving is not cut off early. The local reader stays local-only. On the detail page the cover is vertically centred against the information card; covers keep
   their proportions within the column width (max 300 px) and 400 px height, and small covers are not enlarged.
 - Returning from details or the reader restores the search query, sort, result page, results and scroll position.
-  Results are cached only in browser-session/history state and reused for up to 30 minutes.
+  Results are cached only in browser-session/history state: reused for up to 12 hours when you come back through the
+  menu or Back, and for up to 30 minutes on a reload (F5), after which the page searches again.
 
 - Search and detail pages; queued downloads, retry/cancel and SSE progress.
 - Animated GIF pages are downloaded without unscrambling and saved as animated WebP (still `NNNNN.webp`), so the

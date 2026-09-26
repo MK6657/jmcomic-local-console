@@ -64,10 +64,10 @@
 ## 修改前后
 
 18. **先读后改** — 先理解现有代码结构和数据流，再动手修改。
-19. **运行 lint** — 修改后必须运行 `npm run lint`。（如脚本不存在，输出缺失项）
-20. **运行 typecheck** — 修改后必须运行 `npm run typecheck`。（如脚本不存在，输出缺失项）
-21. **运行 build** — 修改后必须运行 `npm run build`。（如脚本不存在，输出缺失项）
-22. **如果以上脚本不存在**，输出缺失项，**不要擅自新增复杂工程配置**（如 ESLint、Prettier、TypeScript 配置等）。简单修复性脚本（如修复错误）除外。
+19. **运行测试** — 修改后必须运行离线测试套件 `python -m pytest -q`。（本项目是 Python 项目，没有 package.json / npm 脚本；CI 见 `.github/workflows/tests.yml`）
+20. **运行编译检查** — 修改后必须运行 `python -m compileall -q app.py launcher.py core routes`。
+21. **运行 JS 语法检查** — 修改后必须对每个 `static/js/*.js` 运行 `node --check <文件>`（一次只检查一个文件）。
+22. **如果以上命令无法运行**（如缺少依赖或 Node），输出缺失项，**不要擅自新增复杂工程配置**（如 ESLint、Prettier、TypeScript、mypy 配置等），确有需要先询问用户。简单修复性脚本（如修复错误）除外。
 23. **一致性检查** — 检查修改后的 UI 是否符合：
     - 颜色在许可色板内
     - 字体在许可列表内

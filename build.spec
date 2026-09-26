@@ -59,7 +59,10 @@ a = Analysis(
         "tcl",
         "idlelib",
         "unittest",
-        "distutils",
+        # 不要排除 "distutils"：Python 3.12 起它由 setuptools 提供（PyInstaller 自带 setuptools），
+        # cffi 会导入它，排除后 PyInstaller 的别名钩子报错
+        # ValueError: Target module "distutils" already imported as "ExcludedModule('distutils',)"。
+        # setuptools 仍在下方排除，因此不会打进包里。
         "pdb",
         "xmlrpc",
         "venv",

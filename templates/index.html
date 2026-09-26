@@ -27,9 +27,9 @@
                             </button>
                         </div>
                         <div class="col-6 col-md-2">
+                            <!-- 点击跳转由 home.js 处理（不用内联事件属性） -->
                             <button type="button" id="hero-download-btn"
-                               class="btn btn-outline-primary w-100"
-                               onclick="window.location.href='/search?keyword=' + encodeURIComponent(document.getElementById('hero-keyword').value.trim())">
+                               class="btn btn-outline-primary w-100">
                                 <i class="bi bi-download"></i> 车号下载
                             </button>
                         </div>
@@ -107,12 +107,15 @@
                                     <span class="badge bg-secondary">{{ job.status }}</span>
                                 {% endif %}
                                 {% if job.output_path %}
-                                <a href="javascript:void(0)"
-                                   onclick="window.openFolder({{ job.job_id | tojson }})"
-                                   class="btn btn-sm btn-outline-secondary"
-                                   title="打开文件夹">
-                                    <i class="bi bi-folder-open"></i>
-                                </a>
+                                <!-- job_id 只放进自动转义的 data-* 属性，由 home.js 委托处理（不拼进内联 JS） -->
+                                <button type="button"
+                                        class="btn btn-sm btn-outline-secondary"
+                                        data-action="open-folder"
+                                        data-job-id="{{ job.job_id }}"
+                                        title="打开文件夹"
+                                        aria-label="打开文件夹">
+                                    <i class="bi bi-folder2-open" aria-hidden="true"></i>
+                                </button>
                                 {% endif %}
                             </div>
                         </div>

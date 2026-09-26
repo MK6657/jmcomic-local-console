@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, request
 
 import core.database as db
 from core.jm_service import get_album_detail, get_album_detail_cached
+from core.local_availability import MAX_IDS, readable_album_ids
 from core.logger import bind_request_id, log
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 
@@ -21,10 +22,42 @@ def _sanitize_tag(tag: str) -> str:
     return tag.strip().lower()[:50]
 
 
+def readable_among(album_ids) -> set[str]:
+    """本地可读的 album_id —— 各页面共用 core.local_availability 的同一规则。
+    该规则单次最多判断 MAX_IDS 个，这里分批，供“可离线阅读”筛选与统计判断整个资源库/收藏。"""
+    ids = list(dict.fromkeys(str(a) for a in album_ids))
+    readable: set[str] = set()
+    for start in range(0, len(ids), MAX_IDS):
+        readable |= readable_album_ids(ids[start:start + MAX_IDS])
+    return readable
+
+
+def _mark_readable(items, readable=None):
+    """给每个条目加上 readable 布尔值（已算好整批集合时直接复用，否则只判断这一页），
+    再按与收藏相同的规则（db.download_state）加上 status_group / activity / files_missing，
+    同一部漫画在资源库和收藏里显示同一个状态。"""
+    if readable is None:
+        readable = readable_among(item["album_id"] for item in items)
+    for item in items:
+        item["readable"] = item["album_id"] in readable
+        if item.get("download_status") == "completed":
+            # 兼容字段：下载过的条目“本地文件在不在”与 readable / files_missing 同一个判断，不会自相矛盾
+            item["file_exists"] = item["readable"]
+        facts = item.pop("_facts", None) or {}
+        item.update(db.download_state(
+            item["readable"], facts.get("active_job"), facts.get("latest_job"),
+            facts.get("has_completed"), facts.get("legacy_status"),
+        ))
+    return items
+
+
 # 排序白名单
-_VALID_SORTS_LIBRARY = {"updated_at", "title", "album_id", "added_at"}
-# 状态白名单
-_VALID_STATUSES = {"downloaded", "queued", "none", "undownloaded"}
+_VALID_SORTS_LIBRARY = {"updated_at", "title", "album_id", "added_at", "author"}
+# 状态白名单：五档互不重叠、合起来就是全部，与收藏清单同一套分组（见 db.LIBRARY_STATUS_FILTERS）。
+# 旧参数值作别名：none（收藏页的“未下载”）→ undownloaded，queued → active。
+# 旧的 downloaded（“下载过”，把可离线阅读的也算进去，与其他档重叠）不再接受，按“全部”处理。
+_STATUS_ALIASES = {"none": "undownloaded", "queued": "active"}
+_VALID_STATUSES = set(db.LIBRARY_STATUS_FILTERS) | set(_STATUS_ALIASES)
 
 
 # ─── 资源库列表 ───
@@ -32,7 +65,7 @@ _VALID_STATUSES = {"downloaded", "queued", "none", "undownloaded"}
 
 @api_library_bp.get("/", strict_slashes=False)
 def library_list():
-    """资源库列表 GET /api/library?page=&page_size=&tag=&q=&status=&sort="""
+    """资源库列表 GET /api/library?page=&page_size=&tag=&q=&status=&sort=&author="""
     try:
         page = request.args.get("page", 1, type=int)
         page_size = request.args.get("page_size", 50, type=int)
@@ -42,18 +75,18 @@ def library_list():
         if tag:
             tag = tag.strip()[:100] or None
         keyword = request.args.get("q", "", type=str).strip()[:200]
-        status = request.args.get("status", None, type=str)
-        if status:
-            status = status.strip()[:20] or None
-            if status and status not in _VALID_STATUSES:
-                status = None
-            # 前端 "undownloaded" 对应数据库中的 "none"
-            if status == "undownloaded":
-                status = "none"
+        author = request.args.get("author", "", type=str).strip()[:200] or None
+        status_arg = request.args.get("status", "", type=str).strip()[:20]
+        if status_arg not in _VALID_STATUSES:
+            status_arg = ""
+        status = _STATUS_ALIASES.get(status_arg, status_arg) or None
         sort = request.args.get("sort", "updated_at", type=str).strip()[:50]
         if sort not in _VALID_SORTS_LIBRARY:
             sort = "updated_at"
 
+        # 按状态筛选时先判断整个资源库里哪些真能读（只有完成过下载的才可能），再交给 SQL 分组、过滤和分页：
+        # 能读的漫画属于“可离线阅读”，哪怕之后又排了新任务或新任务失败了（与收藏清单相同）
+        readable = readable_among(db.get_completed_album_ids()) if status else None
         result = db.get_library(
             page=page,
             page_size=page_size,
@@ -61,12 +94,18 @@ def library_list():
             keyword=keyword,
             status=status,
             sort=sort,
+            author=author,
+            readable_ids=readable,
         )
+        _mark_readable(result["items"], readable)
         log.info(
             f"API资源库列表 结果数={result['total']} page={page} tag={tag} "
-            f"q={keyword} status={status} sort={sort}"
+            f"q={keyword} status={status} sort={sort} author={author}"
         )
-        return jsonify({"status": "ok", **result})
+        return jsonify({
+            "status": "ok", **result,
+            "applied": {"status": status or "", "sort": sort, "author": author or ""},
+        })
     except Exception as e:
         log.error(f"API资源库列表失败 error={e}")
         return jsonify({"status": "error", "message": "获取资源库列表失败"}), 500
@@ -95,6 +134,7 @@ def library_stats():
     """统计信息 GET /api/library/stats"""
     try:
         stats = db.get_library_stat()
+        stats["readable_count"] = len(readable_among(db.get_completed_album_ids()))
         return jsonify({"status": "ok", **stats})
     except Exception as e:
         log.error(f"API资源库统计失败 error={e}")
@@ -116,6 +156,7 @@ def library_item(album_id: str):
         item = result["items"][0] if result["items"] else None
         if not item:
             return jsonify({"status": "error", "message": "未找到该条目"}), 404
+        _mark_readable([item])
         return jsonify({"status": "ok", "item": item})
     except Exception as e:
         log.error(f"API资源库详情失败 album_id={album_id} error={e}")

@@ -10,6 +10,7 @@ from core.jm_service import get_album_detail, get_album_detail_cached
 from core.job_manager import job_manager
 from core.logger import bind_request_id, log
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
+from routes.api_library import readable_among  # 本地可读：与资源库共用同一分批判断
 
 api_wishlist_bp = Blueprint("api_wishlist", __name__)
 
@@ -128,21 +129,32 @@ def remove_wishlist(album_id: str):
 
 @api_wishlist_bp.get("/api/wishlist")
 def list_wishlist():
-    """获取收藏列表，支持搜索(q)和排序(sort)"""
+    """获取收藏列表 GET /api/wishlist?page=&page_size=&q=&status=&sort=
+
+    status：readable 已下载（可阅读）/ active 排队中·下载中 / failed 失败 / none 未下载，其他值 = 全部；
+    sort：added_at 最新添加 / added_asc 最早添加 / title / author / status（白名单外 = added_at）。
+    筛选、排序、分页都在 SQL 里做，total 是筛选后的总数。
+    """
     page = request.args.get("page", 1, type=int)
     page_size = request.args.get("page_size", 50, type=int)
-    q = request.args.get("q", "", type=str).strip()
+    q = request.args.get("q", "", type=str).strip()[:200]
     sort = request.args.get("sort", "added_at", type=str).strip()
-    # 排序白名单（对应 db.get_all_wishlist 的 sort_map）
-    _VALID_SORTS_WISHLIST = {"title", "author", "added_at"}
-    if sort not in _VALID_SORTS_WISHLIST:
+    if sort not in db.WISHLIST_SORTS:  # 白名单（键即 SQL 排序子句的索引，值永远来自服务端）
         sort = "added_at"
-    log.debug(f"API获取收藏列表 page={page} q={q}")
+    status = request.args.get("status", "", type=str).strip()
+    if status not in db.WISHLIST_STATUS_GROUPS:
+        status = ""
+    log.debug(f"API获取收藏列表 page={page} q={q} status={status} sort={sort}")
     page = max(1, min(page, 500))
     page_size = max(1, min(200, page_size))
 
-    result = db.get_all_wishlist(page=page, page_size=page_size, keyword=q, sort=sort)
-    return jsonify({"status": "ok", **result})
+    # “已下载（可阅读）”与资源库、详情、搜索用同一条规则；只有完成过下载的收藏才可能可读
+    readable = readable_among(db.get_completed_album_ids(wishlist_only=True))
+    result = db.get_all_wishlist(
+        page=page, page_size=page_size, keyword=q, sort=sort,
+        status=status or None, readable_ids=readable,
+    )
+    return jsonify({"status": "ok", **result, "applied": {"status": status, "sort": sort}})
 
 
 @api_wishlist_bp.get("/api/wishlist/<album_id>")

@@ -10,15 +10,16 @@
         <div class="library-stats mt-1" id="library-stats">
             <span class="stat-item"><i class="bi bi-book"></i> 共 <strong id="stat-total">-</strong> 条</span>
             <span class="stat-item"><i class="bi bi-bookmark"></i> 收藏 <strong id="stat-wishlist">-</strong></span>
-            <span class="stat-item"><i class="bi bi-download"></i> 已下载 <strong id="stat-downloaded">-</strong></span>
+            <span class="stat-item" title="完成过下载任务的漫画，含本地文件已删除的"><i class="bi bi-download"></i> 下载过 <strong id="stat-downloaded">-</strong></span>
+            <span class="stat-item" title="本地文件完整、可以离线阅读的漫画"><i class="bi bi-book-half"></i> 可离线阅读 <strong id="stat-readable">-</strong></span>
             <span class="stat-item"><i class="bi bi-tags"></i> 标签 <strong id="stat-tags">-</strong></span>
         </div>
     </div>
     <div class="d-flex gap-2">
-        <button class="btn btn-outline-info btn-sm" onclick="reSyncAll()" title="从 18comic 重新同步所有标签">
+        <button type="button" class="btn btn-outline-info btn-sm" id="library-resync-btn" title="从 18comic 重新同步所有标签">
             <i class="bi bi-arrow-repeat"></i> 同步所有标签
         </button>
-        <button class="btn btn-outline-secondary btn-sm" onclick="refreshLibrary()" title="刷新">
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="library-refresh-btn" title="刷新">
             <i class="bi bi-arrow-clockwise"></i> 刷新
         </button>
     </div>
@@ -27,7 +28,8 @@
 <!-- ===== 标签云（可折叠） ===== -->
 <div class="card mb-3">
     <div class="card-body py-2 px-3">
-        <div class="tag-cloud-header" onclick="toggleTagCloud()" id="tag-cloud-toggle">
+        <div class="tag-cloud-header" id="tag-cloud-toggle" role="button" tabindex="0"
+             aria-controls="tag-cloud-container" aria-expanded="true">
             <i class="bi bi-chevron-down"></i>
             <strong><i class="bi bi-tags"></i> 按标签筛选</strong>
             <span class="text-muted small ms-2" id="tag-filter-hint"></span>
@@ -38,33 +40,41 @@
     </div>
 </div>
 
-<!-- ===== 筛选栏 ===== -->
+<!-- ===== 筛选栏（条件同步到地址栏，刷新/返回后保留） ===== -->
 <div class="library-filters">
     <div class="flex-fill" style="min-width:180px;">
         <input type="text" id="library-search" class="form-control" placeholder="搜索标题/作者/车号/标签..."
-               oninput="debouncedSearch()">
+               aria-label="搜索资源库" autocomplete="off">
     </div>
     <div style="min-width:130px;">
-        <select id="library-status" class="form-select" onchange="loadLibrary(1)">
+        <select id="library-status" class="form-select" aria-label="按下载状态筛选" autocomplete="off">
+            <!-- 五档互不重叠、合起来就是全部，与收藏清单同一套分组；每档就是卡片上的状态徽章 -->
             <option value="">状态：全部</option>
-            <option value="downloaded">已下载</option>
+            <option value="readable">可离线阅读</option>
+            <option value="active">排队中 / 下载中</option>
+            <option value="failed">失败</option>
+            <option value="missing">下载过 · 文件已删除</option>
             <option value="undownloaded">未下载</option>
         </select>
     </div>
     <div style="min-width:130px;">
-        <select id="library-sort" class="form-select" onchange="loadLibrary(1)">
+        <select id="library-sort" class="form-select" aria-label="排序方式" autocomplete="off">
             <option value="updated_at">排序：更新时间</option>
             <option value="title">排序：标题</option>
+            <option value="author">排序：作者</option>
             <option value="added_at">排序：添加时间</option>
         </select>
     </div>
-    <button class="btn btn-outline-danger btn-sm" onclick="clearFilters()" title="清除筛选" id="clear-filters-btn" style="display:none;">
+    <button type="button" class="btn btn-outline-danger btn-sm" title="清除筛选" id="clear-filters-btn" style="display:none;">
         <i class="bi bi-x-circle"></i> 清除筛选
     </button>
 </div>
 
+<!-- ===== 当前作者筛选（点卡片上的作者名进入） ===== -->
+<div id="library-active-filters" class="library-active-filters" hidden></div>
+
 <!-- ===== 漫画网格列表 ===== -->
-<div id="library-grid" class="library-grid"></div>
+<div id="library-grid" class="library-grid" data-nav-memory-list></div>
 
 <!-- ===== 分页 ===== -->
 <div id="library-pagination" class="pagination-container"></div>

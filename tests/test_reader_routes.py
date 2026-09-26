@@ -8,6 +8,14 @@ from PIL import Image
 STATIC_JS = Path(__file__).resolve().parent.parent / "static" / "js"
 
 
+@pytest.fixture(autouse=True)
+def downloaded(monkeypatch):
+    """/read shows the local reader only for a downloaded album and otherwise redirects to /online
+    (tests/test_offline_markers.py covers that); these tests are about the reader itself, so every album counts as downloaded."""
+    from core import local_availability
+    monkeypatch.setattr(local_availability, "is_readable", lambda album_id: True)
+
+
 def test_reader_renders_local_scrolling_controls(client):
     from core import database as db
     before = len(db.get_all_jobs())

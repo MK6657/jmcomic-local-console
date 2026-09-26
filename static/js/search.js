@@ -28,18 +28,37 @@
   var lastResults = null;
   var requestSerial = 0;
   var snapshotKey = 'jm-search-state-v1';
+  // 快照里的结果用多久（按取到结果的时间算）：经导航/后退回来与顶部导航“回到上次的搜索”一致（nav-memory.js）；
+  // 刷新（F5）是想看新结果，超过 30 分钟就重新搜索
+  var SNAPSHOT_MAX_AGE = (window.navMemory && window.navMemory.MAX_AGE) || 12 * 60 * 60 * 1000;
+  var RELOAD_MAX_AGE = 30 * 60 * 1000;
+  var lastFetchedAt = 0;      // lastResults 取到的时间
+  var pendingRestore = null;  // 快照里没有可用结果（离开时还在加载 / 已过期）时，重新请求后回到的位置
+  var restoring = null;       // 正要回到的快照：结果画出、滚回去之前离开或刷新，沿用它的位置，不拿页面顶部覆盖
 
-  function saveSearchState() {
+  /** leaving：离开页面（pagehide）时为 true，记“看到的位置”；加载、换页时记当前所在的位置 */
+  function saveSearchState(leaving) {
     if (!currentQuery) return;
     var url = new URL(window.location.href);
     url.searchParams.set('keyword', currentQuery);
     url.searchParams.set('sort', currentSort);
     url.searchParams.set('page_size', currentPageSize);
     url.searchParams.set('page', currentPage);
+    var nm = window.navMemory;
+    var keep = restoring;
+    var keepRaw = !!keep && typeof keep.rawScrollY === 'number';
+    var here = keep
+      ? { y: keepRaw ? keep.rawScrollY : (keep.scrollY || 0), listTop: keepRaw ? keep.rawResultsTop : keep.resultsTop }
+      : { y: Math.round(window.scrollY), listTop: nm ? nm.listTopNow() : null };
+    var seen = keep ? { y: keep.scrollY || 0, listTop: keep.resultsTop } : (leaving && nm ? nm.place() : here);
     var snapshot = {
       url: url.pathname + url.search, query: currentQuery, sort: currentSort,
-      pageSize: currentPageSize, page: currentPage, data: lastResults,
-      scrollY: window.scrollY, savedAt: Date.now()
+      pageSize: currentPageSize, page: currentPage, data: lastResults, fetchedAt: lastFetchedAt,
+      // 看到哪里了：为了点顶部导航刚滚回最上方时，记的是之前停留的位置（nav-memory.js）；
+      // 连同当时结果区的位置（上方的搜索历史后加载、高度不同时，按结果区换算）
+      scrollY: seen.y, resultsTop: seen.listTop,
+      rawScrollY: here.y, rawResultsTop: here.listTop,  // 刷新时回到的位置：就是刷新前所在的位置
+      savedAt: Date.now()
     };
     try {
       history.replaceState(Object.assign({}, history.state, { jmSearch: snapshot }), '', snapshot.url);
@@ -49,7 +68,24 @@
     try { sessionStorage.setItem(snapshotKey, JSON.stringify(snapshot)); } catch (_) {}
   }
 
-  function restoreSearchState() {
+  /**
+   * 当前地址的快照。后退/前进、往返缓存：优先这条历史记录自己的快照（同一地址可能有好几条历史记录，各有各的位置）；
+   * 刷新：历史记录里的和 sessionStorage 里的取较新的（刷新时 pagehide 写进历史记录的那次会丢）；
+   * 经导航新打开的历史记录没有自己的快照，用 sessionStorage 里的。
+   */
+  function snapshotForHere(reload) {
+    var here = location.pathname + location.search;
+    var own = history.state && history.state.jmSearch;
+    var session = null;
+    try { session = JSON.parse(sessionStorage.getItem(snapshotKey)); } catch (_) {}
+    own = own && typeof own === 'object' && own.url === here ? own : null;
+    session = session && typeof session === 'object' && session.url === here ? session : null;
+    if (own && session && reload) return (session.savedAt || 0) > (own.savedAt || 0) ? session : own;
+    return own || session;
+  }
+
+  /** fromCache：页面从往返缓存（bfcache）恢复 */
+  function restoreSearchState(fromCache) {
     var params = new URLSearchParams(window.location.search);
     currentQuery = params.get('keyword') || '';
     currentSort = ['latest', 'views', 'likes'].indexOf(params.get('sort')) >= 0 ? params.get('sort') : 'latest';
@@ -59,26 +95,43 @@
     searchInput.value = currentQuery;
     sortSelect.value = currentSort;
     pageSizeSelect.value = String(currentPageSize);
-    var saved = history.state && history.state.jmSearch;
-    if (!saved) {
-      try { saved = JSON.parse(sessionStorage.getItem(snapshotKey)); } catch (_) {}
-    }
-    if (saved && saved.url === location.pathname + location.search && saved.data
-        && Date.now() - saved.savedAt < 30 * 60 * 1000) {
+    var reload = !fromCache && !!window.navMemory && window.navMemory.navigationType() === 'reload';
+    var saved = snapshotForHere(reload);
+    restoring = saved;
+    var fetchedAt = saved ? (saved.fetchedAt || saved.savedAt) : 0;
+    var age = Date.now() - fetchedAt;
+    if (saved && saved.data && age >= 0 && age < (reload ? RELOAD_MAX_AGE : SNAPSHOT_MAX_AGE)) {
       lastResults = saved.data;
+      lastFetchedAt = fetchedAt;
       renderResults(lastResults);
-      // instant：Bootstrap 的 :root { scroll-behavior: smooth } 会让返回时从顶部滑动到原位置
-      requestAnimationFrame(function () {
-        requestAnimationFrame(function () { window.scrollTo({ top: saved.scrollY || 0, behavior: 'instant' }); });
-      });
+      scrollToSaved(saved, reload);
     } else {
+      pendingRestore = saved ? { saved: saved, reload: reload } : null;
       fetchResults(currentPage);
     }
     return true;
   }
 
+  /** 回到快照记下的位置：刷新回到刷新前所在处，其余回到“看到的位置”；在结果区内时按结果区现在的位置换算 */
+  function scrollToSaved(saved, reload) {
+    var raw = reload && typeof saved.rawScrollY === 'number';
+    var y = raw ? saved.rawScrollY : (saved.scrollY || 0);
+    var listTop = raw ? saved.rawResultsTop : saved.resultsTop;
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        if (restoring !== saved) return; // 这期间已经开始了新的搜索/翻页
+        restoring = null;
+        if (window.navMemory) {
+          window.navMemory.scrollBack(y, listTop);
+        } else {
+          window.scrollTo({ top: y, behavior: 'instant' }); // instant：避免 Bootstrap 的平滑滚动
+        }
+      });
+    });
+  }
+
   window.addEventListener('pagehide', function () {
-    saveSearchState();
+    saveSearchState(true);
     requestSerial += 1;
   });
   resultsDiv.addEventListener('click', function (event) {
@@ -150,6 +203,9 @@
     currentPageSize = parseInt(pageSizeSelect.value) || 20;
 
     var serial = ++requestSerial;
+    var restore = pendingRestore; // 只给恢复时的这一次请求用；之后的搜索/翻页从头看
+    pendingRestore = null;
+    if (!restore) restoring = null;
     lastResults = null;
     saveSearchState();
     paginationDiv.innerHTML = '';
@@ -173,7 +229,9 @@
         if (serial !== requestSerial) return;
         if (data.status !== 'ok') throw new Error(data.message || '搜索失败');
         lastResults = data;
+        lastFetchedAt = Date.now();
         renderResults(data);
+        if (restore) scrollToSaved(restore.saved, restore.reload);
         saveSearchState();
       })
       .catch(function (err) {
@@ -255,7 +313,9 @@
     items.forEach(function (item) {
       var albumUrl = '/album/' + encodeURIComponent(item.album_id);
       html += '<div class="col">';
-      html += '<div class="card album-card h-100" data-album-url="' + albumUrl + '">';
+      html += '<div class="card album-card h-100" data-album-url="' + albumUrl + '" data-album-id="' + escapeHtmlAttr(item.album_id) + '">';
+      // 已下载标记：盖在封面左上角，由 refreshReadable 按 /api/preview/available 的结果显示
+      html += '<span class="offline-badge offline-badge--cover" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载 · 可离线阅读</span>';
       html += '<a href="' + albumUrl + '" class="card-cover-link" tabindex="-1" aria-hidden="true">';
 
       // 封面
@@ -284,7 +344,8 @@
       // 按钮：详情 / 阅读为链接；下载 / 收藏由 resultsDiv 的委托处理（data-action）
       html += '<div class="mt-auto"><div class="d-flex gap-2 mb-2">';
       html += '<a href="' + albumUrl + '" class="btn btn-outline-primary btn-sm flex-fill"><i class="bi bi-info-circle"></i> 详情</a>';
-      html += '<a href="/read/' + encodeURIComponent(item.album_id) + '" class="btn btn-outline-primary btn-sm flex-fill reader-link"><i class="bi bi-book"></i> 阅读</a>';
+      // 阅读：已下载打开本地文件，否则在线阅读；判断结果回来前是中性样式（refreshReadable → setCardReadable）
+      html += window.readLink.html(item.album_id, undefined, 'btn-sm flex-fill reader-link');
       html += '</div><div class="d-flex gap-2">';
       html += '<button type="button" class="btn btn-success btn-sm flex-fill" data-action="download" data-album-id="' + escapeHtmlAttr(item.album_id) + '"><i class="bi bi-download"></i> 下载</button>';
       html += '<button type="button" class="btn btn-sm wishlist-btn btn-outline-warning" data-action="wishlist" data-album-id="' + escapeHtmlAttr(item.album_id) + '" data-title="' + escapeHtmlAttr(item.title) + '" data-author="' + escapeHtmlAttr(item.author) + '" data-cover="' + escapeHtmlAttr(item.cover_url) + '" title="收藏" aria-label="收藏"><i class="bi bi-star"></i></button>';
@@ -295,8 +356,54 @@
     html += '</div>';
     resultsDiv.innerHTML = html;
 
+    // 已下载标记每次渲染都重新判断（含从快照/bfcache 恢复），不沿用快照里的旧状态
+    refreshReadable();
+
     // 分页
     renderPagination(currentPage, totalPages);
+  }
+
+  // ── 已下载（本地可读）标记 ──
+  // 与详情/下载管理/收藏/资源库共用服务端同一判定（core.local_availability）
+
+  function setCardReadable(card, readable) {
+    var badge = card.querySelector('.offline-badge--cover');
+    if (badge) badge.hidden = !readable;
+    var link = card.querySelector('.reader-link');
+    if (link) window.readLink.apply(link, readable);
+  }
+
+  function refreshReadable() {
+    var cards = Array.prototype.slice.call(resultsDiv.querySelectorAll('.album-card[data-album-id]'));
+    var ids = [];
+    cards.forEach(function (card) {
+      var id = card.getAttribute('data-album-id');
+      if (/^[0-9]{1,20}$/.test(id) && ids.indexOf(id) < 0) ids.push(id);
+    });
+    if (ids.length === 0) return;
+    ids = ids.slice(0, 200);
+    // abortKey：翻页/重新搜索时中止上一页的判断，避免旧结果套到新卡片上
+    window.apiFetch('/api/preview/available', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ album_ids: ids }),
+      timeoutMs: 15000,
+      abortKey: 'search-readable'
+    })
+    .then(function (data) {
+      if (data.status !== 'ok') return;
+      var readable = {};
+      (data.readable || []).forEach(function (id) { readable[String(id)] = true; });
+      cards.forEach(function (card) {
+        var id = card.getAttribute('data-album-id');
+        // 只更新本次请求覆盖、且仍在页面上的卡片
+        if (ids.indexOf(id) >= 0 && resultsDiv.contains(card)) setCardReadable(card, !!readable[id]);
+      });
+    })
+    .catch(function (err) {
+      if (err && err.name === 'AbortError') return; // 翻页/pagehide 中止，静默
+      console.warn('查询本地下载状态失败');
+    });
   }
 
   function pageButton(page, label, ariaLabel, disabled, current) {
@@ -559,14 +666,19 @@
   }
 
   // URL is the source of truth; snapshots preserve results across both reload and bfcache.
-  restoreSearchState();
+  restoreSearchState(false);
   window.addEventListener('pageshow', function (event) {
     if (event.persisted) {
-      restoreSearchState();
+      // 重新渲染快照，renderResults 会重新判断已下载标记
+      restoreSearchState(true);
     } else if (!currentQuery && searchInput.value.trim()) {
       // Older history entries may restore only the form after scripts have executed.
       doSearch();
     }
+  });
+  // 切回本标签页（例如在另一个标签页下载完成后）时刷新已下载标记
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') refreshReadable();
   });
 
   // ── 页面加载时获取搜索历史 ──

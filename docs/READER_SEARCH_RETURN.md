@@ -13,7 +13,8 @@ also cleared an otherwise valid result list to issue another search.
 ## Behavior / 行为
 
 - URL records query/sort/page/page-size. A session/history snapshot stores result data and scroll offset.
-  Returning or reloading reuses a matching snapshot for at most 30 minutes; unavailable storage falls back to URL-based search.
+  Reloading reuses a matching snapshot for at most 30 minutes (since 2026-09-26, returning through the menu or Back
+  reuses it for up to 12 hours); unavailable storage falls back to URL-based search.
 - Search cards use separate semantic links/buttons, avoiding nested interactive elements, and add `Read` → `/read/<id>`.
 - The new local-only reader reuses `/api/preview/<id>`. It provides vertical scrolling, batches of 20 images,
   native image lazy loading, explicit retries, page jumps, on-demand controls and session page memory.
@@ -23,8 +24,9 @@ also cleared an otherwise valid result list to issue another search.
 - Only the first image retains the page/chapter caption. Hidden reading tools include accessible
   top/bottom icons: top returns to the document start, bottom renders remaining batches and aligns
   with the last image's lower edge. Position is maintained while lazy images finish loading.
-- The local reader (`/read`) never downloads or streams remote images; missing/deleted local images produce a clear
-  explanation. Online reading is a separate, explicit mode (`/online/<id>`, the detail page's Read online button):
+- The local reader (`/read`) never downloads or streams remote images. Since 2026-09-26 `/read/<id>` opens it only for
+  downloaded albums and redirects anything else to online reading (`/online/<id>`, keeping `?page=`); images deleted
+  while reading still produce a clear explanation. Online reading is a separate, explicit mode (`/online/<id>`, the detail page's Read online button):
   the same reader UI, fed by `/api/online` and `/api/online-img`, with its own page memory and no paged-mode link.
 - The paged preview now has a Continuous mode link; the continuous reader offers Paged mode in its hidden tools.
   Both share the current page through URL/session state and replace the mode's history entry, preserving Back navigation.
@@ -33,7 +35,7 @@ also cleared an otherwise valid result list to issue another search.
 - Colors, typography, spacing and radii follow the locked eye-care tokens; the paged canvas now uses the warm background too.
 
 搜索地址、结果快照和滚动位置一起保存；阅读按钮打开独立的连续阅读页，复用本地预览接口。
-每批 20 张图片并按需加载，支持跳页、重试与阅读位置记忆。保留原翻页预览，不自动下载或在线播放。
+每批 20 张图片并按需加载，支持跳页、重试与阅读位置记忆。保留原翻页预览，不自动下载或在线播放（2026-09-26 起：未下载的漫画点“阅读”转到在线阅读页）。
 标题不吸顶，返回和跳页默认隐藏；轻触画面/空白处、按 M 或点击页首阅读工具可唤出，Esc/收起/跳页后隐藏。
 只有第一页显示页码与章节说明；工具内新增一键到顶、到底小图标，到底会补齐剩余批次并定位末页图片底部。
 

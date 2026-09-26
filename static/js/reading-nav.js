@@ -45,12 +45,19 @@
       });
     },
 
-    /** 从站内页面进入时后退（保留搜索结果与滚动位置）；直接打开时跟随链接自身的 href */
+    /**
+     * 从站内页面进入时后退（保留搜索结果与滚动位置）；直接打开、或本标签页里前面没有页面时跟随链接自身的 href。
+     * 新标签页打开详情、再进阅读页又退回来时 history.length 为 2，但当前已是第一条历史，后退没有反应：
+     * 有 Navigation API 时以 navigation.canGoBack 为准。
+     */
     bindBack: function (link) {
       link.addEventListener('click', function (event) {
         if (!isPlainClick(event)) return;
         try {
-          if (history.length > 1 && new URL(document.referrer).origin === location.origin) {
+          var canGoBack = (window.navigation && typeof window.navigation.canGoBack === 'boolean')
+            ? window.navigation.canGoBack
+            : history.length > 1;
+          if (canGoBack && new URL(document.referrer).origin === location.origin) {
             event.preventDefault();
             history.back();
           }

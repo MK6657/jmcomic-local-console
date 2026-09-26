@@ -2,6 +2,7 @@
 页面路由 —— 返回 Jinja2 模板，传入必要数据
 """
 from flask import Blueprint, render_template, request, abort, redirect
+from core import local_availability
 from core.database import get_all_jobs, get_job
 from core.logger import log
 from core.settings import get_settings
@@ -82,9 +83,15 @@ def preview_page(album_id: str):
 
 @page_bp.get("/read/<album_id>")
 def continuous_reader(album_id: str):
-    """Continuous scrolling over existing local images; never starts a download."""
+    """“阅读”入口，各页面的“阅读”按钮都指向这里，点击时才决定去向：
+    本地可读（core.local_availability，全站同一标准）→ 连续阅读本地文件；否则 → 在线阅读 /online/<id>（保留 ?page=）。
+    页面打开后才下载完成、或本地文件被删除，点“阅读”也能去对地方。从不启动下载。"""
     if not validate_numeric(album_id):
         abort(400)
+    if not local_availability.is_readable(album_id):
+        page = request.args.get("page", type=int)
+        log.info(f"本地未下载，转到在线阅读 album_id={album_id}")
+        return redirect(f"/online/{album_id}" + (f"?page={page}" if page and page > 0 else ""))
     return render_template("reader.html", title="连续阅读", album_id=album_id, online=False)
 
 

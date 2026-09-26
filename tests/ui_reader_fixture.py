@@ -46,6 +46,9 @@ def main():
     app.view_functions["api_search.search"] = search
     app.view_functions["api_album.album_detail"] = detail
     app.view_functions["api_library.album_tags_sync"] = lambda album_id: jsonify(status="ok", synced=0, total_tags=0)
+    # 未下载的漫画点“阅读”会转到在线阅读：在线接口换成离线桩，从不访问上游
+    app.view_functions["api_online.online_album"] = lambda album_id: (
+        jsonify(status="error", message="在线加载失败，请稍后重试"), 502)
     app.add_url_rule("/test/metrics", "metrics", lambda: jsonify(calls))
     print(f"Fixture: http://127.0.0.1:{args.port}; data: {sandbox}", flush=True)
     serve(app, host="127.0.0.1", port=args.port, threads=8)

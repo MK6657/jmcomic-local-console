@@ -22,9 +22,10 @@ def _real_resolve(path: str | Path) -> Path:
     return Path(os.path.realpath(str(path), strict=False))
 
 
-def is_safe_path(path: str | Path) -> bool:
-    """检查路径是否在 DOWNLOAD_ROOT 内"""
-    root = _real_resolve(DOWNLOAD_ROOT)
+def is_safe_path(path: str | Path, root: Path | None = None) -> bool:
+    """检查路径是否在 DOWNLOAD_ROOT 内。
+    root：调用方已用 get_download_root() 解析好的下载目录（批量检查很多路径时只解析一次）；不传则现场解析。"""
+    root = _real_resolve(DOWNLOAD_ROOT) if root is None else root
     target = _real_resolve(path)
     try:
         target.relative_to(root)

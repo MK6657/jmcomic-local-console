@@ -36,6 +36,9 @@ def _check_job(job_id: str):
         return None, (jsonify({"status": "error", "message": "任务不存在"}), 404)
     if job["status"] != "completed":
         return None, (jsonify({"status": "error", "message": "任务未完成"}), 400)
+    if job.get("superseded_at"):
+        # 目录被删除后又被后来的下载重新建出（core.local_availability）：里面已不是这次下载的完整内容
+        return None, (jsonify({"status": "error", "message": "这次下载的文件已不在（目录已被重新下载），请从最新的下载任务导出"}), 404)
     output_path = job.get("output_path", "")
     if not output_path:
         return None, (jsonify({"status": "error", "message": "任务无输出路径"}), 404)

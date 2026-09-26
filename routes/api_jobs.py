@@ -67,6 +67,10 @@ def check_cbz_exists(job):
     return _check_cbz_path(job.get("output_path") or "")
 
 
+# 仍会往输出目录写入的任务状态（打开文件夹时目录可以先建出来）
+_ACTIVE_JOB_STATUSES = ("queued", "running", "paused")
+
+
 def _check_job_id(job_id: str):
     """校验 job_id 并返回统一错误响应（供路由直接调用）"""
     if not validate_job_id(job_id):
@@ -233,11 +237,14 @@ def resume_job(job_id: str):
 
 @api_jobs_bp.post("/api/jobs/<job_id>/retry")
 def retry_job(job_id: str):
-    """重试任务(失败/已取消的任务可重试,会创建新任务)"""
+    """重试 / 重新下载任务(失败、已取消、已完成的任务都可以,会创建新任务;原记录保留)"""
     err = _check_job_id(job_id)
     if err:
         return err
-    new_job_id = job_manager.retry_job(job_id)
+    new_job_id, reason = job_manager.retry_job(job_id)
+    if reason == "status":
+        log.warning(f"API重试任务失败 job_id={job_id} 任务还没结束")
+        return jsonify({"status": "error", "message": "该任务状态不能重试"}), 400
     if not new_job_id:
         log.warning(f"API重试任务失败 job_id={job_id} 原任务不存在")
         return jsonify({"status": "error", "message": "原任务不存在"}), 404
@@ -267,7 +274,7 @@ def remove_job(job_id: str):
 
 @api_jobs_bp.post("/api/jobs/<job_id>/open-folder")
 def open_folder(job_id: str):
-    """打开任务的下载目录"""
+    """打开任务的下载目录。已结束任务的目录不在了 → 404（不重建空目录）；未结束任务的目录先建出来再打开。"""
     err = _check_job_id(job_id)
     if err:
         return err
@@ -282,7 +289,21 @@ def open_folder(job_id: str):
     if not is_safe_path(output_path):
         return jsonify({"status": "error", "message": "路径安全校验失败"}), 403
 
-    os.makedirs(output_path, exist_ok=True)
+    if not os.path.isdir(output_path):
+        # 还没结束的任务（排队中 / 下载中 / 已暂停，含“重试”沿用旧路径的新任务）：目录马上就会写入，先建出来再打开。
+        # 已结束的任务（已完成 / 失败 / 已取消）不再写入这个目录：文件被删了就如实报告，
+        # 不能重建一个空目录——原来重建出的空目录会让各页面把这部漫画显示成“可离线阅读”，点“阅读”却什么都没有。
+        if job.get("status") not in _ACTIVE_JOB_STATUSES:
+            log.warning(f"API打开目录失败 目录已不存在 job_id={job_id} status={job.get('status')} path={output_path}")
+            return jsonify({
+                "status": "error",
+                "message": "下载文件夹已不存在（可能已被删除或移动），可以重新下载",
+            }), 404
+        try:
+            os.makedirs(output_path, exist_ok=True)
+        except OSError as e:
+            log.warning(f"API打开目录失败 无法创建目录 job_id={job_id} path={output_path} error={e}")
+            return jsonify({"status": "error", "message": "打开文件夹失败"}), 500
 
     try:
         os.startfile(output_path)
