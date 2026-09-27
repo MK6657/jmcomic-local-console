@@ -11,27 +11,34 @@ async (page) => {
   await page.evaluate(() => sessionStorage.removeItem('jm-reader-page:900001'));
   await page.getByLabel('关键词或车号').fill('sample');
   await page.getByRole('button', { name: '搜索', exact: false }).click();
+  // the fixture pages its 120 results: 20 per page, page 2 holds Sample comic 21-40
   await page.locator('.reader-link').first().waitFor();
-  check(await page.locator('.reader-link').count() === 12, 'Missing reading buttons');
+  check(await page.locator('.reader-link').count() === 20, 'Missing reading buttons');
   check(await page.locator('a a, a button').count() === 0, 'Interactive elements nested inside links');
   await page.getByRole('button', { name: '第 2 页', exact: true }).click();
-  await page.waitForFunction(() => location.search.includes('page=2') && document.querySelectorAll('.reader-link').length === 12);
-  const queryUrl = page.url();
+  await page.waitForFunction(() => location.search.includes('page=2') && document.querySelectorAll('.reader-link').length === 20);
+  const page2Url = page.url();
   const requestsBeforeBack = await metrics();
-  const item = page.locator('.card-title').getByRole('link', { name: 'Sample comic 9', exact: true });
+  const item = page.locator('.card-title').getByRole('link', { name: 'Sample comic 29', exact: true });
   await item.scrollIntoViewIfNeeded();
   const oldScroll = await page.evaluate(() => scrollY);
   await item.click();
-  await page.waitForURL('**/album/900009');
+  await page.waitForURL('**/album/900029');
   await page.getByText('Sample detail', { exact: true }).waitFor();
   await page.goBack();
   await page.locator('.reader-link').first().waitFor();
   await page.waitForFunction(y => Math.abs(scrollY - y) < 40, oldScroll);
-  check(page.url() === queryUrl, 'Back lost query/page parameters');
+  check(page.url() === page2Url, 'Back lost query/page parameters');
   check(await metrics() === requestsBeforeBack, 'Back issued another upstream search');
   await page.reload();
   await page.locator('.reader-link').first().waitFor();
   check(await metrics() === requestsBeforeBack, 'Reload did not reuse snapshot');
+  // the reader checks use the fixture's local download (900001) and an online-only comic (900002): both on page 1
+  await page.getByRole('button', { name: '第 1 页', exact: true }).click();
+  await page.waitForFunction(() => /[?&]page=1(&|$)/.test(location.search)
+    && document.querySelector('a.reader-link[href="/read/900001"]') !== null);
+  const queryUrl = page.url();
+  const requestsBeforeReader = await metrics();
   await page.evaluate(() => scrollTo(0, 0));
   await page.screenshot({ path: 'output/playwright/search-reading-desktop.png', animations: 'disabled' });
 
@@ -94,7 +101,7 @@ async (page) => {
   await page.locator('#reader-back').click();
   await page.locator('.reader-link').first().waitFor();
   check(page.url() === queryUrl, 'Reader back did not return to original results');
-  check(await metrics() === requestsBeforeBack, 'Reader back refetched search results');
+  check(await metrics() === requestsBeforeReader, 'Reader back refetched search results');
 
   // 未下载的漫画：阅读按钮是在线样式，点击后 /read 转到在线阅读（fixture 的在线接口是离线桩，只回错误）
   await page.locator('a.reader-link[href="/read/900002"][data-read-state="online"]').waitFor();

@@ -1638,6 +1638,11 @@ code {
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
+  /* 很矮的窗口（横屏手机、放大很多倍）：面板不超出屏幕顶部，放不下时在面板里滚动 */
+  max-height: calc(100vh - 16px - 44px - 8px - 8px - env(safe-area-inset-bottom, 0px));
+  max-height: calc(100dvh - 16px - 44px - 8px - 8px - env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   visibility: hidden;
   opacity: 0;
   transition: opacity 150ms ease, visibility 0s linear 150ms;
@@ -1690,8 +1695,10 @@ code {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
-/* Toast 让出右下角：从快捷导航按钮上方开始往上叠（16px 边距 + 44px 按钮） */
+/* Toast 让出右下角：从快捷导航按钮上方开始往上叠（16px 边距 + 44px 按钮）；
+   面板展开时再让到面板上方（面板实际高度由 quick-nav.js 写进 --quick-nav-panel-h），不挡住面板里的去处 */
 body:has(.quick-nav) #toast-container { bottom: calc(16px + 44px) !important; }
+body:has(.quick-nav.is-open) #toast-container { bottom: calc(16px + 44px + 8px + var(--quick-nav-panel-h, 195px)) !important; }
 /* 滚到最底时页脚文字不被按钮压住：页脚下方留出按钮的位置 */
 body:has(.quick-nav) .footer { padding-bottom: calc(16px + 44px + 16px); }
 /* 资源库：设置里开启“点击卡片空白处打开详情”时，正文空白处显示可点击的指针 */

@@ -60,10 +60,17 @@ def test_library_script_only_opens_details_from_blank_space_when_enabled():
     handler = handler[:handler.index("});") + 3]
     # the blank-space branch checks the setting before it can open a tab; explicit actions come first
     assert handler.index("filter-author") < handler.index("if (!cardClickOpens) return;") < handler.index("window.open(")
-    # a changed setting is picked up when returning to the tab or from the back/forward cache
-    assert "refreshCardClickSetting();" in src[src.index("window.addEventListener('pageshow'"):]
+    # a changed setting is picked up when returning to the tab, the window or from the back/forward cache
+    pageshow = src[src.index("window.addEventListener('pageshow'"):src.index("document.addEventListener('visibilitychange'")]
+    assert "refreshCardClickSetting();" in pageshow
     visibility = src[src.index("document.addEventListener('visibilitychange'"):]
     assert "refreshCardClickSetting();" in visibility[:visibility.index("});")]
+    assert "window.addEventListener('focus', refreshCardClickSetting);" in src
+    assert "navigationType() === 'back_forward') refreshCardClickSetting();" in src
+    setter = src[src.index("function setCardClick"):src.index("function refreshCardClickSetting")]
+    assert "cardClickOpens = on;" in setter
+    refresher = src[src.index("function refreshCardClickSetting"):]
+    assert "setCardClick(data.settings.library_card_click === 'true')" in refresher[:refresher.index("\n    }\n")]
 
 
 # ─── shared status-filter order ───

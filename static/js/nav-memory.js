@@ -179,16 +179,25 @@
   });
 
   // 页面打开后用户已经自己滚动或操作过，就不再替他跳回原位置
+  // 在快捷导航上按下（打开它、点去处）不算：页面还在加载时点开它不能取消回到原位置。
+  // 但“到顶 / 到底”确实移动了页面；滚轮、触屏滑动、按键（焦点在快捷导航上时方向键也会滚动页面）照常算
   var userMoved = false;
+  function pressOnQuickNav(target) {
+    return !!(target && target.closest && target.closest('.quick-nav')
+      && !target.closest('[data-quick-action="top"], [data-quick-action="bottom"]'));
+  }
   ['wheel', 'touchmove', 'keydown', 'pointerdown'].forEach(function (type) {
-    window.addEventListener(type, function () { userMoved = true; }, { capture: true, passive: true });
+    window.addEventListener(type, function (event) {
+      if (type === 'pointerdown' && pressOnQuickNav(event && event.target)) return;
+      userMoved = true;
+    }, { capture: true, passive: true });
   });
   var scrollRestored = false;
   var listDrawn = false; // 列表已经画出（restoreScroll 被调用过）
 
   // ── 快捷导航“返回”（quick-nav.js）：回到跳走前所在的地址和位置 ──
   // 点“返回”时记下目标 { url, y, listTop, at }，目标页画出内容后回到 y（只用一次，RETURN_MS 内有效）。
-  // 搜索、收藏、资源库在画出结果后取（search.js / restoreScroll），它优先于离开时记下的位置；
+  // 收藏、资源库在画出列表后取（restoreScroll），带关键词的搜索页一打开就取（search.js），都优先于离开时记下的位置；
   // 其他页面（首页、下载管理、详情、设置……）等内容长到够高再回去。
   var RETURN_KEY = 'jm-nav-return-v1';
   var RETURN_MS = 15000;       // 点“返回”到目标页打开之间最多这么久
@@ -218,22 +227,34 @@
     return { y: pending.y, listTop: typeof pending.listTop === 'number' ? pending.listTop : null };
   }
 
-  /** 带关键词的搜索页由 search.js 画出结果（含从往返缓存恢复时）后自己取“返回”的位置 */
+  /** 带关键词的搜索页由 search.js 自己取“返回”的位置（页面打开、含从往返缓存恢复时），画出结果后回去 */
   function searchRestoresItself() {
     return window.location.pathname === '/search' && /(^|[?&])keyword=[^&]/.test(window.location.search);
   }
 
-  /** 其他页面：页面能滚到 y 了（或等够了）再回去；用户自己先动了就不再跳 */
+  /**
+   * 其他页面：页面能滚到 y 了就回去。还不够高时先停在能到的最远处，跟着内容长高往下走
+   * （懒加载的部分进入视野后会接着加载），等够了就停在那里，不会过一阵再突然跳一下；用户自己先动了就不再跟。
+   */
+  var returnTimer = null;
   function returnWhenTall(back, startedAt) {
+    returnTimer = null;
     if (userMoved) return;
     var doc = document.documentElement;
-    var room = doc && typeof window.innerHeight === 'number' ? doc.scrollHeight - window.innerHeight : 0;
-    if (room >= back.y || Date.now() - startedAt >= RETURN_WAIT_MS) {
+    var room = doc && typeof window.innerHeight === 'number' ? Math.max(0, doc.scrollHeight - window.innerHeight) : 0;
+    if (room >= back.y) {
       scrollBack(back.y, back.listTop);
       return;
     }
-    setTimeout(function () { returnWhenTall(back, startedAt); }, 150);
+    if (window.scrollY < room) window.scrollTo({ top: room, behavior: 'instant' });
+    if (Date.now() - startedAt >= RETURN_WAIT_MS) return;
+    returnTimer = setTimeout(function () { returnWhenTall(back, startedAt); }, 150);
   }
+  // 进入往返缓存前停掉：回来时不会接着跟
+  window.addEventListener('pagehide', function () {
+    clearTimeout(returnTimer);
+    returnTimer = null;
+  });
 
   /** 等列表画好（两帧）再回到 y，这期间用户自己动了就算了 */
   function scrollBackSoon(y, listTop) {
@@ -247,7 +268,7 @@
   window.addEventListener('pageshow', function (event) {
     if (!event.persisted) return;
     // 快捷导航“返回”经浏览器后退回到这里（往返缓存）：内容都还在，直接回到跳走前的位置。
-    // 带关键词的搜索页从快照重新画出结果后由 search.js 取
+    // 带关键词的搜索页由 search.js 取（它从快照重新画出结果后回去）
     if (!searchRestoresItself()) {
       var back = takeReturn();
       if (back) {
@@ -323,7 +344,7 @@
   };
 
   // 快捷导航“返回”到首页、下载管理、详情、设置、没有关键词的搜索页等：内容加载到够高后回到跳走前的位置
-  // （收藏、资源库、带关键词的搜索页画出结果后自己取：restoreScroll / search.js）
+  // （收藏、资源库、带关键词的搜索页自己取：restoreScroll / search.js）
   if (LIST_PAGES.indexOf(window.location.pathname) < 0 && !searchRestoresItself()) {
     var backHere = takeReturn();
     if (backHere && backHere.y > 0) returnWhenTall(backHere, Date.now());

@@ -6,8 +6,9 @@
  *     和顶部导航一样回到上次的搜索结果、筛选、页码和位置（nav-memory.js）。
  *   返回：回到上一次用快捷导航跳走之前的页面和那一刻所在的位置。连续跳了几次就按相反顺序一步步退回
  *     （本标签页、12 小时内、最多 MAX_STACK 步），退完即不可用；“返回”本身不记一步，不会在两页之间来回。
- *     上一条浏览历史正是跳走前那一页时用浏览器后退（不多出历史记录，页面自己的“返回”和浏览器后退照常），
- *     否则打开那个地址。经浏览器后退等其他方式已经回到那一页的，那一步作废。
+ *     跳走前那条浏览历史还在身后时直接退回到它（浏览器后退 / Navigation API traverseTo：不多出历史记录，
+ *     页面自己的“返回”和浏览器后退照常），否则打开那个地址。经浏览器后退（含历史菜单一次跳过几页）等其他方式
+ *     已经回到那一步之前的，那一步和它之后的步都作废。连点“返回”只算一次。
  *   到顶 / 到底：直接跳到本页最上 / 最下（不做滚动动画），不改地址和筛选，也不影响“返回”；已在最上 / 最下时不可用。
  *
  * 打开方式：鼠标移上去展开、移开收起；点按钮（触屏、键盘）展开并保持，再点、Esc、点别处或焦点离开时收起。
@@ -93,36 +94,62 @@
     writeStack(stack);
   }
 
-  /** 已经经浏览器后退等方式回到了最近一步所在的那条历史或那个地址：那一步作废（“返回”到这里毫无意义） */
+  /** 本标签页的浏览历史（Navigation API）：{ nav, current: 当前这条的位置, at: 标识 → 位置 }；没有时为 null */
+  function historyMap() {
+    try {
+      var nav = window.navigation;
+      if (!nav || !nav.currentEntry || typeof nav.entries !== 'function') return null;
+      var at = {};
+      nav.entries().forEach(function (entry, index) { if (entry && entry.key) at[entry.key] = index; });
+      return { nav: nav, current: nav.currentEntry.index, at: at };
+    } catch (_) { return null; }
+  }
+
+  /**
+   * 作废已经不在“身后”的步：
+   *   1. 记下的那条历史就是当前这条或在它之后——用户已经经浏览器后退（含历史菜单一次跳过几页）回到了它之前，
+   *      这一步和它之后记的步都不再是“跳走前”的地方（否则“返回”会往前跳到后来才去的页面，再在两页之间来回）；
+   *   2. 最近一步就是当前这条历史或当前这个地址：已经回到那里了，“返回”到这里毫无意义。
+   */
   function prune() {
     var stack = readStack();
-    var key = historyKey();
-    var changed = false;
+    var before = stack.length;
+    var history = historyMap();
+    if (history) {
+      for (var i = 0; i < stack.length; i++) {
+        var key = stack[i].key;
+        if (key && Object.prototype.hasOwnProperty.call(history.at, key) && history.at[key] >= history.current) {
+          stack = stack.slice(0, i);
+          break;
+        }
+      }
+    }
+    var currentKey = historyKey();
     while (stack.length) {
       var top = stack[stack.length - 1];
-      var same = (!!top.key && top.key === key) || top.url === currentUrl();
-      if (!same) break;
+      if (!((!!top.key && top.key === currentKey) || top.url === currentUrl())) break;
       stack.pop();
-      changed = true;
     }
-    if (changed) writeStack(stack);
+    if (stack.length !== before) writeStack(stack);
     return stack;
   }
 
-  /** 上一条浏览历史就是 entry 记下的那一条（能直接后退过去） */
-  function previousEntryIs(entry) {
+  /** entry 记下的那条历史还在、在当前这条之前、地址也没变：返回它的标识（可以直接退回去），否则 null */
+  function earlierEntryKey(entry, history) {
+    if (!entry.key || !history || !Object.prototype.hasOwnProperty.call(history.at, entry.key)) return null;
+    var index = history.at[entry.key];
+    if (index >= history.current) return null;
     try {
-      var nav = window.navigation;
-      if (!entry.key || !nav || !nav.currentEntry || typeof nav.entries !== 'function') return false;
-      var index = nav.currentEntry.index;
-      var previous = index > 0 ? nav.entries()[index - 1] : null;
-      if (!previous || previous.key !== entry.key) return false;
-      var url = new URL(previous.url, window.location.href);
-      return url.origin === window.location.origin && url.pathname + url.search === entry.url;
-    } catch (_) { return false; }
+      var url = new URL(history.nav.entries()[index].url, window.location.href);
+      return url.origin === window.location.origin && url.pathname + url.search === entry.url ? entry.key : null;
+    } catch (_) { return null; }
   }
 
-  /** 返回：取出最近一步，回到那个地址和位置；没有可返回的 → false */
+  /**
+   * 返回：取出最近一步，回到那个地址和位置；没有可返回的 → false。
+   * 那条历史还在身后就退回到它（浏览器后退 / traverseTo：不多出历史记录，页面恢复原样，页面自己的“返回”照常），
+   * 否则打开那个地址。
+   */
   function goBack() {
     var stack = prune();
     var entry = stack.pop();
@@ -130,8 +157,22 @@
     writeStack(stack);
     var memory = nm();
     if (memory && memory.expectReturn) memory.expectReturn(entry.url, entry.y, entry.listTop);
-    if (previousEntryIs(entry)) window.history.back();
-    else window.location.assign(entry.url);
+    var history = historyMap();
+    var key = earlierEntryKey(entry, history);
+    try {
+      if (key && history.at[key] === history.current - 1) {
+        window.history.back();
+        return true;
+      }
+      if (key && typeof history.nav.traverseTo === 'function') {
+        var result = history.nav.traverseTo(key);
+        // 被随后的另一次跳转取消等：不再补救（否则会盖掉用户新点的去处），也不留未处理的 Promise 拒绝
+        if (result && result.committed) result.committed.catch(function () {});
+        if (result && result.finished) result.finished.catch(function () {});
+        return true;
+      }
+    } catch (_) { /* 退不回去：打开那个地址 */ }
+    window.location.assign(entry.url);
     return true;
   }
 
@@ -150,6 +191,12 @@
 
   var openedBy = null;   // null 收起 / 'hover' 鼠标移上去展开 / 'click' 点按钮展开（保持）
   var closeTimer = null;
+  var leaving = false;   // 刚点了“返回”、页面正要跳走：连点 / 双击不再取出下一步
+  var leavingTimer = null;
+  var LEAVING_RESET_MS = 4000; // 跳转被取消（停止加载等）时过这么久“返回”恢复可用
+  var pressing = false;        // 正在快捷导航上按着（按下到这次点击结束）：焦点暂时落到 body 不算离开
+  var pressTimer = null;
+  var PRESS_GRACE_MS = 1000;   // 抬起后没有等来点击（拖出去了等）最多再算这么久
 
   function maxScroll() {
     var doc = document.documentElement;
@@ -173,7 +220,7 @@
     var entry = stack[stack.length - 1];
     root.classList.toggle('has-back', !!entry);
     if (backBtn) {
-      setDisabled(backBtn, !entry);
+      setDisabled(backBtn, leaving || !entry);
       var label = entry ? '返回：' + entry.title : '返回（还没有用快捷导航跳转过）';
       backBtn.title = label;
       backBtn.setAttribute('aria-label', label);
@@ -185,7 +232,16 @@
     openedBy = how || null;
     root.classList.toggle('is-open', !!openedBy);
     toggle.setAttribute('aria-expanded', openedBy ? 'true' : 'false');
-    if (openedBy) refresh();
+    if (openedBy) {
+      refresh();
+      // Toast 在展开时让到面板上方（style.css 用这个高度；面板在短窗口里会被限高）
+      document.documentElement.style.setProperty('--quick-nav-panel-h', panel.offsetHeight + 'px');
+    }
+  }
+
+  /** 焦点是不是用键盘停在快捷导航里（不支持 :focus-visible 的浏览器当作不是） */
+  function keyboardFocusInside() {
+    try { return !!root.querySelector(':focus-visible'); } catch (_) { return false; }
   }
 
   toggle.addEventListener('click', function () {
@@ -203,7 +259,7 @@
     if (event.pointerType !== 'mouse' || openedBy !== 'hover') return;
     closeTimer = setTimeout(function () {
       // 正用键盘在面板里操作时不收起
-      if (openedBy === 'hover' && !root.querySelector(':focus-visible')) setOpen(null);
+      if (openedBy === 'hover' && !keyboardFocusInside()) setOpen(null);
     }, HOVER_CLOSE_MS);
   });
 
@@ -218,9 +274,30 @@
   document.addEventListener('pointerdown', function (event) {
     if (openedBy && !root.contains(event.target)) setOpen(null);
   }, true);
-  // 键盘 Tab 离开面板时收起
+  // 焦点离开快捷导航时收起：Tab 到页面别处（relatedTarget 在外面），或 Tab 出页面、切到别的窗口（relatedTarget 为空）。
+  // 在面板空白处按下鼠标 / 手指时焦点也会落到 body（鼠标在按下时，触屏在抬起之后），这次按压到它的点击结束前不算离开
+  function pressEnd() {
+    pressing = false;
+    clearTimeout(pressTimer);
+  }
+  root.addEventListener('pointerdown', function () {
+    pressing = true;
+    clearTimeout(pressTimer);
+  });
+  document.addEventListener('pointerup', function () {  // 可能在面板外抬起（拖出去了）
+    if (!pressing) return;
+    clearTimeout(pressTimer);
+    pressTimer = setTimeout(pressEnd, PRESS_GRACE_MS);
+  }, true);
+  root.addEventListener('pointercancel', pressEnd);
+  root.addEventListener('click', function () {  // 这次点击自己的焦点变化处理完再结束（新的按压会取消它）
+    clearTimeout(pressTimer);
+    pressTimer = setTimeout(pressEnd, 0);
+  });
   root.addEventListener('focusout', function (event) {
-    if (openedBy && event.relatedTarget && !root.contains(event.relatedTarget)) setOpen(null);
+    if (!openedBy) return;
+    var next = event.relatedTarget;
+    if (next ? !root.contains(next) : !pressing) setOpen(null);
   });
 
   panel.addEventListener('click', function (event) {
@@ -232,10 +309,18 @@
       return; // 链接照常打开（搜索/收藏/资源库的地址已由 nav-memory.js 换成记住的那个）
     }
     var btn = event.target.closest('button[data-quick-action]');
-    if (!btn || isDisabled(btn)) return;
+    if (!btn) return;
     var action = btn.getAttribute('data-quick-action');
+    // 页面高度可能刚变过（结果刚画出、列表追加了内容）：按当前的位置重新判断能不能用
+    if (action === 'top' || action === 'bottom') refresh();
+    if (isDisabled(btn)) return;
     if (action === 'back') {
-      goBack();
+      if (goBack()) {
+        leaving = true;
+        setDisabled(backBtn, true);
+        clearTimeout(leavingTimer);
+        leavingTimer = setTimeout(function () { leaving = false; refresh(); }, LEAVING_RESET_MS);
+      }
     } else if (action === 'top' || action === 'bottom') {
       // instant：Bootstrap 的 :root { scroll-behavior: smooth } 会让它慢慢滑过去
       window.scrollTo({ top: action === 'top' ? 0 : maxScroll(), behavior: 'instant' });
@@ -243,7 +328,7 @@
     }
   });
 
-  // 展开时跟着滚动更新“到顶 / 到底”能不能用
+  // 展开时跟着滚动、窗口大小和页面内容高度的变化更新“到顶 / 到底”能不能用
   var framePending = false;
   function onViewportChange() {
     if (!openedBy || framePending) return;
@@ -255,9 +340,16 @@
   }
   window.addEventListener('scroll', onViewportChange, { passive: true });
   window.addEventListener('resize', onViewportChange);
+  if (typeof window.ResizeObserver === 'function' && document.body) {
+    new window.ResizeObserver(onViewportChange).observe(document.body);
+  }
 
-  // 离开时收起（进入往返缓存的页面回来时是收起的）；回来时重新判断“返回”
+  // 离开时收起（进入往返缓存的页面回来时是收起的）；回来时“返回”恢复可用并重新判断
   window.addEventListener('pagehide', function () { setOpen(null); });
-  window.addEventListener('pageshow', function () { refresh(); });
+  window.addEventListener('pageshow', function () {
+    leaving = false;
+    clearTimeout(leavingTimer);
+    refresh();
+  });
   refresh();
 })();

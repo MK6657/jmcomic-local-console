@@ -942,8 +942,12 @@
             loadLibrary(currentPage, { showSpinner: false });
         }
     });
+    // 设置页开在旁边的另一个窗口里：点回本窗口时（标签页一直可见，不会触发 visibilitychange）
+    window.addEventListener('focus', refreshCardClickSetting);
 
     // ── 初始化 ──
+    // 经后退/前进重新打开（没走往返缓存）时，页面可能是浏览器缓存里的旧 HTML，其中的设置可能已经改过
+    if (window.navMemory && window.navMemory.navigationType() === 'back_forward') refreshCardClickSetting();
     readUrlState();
     loadStats();
     loadTagCloud();

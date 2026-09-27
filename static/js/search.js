@@ -98,8 +98,14 @@
     var nm = window.navMemory;
     var reload = !fromCache && !!nm && nm.navigationType() === 'reload';
     var saved = snapshotForHere(reload);
-    // 没有这个地址的结果快照（之后又搜过别的），但这里是快捷导航“返回”的目标：重新搜索，画出后回到跳走前的位置
-    if (!saved && nm && nm.hasReturn && nm.hasReturn()) saved = { url: location.pathname + location.search };
+    // 快捷导航“返回”到这里：页面一打开就取走跳走前的位置（nav-memory.js），画出结果后回到那里——
+    // 哪怕这个地址已经没有结果快照（之后又搜过别的）、要重新搜索很久。快照里的结果照用
+    var back = nm && nm.takeReturn ? nm.takeReturn() : null;
+    if (back) {
+      saved = Object.assign({}, saved || { url: location.pathname + location.search }, {
+        scrollY: back.y, resultsTop: back.listTop, rawScrollY: back.y, rawResultsTop: back.listTop
+      });
+    }
     restoring = saved;
     var fetchedAt = saved ? (saved.fetchedAt || saved.savedAt) : 0;
     var age = Date.now() - fetchedAt;
@@ -117,17 +123,12 @@
 
   /**
    * 回到快照记下的位置：刷新回到刷新前所在处，其余回到“看到的位置”；在结果区内时按结果区现在的位置换算。
-   * 经快捷导航“返回”到这里时，回到跳走前那一刻所在的位置（nav-memory.js takeReturn）。
+   * 经快捷导航“返回”到这里时，restoreSearchState 已把跳走前那一刻的位置放进 saved。
    */
   function scrollToSaved(saved, reload) {
     var raw = reload && typeof saved.rawScrollY === 'number';
     var y = raw ? saved.rawScrollY : (saved.scrollY || 0);
     var listTop = raw ? saved.rawResultsTop : saved.resultsTop;
-    var back = window.navMemory && window.navMemory.takeReturn ? window.navMemory.takeReturn() : null;
-    if (back) {
-      y = back.y;
-      listTop = back.listTop;
-    }
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
         if (restoring !== saved) return; // 这期间已经开始了新的搜索/翻页

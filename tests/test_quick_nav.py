@@ -116,6 +116,7 @@ function load(opts) {
     win.navigation = {
       currentEntry: { key: opts.nav.key, index: opts.nav.index },
       entries: () => opts.nav.entries.map(([key, url]) => ({ key, url: ORIGIN + url })),
+      traverseTo: key => { calls.push(['traverse', key]); return { committed: Promise.resolve(), finished: Promise.resolve() }; },
     };
   }
   const doc = {
@@ -165,6 +166,27 @@ out.browserBack = backVia([['kA', '/library?q=1'], ['kNow', '/downloads']], 1, '
 out.previousIsOther = backVia([['kX', '/library?q=1'], ['kNow', '/downloads']], 1, 'kA', '/library?q=1');
 out.previousChangedAddress = backVia([['kA', '/library?q=2'], ['kNow', '/downloads']], 1, 'kA', '/library?q=1');
 out.firstEntry = backVia([['kNow', '/downloads']], 0, 'kA', '/library?q=1');
+// a step further back in this tab's history: straight back to that entry (no new history entry)
+out.traverseBack = (() => {
+  const store = new Map();
+  store.set('jm-quick-nav-back-v1', JSON.stringify([{ url: '/library?q=1', y: 10, listTop: null, title: 't', key: 'kA', savedAt: now }]));
+  const r = load({ path: '/downloads', store, nav: { key: 'kNow', index: 2, entries: [['kA', '/library?q=1'], ['kB', '/settings'], ['kNow', '/downloads']] } });
+  r.qn.goBack(); return r.calls.map(c => c.slice(0, 2));
+})();
+// jumped back past quick-nav steps with the history menu: steps now at or after this page are no longer "behind"
+const skipped = current => {
+  const store = new Map();
+  store.set('jm-quick-nav-back-v1', JSON.stringify([
+    { url: '/library?page=3', y: 0, title: 'L', key: 'kL', savedAt: now }, { url: '/settings', y: 0, title: 'S', key: 'kS', savedAt: now }]));
+  const entries = [['kL', '/library?page=3'], ['kS', '/settings'], ['kD', '/downloads']];
+  const [path, search] = [['/library', '?page=3'], ['/settings', ''], ['/downloads', '']][current];
+  const r = load({ path, search, store, nav: { key: entries[current][0], index: current, entries } });
+  const kept = r.qn.prune().map(e => e.url);
+  return [kept, r.qn.goBack(), r.calls.map(c => c[0])];
+};
+out.jumpedBackPastSteps = skipped(0);
+out.jumpedBackOneStep = skipped(1);
+out.stepsStillBehind = skipped(2);
 out.noNavigationApi = (() => {
   const store = new Map();
   store.set('jm-quick-nav-back-v1', JSON.stringify([{ url: '/library', y: 1, listTop: null, title: 't', key: 'kA', savedAt: now }]));
@@ -241,6 +263,18 @@ def test_a_step_already_returned_to_by_other_means_is_dropped(harness):
     assert harness["prunedSameEntry"] == ["/"]
     assert harness["prunedSameAddress"] == ["/"]
     assert harness["keptElsewhere"] == ["/", "/library?q=1"]
+
+
+def test_return_goes_straight_back_to_an_earlier_history_entry(harness):
+    assert harness["traverseBack"] == [["expect", "/library?q=1"], ["traverse", "kA"]]
+
+
+def test_jumping_back_past_steps_never_makes_return_go_forward(harness):
+    # 资源库 → (quick) 设置 → (quick) 下载管理, then the Back menu straight to 资源库: nothing is behind any more
+    assert harness["jumpedBackPastSteps"] == [[], False, []]
+    # Back once to 设置: only the 资源库 step is still behind, reached with the browser's Back
+    assert harness["jumpedBackOneStep"] == [["/library?page=3"], True, ["expect", "back"]]
+    assert harness["stepsStillBehind"] == [["/library?page=3", "/settings"], True, ["expect", "back"]]
 
 
 def test_steps_are_bounded_fresh_and_same_site(harness):

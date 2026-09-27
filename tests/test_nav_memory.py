@@ -59,9 +59,13 @@ function page(opts) {
   const clearT = id => { if (timers[id - 1]) timers[id - 1].fn = null; };
   new Function('window', 'document', 'setTimeout', 'clearTimeout', 'Date', src)(win, doc, setT, clearT, FakeDate);
   const fire = (where, type, event) => (on[where][type] || []).forEach(fn => fn(event || {}));
-  // where: true = the top navigation, 'quick' = the floating quick-nav, false = the page itself
+  // where: true = the top navigation, 'quick' = the floating quick-nav, 'quick-jump' = its 到顶 / 到底,
+  // false = the page itself
+  const JUMP = '[data-quick-action="top"], [data-quick-action="bottom"]';
   const target = (where) => ({
-    closest: sel => (sel === '.navbar' && where === true) || (sel === '.quick-nav' && where === 'quick') ? {} : null,
+    closest: sel => (sel === '.navbar' && where === true)
+      || (sel === '.quick-nav' && (where === 'quick' || where === 'quick-jump'))
+      || (sel === JUMP && where === 'quick-jump') ? {} : null,
   });
   return {
     win, doc, store, links, list, nm: win.navMemory,
@@ -69,6 +73,7 @@ function page(opts) {
     rest() { timers.splice(0).forEach(t => t.fn && t.fn()); },
     click(nav) { fire('window', 'click', { target: target(nav) }); },
     clickQuick() { fire('window', 'click', { target: target('quick') }); },
+    press(where) { fire('window', 'pointerdown', { target: target(where) }); },
     type() { fire('window', 'input', { target: target(false) }); },
     key() { fire('window', 'keydown', { target: target(false) }); },
     hoverLink(i) { fire('document', 'pointerover', { target: { closest: () => links[i] } }); return links[i].attrs.href; },
@@ -256,18 +261,40 @@ out.returnFollowsList = (() => {
 out.returnUserMovedFirst = (() => {
   const r = page({ path: '/library', search: '?q=1', store: returning(new Map(), '/library?q=1', 400) }); r.wheel(); r.nm.restoreScroll(); return r.win.scrollY;
 })();
-// pages without a remembered list: wait until the page can scroll that far (content arrives by request)
+// pages without a remembered list: follow the content down as it arrives (by request, lazily) until y fits
 shared = returning(new Map(), '/downloads', 1500);
-q = page({ path: '/downloads', store: shared, docHeight: 1000 });
+q = page({ path: '/downloads', store: shared, docHeight: 1000 });   // can scroll 200 px so far
 out.genericWaits = [q.win.scrollY, shared.has('jm-nav-return-v1')];
-q.doc.documentElement.scrollHeight = 2600; q.rest();
+q.doc.documentElement.scrollHeight = 1500; q.rest();                // grew: follow it down
+out.genericFollows = q.win.scrollY;
+q.doc.documentElement.scrollHeight = 2600; q.rest();                // tall enough: exactly there
 out.genericArrived = q.win.scrollY;
+q.rest();
+out.genericStopsAfterArriving = q.win.scrollY;
 q = page({ path: '/', store: returning(new Map(), '/', 1500), docHeight: 1000 });
 now += 9000; q.rest(); now -= 9000;
-out.genericGivesUpWaiting = q.win.scrollY;   // after the wait it goes as far as it can
+q.doc.documentElement.scrollHeight = 2600; q.rest();
+out.genericNoLateJump = q.win.scrollY;   // gave up: stays as far as it got, never jumps seconds later
 q = page({ path: '/settings', store: returning(new Map(), '/settings', 1500), docHeight: 1000 });
 q.wheel(); q.doc.documentElement.scrollHeight = 2600; q.rest();
 out.genericUserMovedFirst = q.win.scrollY;
+q = page({ path: '/downloads', store: returning(new Map(), '/downloads', 1500), docHeight: 1000 });
+q.leave(); q.doc.documentElement.scrollHeight = 2600; q.rest();
+out.genericStopsOnLeave = q.win.scrollY;   // went into the back/forward cache: does not carry on when it comes back
+// tapping the quick-nav launcher while the list is still loading does not cancel going back to the place;
+// its 到顶 / 到底 and real scrolling do
+out.launcherTapKeepsRestore = (() => {
+  const s = returning(new Map(), '/library?q=1', 400);
+  const r = page({ path: '/library', search: '?q=1', store: s }); r.press('quick'); r.nm.restoreScroll(); return r.win.scrollY;
+})();
+out.quickJumpCancelsRestore = (() => {
+  const s = returning(new Map(), '/library?q=1', 400);
+  const r = page({ path: '/library', search: '?q=1', store: s }); r.press('quick-jump'); r.nm.restoreScroll(); return r.win.scrollY;
+})();
+out.pagePressCancelsRestore = (() => {
+  const s = arrivedAt(memory({ url: '/library?q=1', scrollY: 900 }), '/library');
+  const r = page({ path: '/library', search: '?q=1', store: s }); r.press(false); r.nm.restoreScroll(); return r.win.scrollY;
+})();
 out.searchKeywordLeftForSearchJs = (() => {
   const s = returning(new Map(), '/search?keyword=a', 700);
   const r = page({ path: '/search', search: '?keyword=a', store: s, docHeight: 3000 }); return [r.win.scrollY, s.has('jm-nav-return-v1')];
@@ -406,13 +433,22 @@ def test_quick_nav_return_target_is_used_once_by_its_page(harness):
     assert harness["returnUserMovedFirst"] == 0
 
 
-def test_quick_nav_return_on_other_pages_waits_for_the_content(harness):
-    assert harness["genericWaits"] == [0, False]
+def test_quick_nav_return_on_other_pages_follows_the_content(harness):
+    assert harness["genericWaits"] == [200, False]   # as far as the page goes so far
+    assert harness["genericFollows"] == 700
     assert harness["genericArrived"] == 1500
-    assert harness["genericGivesUpWaiting"] == 1500
-    assert harness["genericUserMovedFirst"] == 0
+    assert harness["genericStopsAfterArriving"] == 1500
+    assert harness["genericNoLateJump"] == 200
+    assert harness["genericUserMovedFirst"] == 200    # stopped following once the user scrolled
+    assert harness["genericStopsOnLeave"] == 200
     assert harness["searchKeywordLeftForSearchJs"] == [0, True]
     assert harness["searchWithoutKeyword"] == 700
+
+
+def test_opening_the_quick_nav_does_not_cancel_going_back_to_the_place(harness):
+    assert harness["launcherTapKeepsRestore"] == 400
+    assert harness["quickJumpCancelsRestore"] == 0   # 到顶 / 到底 really move the page
+    assert harness["pagePressCancelsRestore"] == 0
 
 
 def test_quick_nav_return_through_the_back_forward_cache(harness):
