@@ -17,7 +17,7 @@
  * 高度变了也回到同一处。列表位置在记下“看到的位置”的那一刻量（手机上展开的导航菜单会把整页往下推）。
  *
  * 右下角快捷导航（quick-nav.js）里的 搜索 / 收藏 / 资源库 同样带 data-nav-memory；在它上面点击和点顶部导航一样
- * 不算“在这里做事”。它的“返回”经 expectReturn / takeReturn 回到跳走前的地址和那一刻所在的位置。
+ * 不算“在这里做事”。它的“返回”（上一页）经 expectReturn / takeReturn 回到那一页离开时“看到的位置”。
  */
 (function () {
   'use strict';
@@ -195,7 +195,7 @@
   var scrollRestored = false;
   var listDrawn = false; // 列表已经画出（restoreScroll 被调用过）
 
-  // ── 快捷导航“返回”（quick-nav.js）：回到跳走前所在的地址和位置 ──
+  // ── 快捷导航“返回”（quick-nav.js，上一页）：回到那一页离开时的位置 ──
   // 点“返回”时记下目标 { url, y, listTop, at }，目标页画出内容后回到 y（只用一次，RETURN_MS 内有效）。
   // 收藏、资源库在画出列表后取（restoreScroll），带关键词的搜索页一打开就取（search.js），都优先于离开时记下的位置；
   // 其他页面（首页、下载管理、详情、设置……）等内容长到够高再回去。
@@ -268,7 +268,7 @@
   window.addEventListener('pageshow', function (event) {
     if (!event.persisted) return;
     userMoved = false; // 从往返缓存回来算重新打开：之前在这页上的滚动、按键不算“这次已经自己动过”
-    // 快捷导航“返回”经浏览器后退回到这里（往返缓存）：内容都还在，直接回到跳走前的位置。
+    // 快捷导航“返回”经浏览器后退回到这里（往返缓存）：内容都还在，直接回到离开时的位置。
     // 带关键词的搜索页由 search.js 取（它从快照重新画出结果后回去）
     if (!searchRestoresItself()) {
       var back = takeReturn();
@@ -309,7 +309,7 @@
     /** 页面把用户送回某个位置后调用：这就是当前“看到的地方”，马上滚回顶部点导航也不会丢 */
     markPlace: setAnchor,
     scrollBack: scrollBack,
-    /** 快捷导航“返回”：记下目标地址和要回到的位置（quick-nav.js 在跳转前调用） */
+    /** 快捷导航“返回”：记下目标地址和要回到的位置（quick-nav.js 在退回上一页前调用） */
     expectReturn: expectReturn,
     /** 本页是“返回”的目标时取出要回到的位置 { y, listTop }（只用一次），否则 null */
     takeReturn: takeReturn,
@@ -318,7 +318,7 @@
     /** 页面打开（或从往返缓存回来）后用户是否已经自己滚动、按键或按下过：是就不再替他跳回原位置 */
     userMoved: function () { return userMoved; },
     /**
-     * 收藏 / 资源库第一次画出列表后调用（只生效一次）：经快捷导航“返回”到这里 → 回到跳走前的位置；
+     * 收藏 / 资源库第一次画出列表后调用（只生效一次）：经快捷导航“返回”到这里 → 回到离开时的位置；
      * 经记忆链接到达、后退/前进或刷新，且地址与离开时相同 → 回到离开时的位置（刷新回到刷新前所在的位置）。
      */
     restoreScroll: function () {
@@ -346,7 +346,7 @@
     }
   };
 
-  // 快捷导航“返回”到首页、下载管理、详情、设置、没有关键词的搜索页等：内容加载到够高后回到跳走前的位置
+  // 快捷导航“返回”到首页、下载管理、详情、设置、没有关键词的搜索页等：内容加载到够高后回到离开时的位置
   // （收藏、资源库、带关键词的搜索页自己取：restoreScroll / search.js）
   if (LIST_PAGES.indexOf(window.location.pathname) < 0 && !searchRestoresItself()) {
     var backHere = takeReturn();

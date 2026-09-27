@@ -1617,18 +1617,6 @@ code {
 }
 .quick-nav-toggle:hover { color: var(--text-primary); background: var(--bg-tertiary); }
 .quick-nav.is-open .quick-nav-toggle { color: var(--primary); border-color: var(--primary); }
-/* 有可以“返回”的一步：按钮右上角一个小圆点 */
-.quick-nav.has-back .quick-nav-toggle::after {
-  content: '';
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 8px;
-  height: 8px;
-  background: var(--primary);
-  border: 1px solid var(--bg-secondary);
-  border-radius: 50%;
-}
 .quick-nav-panel {
   position: absolute;
   right: 0;

@@ -63,9 +63,7 @@
     try {
       history.replaceState(Object.assign({}, history.state, { jmSearch: snapshot }), '', snapshot.url);
     } catch (_) {
-      // 快照太大存不进历史记录：只同步地址栏，但保留快捷导航给这条历史记的序号（quick-nav.js）
-      var seq = history.state && typeof history.state.jmQuickNavSeq === 'number' ? history.state.jmQuickNavSeq : null;
-      try { history.replaceState(seq === null ? null : { jmQuickNavSeq: seq }, '', snapshot.url); } catch (ignored) {}
+      try { history.replaceState(null, '', snapshot.url); } catch (ignored) {}
     }
     try { sessionStorage.setItem(snapshotKey, JSON.stringify(snapshot)); } catch (_) {}
   }
@@ -100,7 +98,7 @@
     var nm = window.navMemory;
     var reload = !fromCache && !!nm && nm.navigationType() === 'reload';
     var saved = snapshotForHere(reload);
-    // 快捷导航“返回”到这里：页面一打开就取走跳走前的位置（nav-memory.js），画出结果后回到那里——
+    // 快捷导航“返回”到这里：页面一打开就取走离开时的位置（nav-memory.js），画出结果后回到那里——
     // 哪怕这个地址已经没有结果快照（之后又搜过别的）、要重新搜索很久。快照里的结果照用
     var back = nm && nm.takeReturn ? nm.takeReturn() : null;
     if (back) {
@@ -125,7 +123,7 @@
 
   /**
    * 回到快照记下的位置：刷新回到刷新前所在处，其余回到“看到的位置”；在结果区内时按结果区现在的位置换算。
-   * 经快捷导航“返回”到这里时，restoreSearchState 已把跳走前那一刻的位置放进 saved。
+   * 经快捷导航“返回”到这里时，restoreSearchState 已把离开时的位置放进 saved。
    */
   function scrollToSaved(saved, reload) {
     var raw = reload && typeof saved.rawScrollY === 'number';

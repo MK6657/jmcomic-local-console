@@ -1,6 +1,6 @@
 """The floating quick-nav in the bottom-right corner (templates/base.html #quick-nav, static/js/quick-nav.js).
 
-The step-back logic runs in Node with a stand-in window/document (skipped when Node is missing; CI installs it);
+The 返回 (previous page) logic runs in Node with a stand-in window/document (skipped when Node is missing; CI installs it);
 the wiring is checked through rendered pages and the stylesheet.
 """
 import json
@@ -94,8 +94,10 @@ const HOUR = 3600 * 1000;
 let now = 1_000_000_000_000;
 const FakeDate = { now: () => now };
 const ORIGIN = 'http://127.0.0.1:5000';
+const PAGES = 'jm-quick-nav-pages-v1';
 
-// opts: path, search, title, scrollY, listTop, store (Map shared between "pages"), nav ({key, index, entries})
+// opts: path, search, title, heading, place ({y, listTop} from nav-memory), store (Map shared between "pages"),
+// nav ({key, index, entries: [[key, url]]} — the Navigation API), referrer, historyLength
 function load(opts) {
   const store = opts.store || new Map();
   const calls = [];
@@ -109,157 +111,104 @@ function load(opts) {
       pathname: opts.path, search: opts.search || '', origin: ORIGIN,
       href: ORIGIN + opts.path + (opts.search || ''), assign: url => calls.push(['assign', url]),
     },
-    history: {
-      state: opts.state === undefined ? null : opts.state,
-      back: () => calls.push(['back']),
-      replaceState(state) { this.state = state; },
-    },
+    history: { length: opts.historyLength || 1, back: () => calls.push(['back']) },
     on: {},
     addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); },
-    scrollY: opts.scrollY || 0,
+    scrollY: 0,
     navMemory: {
       MAX_AGE: 12 * HOUR,
-      listTopNow: () => (typeof opts.listTop === 'number' ? opts.listTop : null),
+      place: () => opts.place || { y: 0, listTop: null },
       expectReturn: (url, y, listTop) => calls.push(['expect', url, y, listTop]),
     },
   };
   if (opts.nav) {
     win.navigation = {
       currentEntry: { key: opts.nav.key, index: opts.nav.index },
-      entries: () => opts.nav.entries.map(([key, url]) => ({ key, url: ORIGIN + url })),
-      traverseTo: key => { calls.push(['traverse', key]); return { committed: Promise.resolve(), finished: Promise.resolve() }; },
+      entries: () => (opts.nav.entries || []).map(([key, url]) => ({ key, url: ORIGIN + url })),
     };
   }
   const doc = {
-    title: opts.title || '',
+    title: opts.title || '', referrer: opts.referrer || '',
     getElementById: () => null,  // no #quick-nav: only the logic runs
     querySelector: sel => (sel === '#album-content .card-title' && opts.heading ? { textContent: opts.heading } : null),
   };
   new Function('window', 'document', 'Date', src)(win, doc, FakeDate);
-  return { store, calls, qn: win.quickNav, win };
+  return {
+    store, calls, qn: win.quickNav, win,
+    leave: () => (win.on.pagehide || []).forEach(fn => fn({ persisted: false })),
+  };
 }
-const stackOf = store => JSON.parse(store.get('jm-quick-nav-back-v1') || '[]');
+const pagesOf = store => JSON.parse(store.get(PAGES) || '{}');
+const saved = (url, title, y, listTop, age) => ({ url, title, y, listTop: listTop === undefined ? null : listTop, savedAt: now - (age || 0) });
+const withPages = pages => new Map([[PAGES, JSON.stringify(pages)]]);
 const out = {};
 
-// a jump remembers the address, the exact position, the list position and a readable page name
+// leaving a page records its address, name and the place nav-memory says was being looked at, by history entry
 let shared = new Map();
-let p = load({ path: '/library', search: '?q=a&page=2', title: '资源库 - JMComic 下载控制台', scrollY: 1234.6, listTop: 300,
-               store: shared, nav: { key: 'k1', index: 3, entries: [] } });
-p.qn.remember();
-out.remembered = stackOf(shared)[0];
+let p = load({ path: '/library', search: '?q=a&page=2', title: '资源库 - JMComic 下载控制台', place: { y: 1234.6, listTop: 300 },
+               store: shared, nav: { key: 'k1', index: 3 } });
+out.beforeLeaving = pagesOf(shared);
+p.leave();
+out.recorded = pagesOf(shared).k1;
+out.pagehideListeners = (p.win.on.pagehide || []).length;
 out.titles = [
   ['/settings', '', 'JMComic 下载控制台 - 设置'], ['/search', '?keyword=abc&page=2', 'JMComic 下载控制台 - 搜索'],
   ['/album/123', '', '123 - JMComic 下载控制台', '一部很长的漫画标题'], ['/album/7', '', '7 - JMComic 下载控制台'],
-  ['/wishlist', '', 'x'.repeat(60) + ' - JMComic 下载控制台'],
+  ['/wishlist', '', 'x'.repeat(60) + ' - JMComic 下载控制台'], ['/read/5', '', 'JMComic 下载控制台 - 连续阅读'],
 ].map(([path, search, title, heading]) => {
-  const store = new Map(); load({ path, search, title, heading, store }).qn.remember(); return stackOf(store)[0].title;
+  const store = new Map(); load({ path, search, title, heading, store, nav: { key: 'k', index: 0 } }).leave();
+  return pagesOf(store).k.title;
 });
+out.noKeyNoRecord = (() => { const s = new Map(); load({ path: '/library', store: s }).leave(); return s.has(PAGES); })();
 
-// several jumps come back in reverse order, one step per 返回, then nothing is left
+// 返回 = the previous page of this tab: its name, then the browser's Back to it, landing where it was left
+p = load({ path: '/downloads', store: withPages({ kA: saved('/library?q=1', '资源库', 900, 250) }),
+           nav: { key: 'kNow', index: 1, entries: [['kA', '/library?q=1'], ['kNow', '/downloads']] } });
+out.previous = p.qn.previousEntry();
+out.back = [p.qn.goBack(), p.calls];
+// reached by any link (top bar, a result, 首页's 查看全部): the entry before this one, whatever it was
+p = load({ path: '/album/900001', store: withPages({ kS: saved('/search?keyword=sample', '搜索“sample”', 1800, 226),
+                                                      kD: saved('/downloads', '下载管理', 0) }),
+           nav: { key: 'kNow', index: 2, entries: [['kD', '/downloads'], ['kS', '/search?keyword=sample'], ['kNow', '/album/900001']] } });
+out.mixed = [p.qn.previousEntry().title, p.qn.goBack(), p.calls];
+// the entry's address changed after it was recorded (filters written into the address bar): its address wins
+p = load({ path: '/downloads', store: withPages({ kA: saved('/library?q=1', '资源库', 900) }),
+           nav: { key: 'kNow', index: 1, entries: [['kA', '/library?q=2'], ['kNow', '/downloads']] } });
+out.addressChanged = [p.qn.goBack(), p.calls];
+// nothing recorded for the previous entry (left before the page script ran, expired…): plain Back, generic name
+p = load({ path: '/downloads', nav: { key: 'kNow', index: 1, entries: [['kX', '/settings'], ['kNow', '/downloads']] } });
+out.unrecorded = [p.qn.previousEntry(), p.qn.goBack(), p.calls];
+// the first page of this app in the tab (typed in, a new tab, came from another site): nothing to go back to
+p = load({ path: '/downloads', store: withPages({ kA: saved('/library', '资源库', 5) }),
+           nav: { key: 'kNow', index: 0, entries: [['kNow', '/downloads']] } });
+out.first = [p.qn.previousEntry(), p.qn.goBack(), p.calls];
+// no Navigation API: the tab has earlier history and this page was opened from a page of this app
+const noApi = (referrer, historyLength) => {
+  const r = load({ path: '/downloads', referrer, historyLength });
+  return [r.qn.previousEntry(), r.qn.goBack(), r.calls];
+};
+out.noApiSameSite = noApi(ORIGIN + '/library?q=1', 3);
+out.noApiOtherSite = noApi('https://example.com/', 3);
+out.noApiNoReferrer = noApi('', 3);
+out.noApiFirstEntry = noApi(ORIGIN + '/library', 1);
+
+// bounded (the latest MAX_PAGES), 12 hours, same-site addresses and well-formed entries only
 shared = new Map();
-load({ path: '/search', search: '?keyword=a', scrollY: 500, store: shared }).qn.remember();   // 搜索 → 收藏
-load({ path: '/wishlist', search: '?status=missing', scrollY: 700, store: shared }).qn.remember(); // 收藏 → 资源库
-p = load({ path: '/library', store: shared });
-out.firstBack = [p.qn.goBack(), p.calls];
-p = load({ path: '/wishlist', search: '?status=missing', store: shared });
-out.secondBack = [p.qn.goBack(), p.calls];
-p = load({ path: '/search', search: '?keyword=a', store: shared });
-out.nothingLeft = [p.qn.goBack(), p.calls, stackOf(shared)];
-
-// the browser's Back is used when the previous history entry is exactly the page of that step
-const backVia = (entries, index, stepKey, stepUrl) => {
-  const store = new Map();
-  store.set('jm-quick-nav-back-v1', JSON.stringify([{ url: stepUrl, y: 10, listTop: null, title: 't', key: stepKey, savedAt: now }]));
-  const r = load({ path: '/downloads', store, nav: { key: 'kNow', index, entries } });
-  r.qn.goBack(); return r.calls.map(c => c[0]);
-};
-out.browserBack = backVia([['kA', '/library?q=1'], ['kNow', '/downloads']], 1, 'kA', '/library?q=1');
-out.previousIsOther = backVia([['kX', '/library?q=1'], ['kNow', '/downloads']], 1, 'kA', '/library?q=1');
-out.previousChangedAddress = backVia([['kA', '/library?q=2'], ['kNow', '/downloads']], 1, 'kA', '/library?q=1');
-out.firstEntry = backVia([['kNow', '/downloads']], 0, 'kA', '/library?q=1');
-// a step further back in this tab's history: straight back to that entry (no new history entry)
-out.traverseBack = (() => {
-  const store = new Map();
-  store.set('jm-quick-nav-back-v1', JSON.stringify([{ url: '/library?q=1', y: 10, listTop: null, title: 't', key: 'kA', savedAt: now }]));
-  const r = load({ path: '/downloads', store, nav: { key: 'kNow', index: 2, entries: [['kA', '/library?q=1'], ['kB', '/settings'], ['kNow', '/downloads']] } });
-  r.qn.goBack(); return r.calls.map(c => c.slice(0, 2));
-})();
-// jumped back past quick-nav steps with the history menu: steps now at or after this page are no longer "behind"
-const skipped = current => {
-  const store = new Map();
-  store.set('jm-quick-nav-back-v1', JSON.stringify([
-    { url: '/library?page=3', y: 0, title: 'L', key: 'kL', savedAt: now }, { url: '/settings', y: 0, title: 'S', key: 'kS', savedAt: now }]));
-  const entries = [['kL', '/library?page=3'], ['kS', '/settings'], ['kD', '/downloads']];
-  const [path, search] = [['/library', '?page=3'], ['/settings', ''], ['/downloads', '']][current];
-  const r = load({ path, search, store, nav: { key: entries[current][0], index: current, entries } });
-  const kept = r.qn.prune().map(e => e.url);
-  return [kept, r.qn.goBack(), r.calls.map(c => c[0])];
-};
-out.jumpedBackPastSteps = skipped(0);
-out.jumpedBackOneStep = skipped(1);
-out.stepsStillBehind = skipped(2);
-// without the Navigation API: every history entry of the tab gets an increasing number in history.state
-out.seqAssigned = (() => {
-  const store = new Map();
-  const a = load({ path: '/library', store });
-  const b = load({ path: '/settings', store });
-  const again = load({ path: '/library', store, state: { jmQuickNavSeq: 1, jmSearch: 'kept' } });  // Back: state comes back
-  return [a.win.history.state, b.win.history.state, again.win.history.state, store.get('jm-quick-nav-seq')];
-})();
-out.seqRemembered = (() => {
-  const store = new Map();
-  const r = load({ path: '/library', store, state: { jmQuickNavSeq: 7 } }); r.qn.remember();
-  return JSON.parse(store.get('jm-quick-nav-back-v1'))[0].seq;
-})();
-const seqSkipped = currentSeq => {
-  const store = new Map();
-  store.set('jm-quick-nav-back-v1', JSON.stringify([
-    { url: '/library?page=3', y: 0, title: 'L', key: null, seq: 1, savedAt: now },
-    { url: '/settings', y: 0, title: 'S', key: null, seq: 2, savedAt: now }]));
-  const [path, search] = { 1: ['/library', '?page=3'], 2: ['/settings', ''], 3: ['/downloads', ''] }[currentSeq];
-  const r = load({ path, search, store, state: { jmQuickNavSeq: currentSeq } });
-  return [r.qn.prune().map(e => e.url), r.qn.goBack(), r.calls.map(c => c[0])];
-};
-out.seqJumpedBackPastSteps = seqSkipped(1);
-out.seqStepsStillBehind = seqSkipped(3);
-// pages without the quick-nav (reader, preview) still drop the steps a history-menu jump has passed
-out.readerPrunes = (() => {
-  const store = new Map();
-  store.set('jm-quick-nav-back-v1', JSON.stringify([{ url: '/downloads', y: 0, title: 'D', key: 'kD', savedAt: now }]));
-  const r = load({ path: '/read/5', store, nav: { key: 'kR', index: 1, entries: [['kL', '/library'], ['kR', '/read/5'], ['kD', '/downloads']] } });
-  const onLoad = JSON.parse(store.get('jm-quick-nav-back-v1'));
-  return [onLoad, (r.win.on.pageshow || []).length];
-})();
-out.noNavigationApi = (() => {
-  const store = new Map();
-  store.set('jm-quick-nav-back-v1', JSON.stringify([{ url: '/library', y: 1, listTop: null, title: 't', key: 'kA', savedAt: now }]));
-  const r = load({ path: '/downloads', store }); r.qn.goBack(); return r.calls.map(c => c[0]);
-})();
-
-// already back on that page by other means (browser Back, the top menu): the step is dropped
-const pruned = (step, path, search, nav) => {
-  const store = new Map();
-  store.set('jm-quick-nav-back-v1', JSON.stringify([
-    { url: '/', y: 0, listTop: null, title: '首页', key: 'k0', savedAt: now }, Object.assign({ y: 0, listTop: null, title: 't', savedAt: now }, step)]));
-  const r = load({ path, search, store, nav }); return r.qn.prune().map(e => e.url);
-};
-out.prunedSameEntry = pruned({ url: '/library?q=1', key: 'kA' }, '/library', '?q=2', { key: 'kA', index: 0, entries: [] });
-out.prunedSameAddress = pruned({ url: '/library?q=1', key: 'kA' }, '/library', '?q=1', { key: 'kB', index: 0, entries: [] });
-out.keptElsewhere = pruned({ url: '/library?q=1', key: 'kA' }, '/downloads', '', { key: 'kB', index: 0, entries: [] });
-
-// bounded: the last MAX_STACK steps, 12 hours, same-site addresses only
-shared = new Map();
-for (let i = 0; i < 13; i++) load({ path: '/library', search: '?page=' + i, store: shared }).qn.remember();
-out.bounded = [stackOf(shared).length, stackOf(shared)[0].url, p.qn.MAX_STACK];
-shared = new Map();
-shared.set('jm-quick-nav-back-v1', JSON.stringify([
-  { url: '/old', y: 0, title: 't', savedAt: now - 13 * HOUR }, { url: '/future', y: 0, title: 't', savedAt: now + HOUR },
-  { url: '//evil.example/x', y: 0, title: 't', savedAt: now }, { url: 'http://evil.example/', y: 0, title: 't', savedAt: now },
-  { url: '/a b', y: 0, title: 't', savedAt: now }, { url: '/a\\b', y: 0, title: 't', savedAt: now },
-  { url: 42, y: 0, title: 't', savedAt: now }, null, { url: '/ok', y: 5, title: 't', savedAt: now - HOUR }]));
-out.filtered = load({ path: '/downloads', store: shared }).qn.readStack().map(e => e.url);
-shared = new Map([['jm-quick-nav-back-v1', '{oops']]);
-out.broken = [load({ path: '/downloads', store: shared }).qn.readStack(), load({ path: '/downloads', store: shared }).qn.goBack()];
+for (let i = 0; i < 55; i++) {
+  now += 1000;
+  load({ path: '/library', search: '?page=' + i, title: '资源库 - JMComic 下载控制台', store: shared, nav: { key: 'k' + i, index: i } }).leave();
+}
+const kept = pagesOf(shared);
+out.bounded = [Object.keys(kept).length, 'k4' in kept, 'k5' in kept, 'k54' in kept, p.qn.MAX_PAGES];
+shared = withPages({
+  old: saved('/old', 't', 0, null, 13 * HOUR), future: saved('/future', 't', 0, null, -HOUR),
+  evil: saved('//evil.example/x', 't', 0), abs: saved('http://evil.example/', 't', 0), space: saved('/a b', 't', 0),
+  slash: saved('/a\\b', 't', 0), notitle: { url: '/x', y: 0, savedAt: now }, noy: { url: '/x', title: 't', savedAt: now },
+  nul: null, ok: saved('/ok', 't', 5, null, HOUR),
+});
+out.filtered = Object.keys(load({ path: '/downloads', store: shared }).qn.readPages());
+out.broken = [load({ path: '/downloads', store: new Map([[PAGES, '{oops']]) }).qn.readPages(),
+              load({ path: '/downloads', store: new Map([[PAGES, '[1,2]']]) }).qn.readPages()];
 console.log(JSON.stringify(out));
 """
 
@@ -274,71 +223,55 @@ def harness():
     return json.loads(result.stdout)
 
 
-def test_a_jump_remembers_the_address_and_the_exact_position(harness):
-    step = harness["remembered"]
-    assert {k: step[k] for k in ("url", "y", "listTop", "title", "key")} == {
-        "url": "/library?q=a&page=2", "y": 1235, "listTop": 300, "title": "资源库", "key": "k1"}
+def test_leaving_a_page_records_its_name_and_place(harness):
+    assert harness["beforeLeaving"] == {}
+    page = harness["recorded"]
+    assert {k: page[k] for k in ("url", "title", "y", "listTop")} == {
+        "url": "/library?q=a&page=2", "title": "资源库", "y": 1235, "listTop": 300}
+    assert harness["pagehideListeners"] == 1
+    assert harness["noKeyNoRecord"] is False  # without the Navigation API there is no entry to file it under
 
 
-def test_return_names_the_page_it_goes_back_to(harness):
+def test_return_names_the_previous_page(harness):
     long_title = "x" * 39 + "…"
-    assert harness["titles"] == ["设置", "搜索“abc”", "详情“一部很长的漫画标题”", "详情 7", long_title]
+    assert harness["titles"] == ["设置", "搜索“abc”", "详情“一部很长的漫画标题”", "详情 7", long_title, "连续阅读"]
 
 
-def test_returns_step_back_in_reverse_order_without_looping(harness):
-    ok, calls = harness["firstBack"]
-    assert ok is True and calls == [["expect", "/wishlist?status=missing", 700, None], ["assign", "/wishlist?status=missing"]]
-    ok, calls = harness["secondBack"]
-    assert ok is True and calls == [["expect", "/search?keyword=a", 500, None], ["assign", "/search?keyword=a"]]
-    ok, calls, stack = harness["nothingLeft"]
-    assert ok is False and calls == [] and stack == []  # 返回 itself never adds a step
+def test_return_goes_to_the_previous_page_where_it_was_left(harness):
+    assert harness["previous"] == {"url": "/library?q=1", "title": "资源库", "y": 900, "listTop": 250}
+    assert harness["back"] == [True, [["expect", "/library?q=1", 900, 250], ["back"]]]
 
 
-def test_return_uses_the_browser_back_only_for_the_matching_previous_entry(harness):
-    assert harness["browserBack"] == ["expect", "back"]
-    assert harness["previousIsOther"] == ["expect", "assign"]
-    assert harness["previousChangedAddress"] == ["expect", "assign"]
-    assert harness["firstEntry"] == ["expect", "assign"]
-    assert harness["noNavigationApi"] == ["expect", "assign"]
+def test_return_after_an_ordinary_link_goes_to_that_page_not_an_older_one(harness):
+    # 下载管理 → (quick) 搜索 → a result's link → detail: 返回 goes to the search results, not 下载管理
+    title, ok, calls = harness["mixed"]
+    assert title == "搜索“sample”"
+    assert ok is True and calls == [["expect", "/search?keyword=sample", 1800, 226], ["back"]]
 
 
-def test_a_step_already_returned_to_by_other_means_is_dropped(harness):
-    assert harness["prunedSameEntry"] == ["/"]
-    assert harness["prunedSameAddress"] == ["/"]
-    assert harness["keptElsewhere"] == ["/", "/library?q=1"]
+def test_the_previous_entry_address_wins_over_the_recorded_one(harness):
+    assert harness["addressChanged"] == [True, [["expect", "/library?q=2", 900, None], ["back"]]]
 
 
-def test_return_goes_straight_back_to_an_earlier_history_entry(harness):
-    assert harness["traverseBack"] == [["expect", "/library?q=1"], ["traverse", "kA"]]
+def test_an_unrecorded_previous_page_is_still_reachable(harness):
+    previous, ok, calls = harness["unrecorded"]
+    assert previous == {"url": "/settings", "title": None, "y": None, "listTop": None}
+    assert ok is True and calls == [["back"]]
 
 
-def test_jumping_back_past_steps_never_makes_return_go_forward(harness):
-    # 资源库 → (quick) 设置 → (quick) 下载管理, then the Back menu straight to 资源库: nothing is behind any more
-    assert harness["jumpedBackPastSteps"] == [[], False, []]
-    # Back once to 设置: only the 资源库 step is still behind, reached with the browser's Back
-    assert harness["jumpedBackOneStep"] == [["/library?page=3"], True, ["expect", "back"]]
-    assert harness["stepsStillBehind"] == [["/library?page=3", "/settings"], True, ["expect", "back"]]
+def test_nothing_to_return_to_on_the_first_page_of_the_tab(harness):
+    assert harness["first"] == [None, False, []]
 
 
-def test_without_the_navigation_api_history_entries_are_numbered(harness):
-    first, second, again, counter = harness["seqAssigned"]
-    assert first == {"jmQuickNavSeq": 1} and second == {"jmQuickNavSeq": 2}
-    assert again == {"jmQuickNavSeq": 1, "jmSearch": "kept"}  # an entry keeps its number and the rest of its state
-    assert counter == "2"
-    assert harness["seqRemembered"] == 7
+def test_without_the_navigation_api_the_referrer_decides(harness):
+    previous, ok, calls = harness["noApiSameSite"]
+    assert previous == {"url": "/library?q=1", "title": None, "y": None, "listTop": None}
+    assert ok is True and calls == [["back"]]
+    for case in ("noApiOtherSite", "noApiNoReferrer", "noApiFirstEntry"):
+        assert harness[case] == [None, False, []], case  # never back to another site or out of the tab
 
 
-def test_without_the_navigation_api_jumping_back_past_steps_never_goes_forward(harness):
-    assert harness["seqJumpedBackPastSteps"] == [[], False, []]
-    assert harness["seqStepsStillBehind"] == [["/library?page=3", "/settings"], True, ["expect", "assign"]]
-
-
-def test_reader_pages_without_the_quick_nav_still_drop_passed_steps(harness):
-    stack, pageshow_listeners = harness["readerPrunes"]
-    assert stack == [] and pageshow_listeners == 1
-
-
-def test_steps_are_bounded_fresh_and_same_site(harness):
-    assert harness["bounded"] == [10, "/library?page=3", 10]
-    assert harness["filtered"] == ["/ok"]
-    assert harness["broken"] == [[], False]
+def test_recorded_pages_are_bounded_fresh_and_same_site(harness):
+    assert harness["bounded"] == [50, False, True, True, 50]  # the 50 most recent survive
+    assert harness["filtered"] == ["ok"]
+    assert harness["broken"] == [{}, {}]

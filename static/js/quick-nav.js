@@ -4,12 +4,14 @@
  *
  *   去处：首页 / 搜索 / 下载管理 / 收藏 / 资源库 / 设置，与顶部导航相同。搜索、收藏、资源库带 data-nav-memory，
  *     和顶部导航一样回到上次的搜索结果、筛选、页码和位置（nav-memory.js）。
- *   返回：回到上一次用快捷导航跳走之前的页面和那一刻所在的位置。连续跳了几次就按相反顺序一步步退回
- *     （本标签页、12 小时内、最多 MAX_STACK 步），退完即不可用；“返回”本身不记一步，不会在两页之间来回。
- *     跳走前那条浏览历史还在身后时直接退回到它（浏览器后退 / Navigation API traverseTo：不多出历史记录，
- *     页面自己的“返回”和浏览器后退照常），否则打开那个地址。经浏览器后退（含历史菜单一次跳过几页）等其他方式
- *     已经回到那一步之前的，那一步和它之后的步都作废。连点“返回”只算一次。
- *   到顶 / 到底：直接跳到本页最上 / 最下（不做滚动动画），不改地址和筛选，也不影响“返回”；已在最上 / 最下时不可用。
+ *   返回：回到本标签页里的上一页——和浏览器的后退一样，但只在本程序的页面之间——并回到离开那一页时所在的位置。
+ *     经快捷导航、顶部导航还是页面里的链接去的都算；一直按就一页页往回走，不会在两页之间来回。
+ *     本标签页里前面没有本程序的页面（直接打开、在新标签页打开）时不可用。提示和读屏名称带上一页的名字。
+ *     连点只算一次。
+ *   到顶 / 到底：直接跳到本页最上 / 最下（不做滚动动画），不改地址和筛选；已在最上 / 最下时不可用。
+ *
+ * 每个页面离开时记下自己的名字和“看到的位置”（按浏览历史记录的标识存在本标签页，12 小时、最近 MAX_PAGES 条），
+ * 下一页的“返回”据此显示“返回：…”，退回去时回到那个位置（nav-memory.js expectReturn / takeReturn）。
  *
  * 打开方式：鼠标移上去展开、移开收起；点按钮（触屏、键盘）展开并保持，再点、Esc、点别处或焦点离开时收起。
  * 在上面点击不算“在这里做事”（nav-memory.js inNav），打开它不会改掉记下的阅读位置。
@@ -17,8 +19,8 @@
 (function () {
   'use strict';
 
-  var STACK_KEY = 'jm-quick-nav-back-v1'; // [{url, y, listTop, title, key, savedAt}, …]，最后一个是最近一次跳走的地方
-  var MAX_STACK = 10;
+  var PAGES_KEY = 'jm-quick-nav-pages-v1'; // { 浏览历史记录的标识: {url, title, y, listTop, savedAt} }
+  var MAX_PAGES = 50;
   var HOVER_CLOSE_MS = 300;               // 鼠标移开后稍等再收起，斜着移到面板上不会闪
   var SITE_SUFFIX = /\s*-\s*JMComic 下载控制台\s*$/;  // “资源库 - JMComic 下载控制台”
   var SITE_PREFIX = /^\s*JMComic 下载控制台\s*-\s*/;  // “JMComic 下载控制台 - 设置”
@@ -38,22 +40,6 @@
     return typeof url === 'string' && url.charAt(0) === '/' && url.charAt(1) !== '/' && !/[\s\\]/.test(url);
   }
 
-  function readStack() {
-    var list;
-    try { list = JSON.parse(window.sessionStorage.getItem(STACK_KEY)); } catch (_) { list = null; }
-    if (!Array.isArray(list)) return [];
-    var now = Date.now();
-    var limit = maxAge();
-    return list.filter(function (entry) {
-      return entry && typeof entry === 'object' && isLocalUrl(entry.url) && typeof entry.savedAt === 'number'
-        && now - entry.savedAt >= 0 && now - entry.savedAt < limit;
-    });
-  }
-
-  function writeStack(list) {
-    try { window.sessionStorage.setItem(STACK_KEY, JSON.stringify(list.slice(-MAX_STACK))); } catch (_) { /* 存不下：不记 */ }
-  }
-
   /** 这条浏览历史的标识（Navigation API；没有时为 null） */
   function historyKey() {
     try {
@@ -61,27 +47,6 @@
       return nav && nav.currentEntry ? nav.currentEntry.key || null : null;
     } catch (_) { return null; }
   }
-
-  // 没有 Navigation API 的浏览器：给本标签页的每条浏览历史一个递增的序号，存在 history.state 里
-  // （后退/前进时浏览器连同 state 一起恢复），用来判断一步是在当前这条之前还是之后
-  var SEQ_KEY = 'jm-quick-nav-seq';
-
-  function entrySeq() {
-    try {
-      var state = window.history.state;
-      return state && typeof state.jmQuickNavSeq === 'number' ? state.jmQuickNavSeq : null;
-    } catch (_) { return null; }
-  }
-
-  function ensureSeq() {
-    if (entrySeq() !== null) return;
-    try {
-      var next = (Number(window.sessionStorage.getItem(SEQ_KEY)) || 0) + 1;
-      window.sessionStorage.setItem(SEQ_KEY, String(next));
-      window.history.replaceState(Object.assign({}, window.history.state, { jmQuickNavSeq: next }), '');
-    } catch (_) { /* 存不下 / 不允许：只靠地址判断 */ }
-  }
-  ensureSeq();
 
   /** “返回：…”里显示的页面名称：搜索带关键词，详情带漫画标题 */
   function pageTitle() {
@@ -100,117 +65,104 @@
     return title.length > TITLE_MAX ? title.slice(0, TITLE_MAX - 1) + '…' : title;
   }
 
-  /** 用快捷导航跳走前记下这里：地址、此刻所在的位置、列表位置、页面名称 */
-  function remember() {
-    var memory = nm();
-    var stack = readStack();
-    stack.push({
-      url: currentUrl(),
-      y: Math.max(0, Math.round(window.scrollY || 0)),
-      listTop: memory ? memory.listTopNow() : null,
-      title: pageTitle(),
-      key: historyKey(),
-      seq: entrySeq(),
-      savedAt: Date.now()
+  /** 记下的各页（过期、格式不对的丢掉） */
+  function readPages() {
+    var map;
+    try { map = JSON.parse(window.sessionStorage.getItem(PAGES_KEY)); } catch (_) { map = null; }
+    var pages = {};
+    if (!map || typeof map !== 'object' || Array.isArray(map)) return pages;
+    var now = Date.now();
+    var limit = maxAge();
+    Object.keys(map).forEach(function (key) {
+      var page = map[key];
+      if (page && typeof page === 'object' && isLocalUrl(page.url) && typeof page.title === 'string'
+          && typeof page.y === 'number' && typeof page.savedAt === 'number'
+          && now - page.savedAt >= 0 && now - page.savedAt < limit) {
+        pages[key] = page;
+      }
     });
-    writeStack(stack);
+    return pages;
   }
 
-  /** 本标签页的浏览历史（Navigation API）：{ nav, current: 当前这条的位置, at: 标识 → 位置 }；没有时为 null */
-  function historyMap() {
-    try {
-      var nav = window.navigation;
-      if (!nav || !nav.currentEntry || typeof nav.entries !== 'function') return null;
-      var at = {};
-      nav.entries().forEach(function (entry, index) { if (entry && entry.key) at[entry.key] = index; });
-      return { nav: nav, current: nav.currentEntry.index, at: at };
-    } catch (_) { return null; }
+  /** 只留最近的 MAX_PAGES 条 */
+  function writePages(pages) {
+    var keys = Object.keys(pages).sort(function (a, b) { return pages[b].savedAt - pages[a].savedAt; });
+    var kept = {};
+    keys.slice(0, MAX_PAGES).forEach(function (key) { kept[key] = pages[key]; });
+    try { window.sessionStorage.setItem(PAGES_KEY, JSON.stringify(kept)); } catch (_) { /* 存不下：不记 */ }
   }
 
-  /**
-   * 作废已经不在“身后”的步：
-   *   1. 记下的那条历史就是当前这条或在它之后——用户已经经浏览器后退（含历史菜单一次跳过几页）回到了它之前，
-   *      这一步和它之后记的步都不再是“跳走前”的地方（否则“返回”会往前跳到后来才去的页面，再在两页之间来回）；
-   *   2. 最近一步就是当前这条历史或当前这个地址：已经回到那里了，“返回”到这里毫无意义。
-   */
-  function prune() {
-    var stack = readStack();
-    var before = stack.length;
-    var history = historyMap();
-    var seq = history ? null : entrySeq();
-    for (var i = 0; i < stack.length; i++) {
-      var step = stack[i];
-      var ahead = history
-        ? !!step.key && Object.prototype.hasOwnProperty.call(history.at, step.key) && history.at[step.key] >= history.current
-        : seq !== null && typeof step.seq === 'number' && step.seq >= seq;  // 没有 Navigation API：按序号比
-      if (ahead) {
-        stack = stack.slice(0, i);
-        break;
-      }
-    }
-    var currentKey = historyKey();
-    while (stack.length) {
-      var top = stack[stack.length - 1];
-      if (!((!!top.key && top.key === currentKey) || top.url === currentUrl())) break;
-      stack.pop();
-    }
-    if (stack.length !== before) writeStack(stack);
-    return stack;
-  }
-
-  /** entry 记下的那条历史还在、在当前这条之前、地址也没变：返回它的标识（可以直接退回去），否则 null */
-  function earlierEntryKey(entry, history) {
-    if (!entry.key || !history || !Object.prototype.hasOwnProperty.call(history.at, entry.key)) return null;
-    var index = history.at[entry.key];
-    if (index >= history.current) return null;
-    try {
-      var url = new URL(history.nav.entries()[index].url, window.location.href);
-      return url.origin === window.location.origin && url.pathname + url.search === entry.url ? entry.key : null;
-    } catch (_) { return null; }
-  }
-
-  /**
-   * 返回：取出最近一步，回到那个地址和位置；没有可返回的 → false。
-   * 那条历史还在身后就退回到它（浏览器后退 / traverseTo：不多出历史记录，页面恢复原样，页面自己的“返回”照常），
-   * 否则打开那个地址。
-   */
-  function goBack() {
-    var stack = prune();
-    var entry = stack.pop();
-    if (!entry) return false;
-    writeStack(stack);
+  /** 离开这一页时记下它的地址、名字和“看到的位置”（没有 Navigation API 时无从对应，不记） */
+  function recordHere() {
+    var key = historyKey();
+    if (!key) return;
     var memory = nm();
-    if (memory && memory.expectReturn) memory.expectReturn(entry.url, entry.y, entry.listTop);
-    var history = historyMap();
-    var key = earlierEntryKey(entry, history);
+    var seen = memory && memory.place ? memory.place() : { y: window.scrollY || 0, listTop: null };
+    var pages = readPages();
+    pages[key] = {
+      url: currentUrl(),
+      title: pageTitle(),
+      y: Math.max(0, Math.round(Number(seen.y) || 0)),
+      listTop: typeof seen.listTop === 'number' ? seen.listTop : null,
+      savedAt: Date.now()
+    };
+    writePages(pages);
+  }
+
+  /**
+   * 本标签页里的上一页（本程序的页面）：{ url, title, y, listTop }（名字和位置不知道时为 null）；没有 → null。
+   * 有 Navigation API：它的历史记录只列出本程序（同源）连续的那一段，当前这条前面有就是上一页；
+   * 没有时照详情页 / 阅读页“返回”的办法：本标签页有更早的历史、而且是从本程序的页面来的。
+   */
+  function previousEntry() {
+    var nav = window.navigation;
     try {
-      if (key && history.at[key] === history.current - 1) {
-        window.history.back();
-        return true;
+      if (nav && nav.currentEntry && typeof nav.entries === 'function') {
+        var index = nav.currentEntry.index;
+        var entry = index > 0 ? nav.entries()[index - 1] : null;
+        if (!entry || !entry.url) return null;
+        var url = new URL(entry.url, window.location.href);
+        if (url.origin !== window.location.origin) return null;
+        var saved = entry.key ? readPages()[entry.key] : null;
+        return {
+          url: url.pathname + url.search,
+          title: saved ? saved.title : null,
+          y: saved ? saved.y : null,
+          listTop: saved ? saved.listTop : null
+        };
       }
-      if (key && typeof history.nav.traverseTo === 'function') {
-        var result = history.nav.traverseTo(key);
-        // 被随后的另一次跳转取消等：不再补救（否则会盖掉用户新点的去处），也不留未处理的 Promise 拒绝
-        if (result && result.committed) result.committed.catch(function () {});
-        if (result && result.finished) result.finished.catch(function () {});
-        return true;
+      if (window.history.length > 1 && document.referrer) {
+        var from = new URL(document.referrer);
+        if (from.origin !== window.location.origin) return null;
+        return { url: from.pathname + from.search, title: null, y: null, listTop: null };
       }
-    } catch (_) { /* 退不回去：打开那个地址 */ }
-    window.location.assign(entry.url);
+    } catch (_) { /* 取不到：当作没有 */ }
+    return null;
+  }
+
+  /** 返回：退回上一页，回到离开它时的位置；没有上一页 → false */
+  function goBack() {
+    var previous = previousEntry();
+    if (!previous) return false;
+    var memory = nm();
+    if (previous.y !== null && memory && memory.expectReturn) {
+      memory.expectReturn(previous.url, previous.y, previous.listTop);
+    }
+    window.history.back();
     return true;
   }
 
+  // 每一页离开时都记下（阅读页、单页预览也记：从它们去别处后“返回”能显示它们的名字）
+  window.addEventListener('pagehide', recordHere);
+
   // 供测试与控制台查看（页面本身不依赖）
-  window.quickNav = { remember: remember, goBack: goBack, prune: prune, readStack: readStack, MAX_STACK: MAX_STACK };
+  window.quickNav = {
+    previousEntry: previousEntry, goBack: goBack, recordHere: recordHere, readPages: readPages, MAX_PAGES: MAX_PAGES
+  };
 
   // ── 界面 ──
   var root = document.getElementById('quick-nav');
-  if (!root) {
-    // 阅读页 / 在线阅读 / 单页预览没有界面：经历史菜单一次跳过几页回到这里时，同样作废已经越过的步
-    prune();
-    window.addEventListener('pageshow', function (event) { if (event && event.persisted) prune(); });
-    return;
-  }
+  if (!root) return;
   var toggle = root.querySelector('.quick-nav-toggle');
   var panel = root.querySelector('.quick-nav-panel');
   var backBtn = root.querySelector('[data-quick-action="back"]');
@@ -220,7 +172,7 @@
 
   var openedBy = null;   // null 收起 / 'hover' 鼠标移上去展开 / 'click' 点按钮展开（保持）
   var closeTimer = null;
-  var leaving = false;   // 刚点了“返回”、页面正要跳走：连点 / 双击不再取出下一步
+  var leaving = false;   // 刚点了“返回”、页面正要跳走：连点 / 双击不再多退一页
   var leavingTimer = null;
   var LEAVING_RESET_MS = 4000; // 跳转被取消（停止加载等）时过这么久“返回”恢复可用
   var pressing = false;        // 正在快捷导航上按着（按下到这次点击结束）：焦点暂时落到 body 不算离开
@@ -245,17 +197,16 @@
 
   function isDisabled(btn) { return btn.getAttribute('aria-disabled') === 'true'; }
 
-  /** 按当前位置和“返回”记录更新三个按钮 */
+  /** 按当前位置和上一页更新三个按钮 */
   function refresh() {
     var y = window.scrollY || 0;
     setDisabled(topBtn, y <= 1);
     setDisabled(bottomBtn, y >= maxScroll() - 1);
-    var stack = prune();
-    var entry = stack[stack.length - 1];
-    root.classList.toggle('has-back', !!entry);
+    var previous = previousEntry();
     if (backBtn) {
-      setDisabled(backBtn, leaving || !entry);
-      var label = entry ? '返回：' + entry.title : '返回（还没有用快捷导航跳转过）';
+      setDisabled(backBtn, leaving || !previous);
+      var label = !previous ? '返回（这个标签页里前面没有本程序的页面）'
+        : (previous.title ? '返回：' + previous.title : '返回上一页');
       backBtn.title = label;
       backBtn.setAttribute('aria-label', label);
     }
@@ -343,13 +294,8 @@
   });
 
   panel.addEventListener('click', function (event) {
-    var link = event.target.closest('a[data-quick-dest]');
-    if (link) {
-      // 在本标签页打开的普通点击才记一步（Ctrl/Shift 等在新标签页/窗口打开，本页不跳走）；去当前页不记
-      var plain = !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && !event.button;
-      if (plain && link.getAttribute('data-quick-dest') !== window.location.pathname) remember();
-      return; // 链接照常打开（搜索/收藏/资源库的地址已由 nav-memory.js 换成记住的那个）
-    }
+    // 去处是普通链接，照常打开（搜索/收藏/资源库的地址已由 nav-memory.js 换成记住的那个）
+    if (event.target.closest('a[data-quick-dest]')) return;
     var btn = event.target.closest('button[data-quick-action]');
     if (!btn) return;
     var action = btn.getAttribute('data-quick-action');
@@ -386,7 +332,7 @@
     new window.ResizeObserver(onViewportChange).observe(document.body);
   }
 
-  // 离开时收起（进入往返缓存的页面回来时是收起的）；回来时“返回”恢复可用并重新判断
+  // 离开时收起（进入往返缓存的页面回来时是收起的）；回来时“返回”恢复可用并重新判断上一页
   window.addEventListener('pagehide', function () { setOpen(null); });
   window.addEventListener('pageshow', function () {
     leaving = false;

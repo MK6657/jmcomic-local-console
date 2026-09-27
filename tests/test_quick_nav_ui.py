@@ -17,7 +17,7 @@ NODE = shutil.which("node")
 
 OPEN = [True, "true"]     # [root has .is-open, toggle aria-expanded]
 CLOSED = [False, "false"]
-NO_BACK_LABEL = "返回（还没有用快捷导航跳转过）"
+NO_BACK_LABEL = "返回（这个标签页里前面没有本程序的页面）"
 
 HARNESS = r"""
 const src = require('fs').readFileSync(process.argv[1], 'utf8');
@@ -25,10 +25,9 @@ const HOUR = 3600 * 1000;
 let now = 1_000_000_000_000;
 const FakeDate = { now: () => now };
 const ORIGIN = 'http://127.0.0.1:5000';
-const KEY = 'jm-quick-nav-back-v1';
+const PAGES = 'jm-quick-nav-pages-v1';
 const DESTS = ['/', '/search', '/downloads', '/wishlist', '/library', '/settings'];
 const REMEMBERED = ['/search', '/wishlist', '/library'];  // carry data-nav-memory like the top links
-const step = (url, title, y) => ({ url, y: y || 0, listTop: null, title, key: null, savedAt: now });
 
 // only the two selectors quick-nav.js asks closest() for
 const matches = (n, sel) => (sel === 'a[data-quick-dest]' && n.tag === 'a' && 'data-quick-dest' in n.attrs)
@@ -44,11 +43,17 @@ function node(tag, attrs, parent) {
   };
 }
 
-// opts: path, search, title, scrollY, innerHeight, scrollHeight, panelHeight, stack (steps to seed), resizeObserver
+// opts: path, search, title, scrollY, innerHeight, scrollHeight, panelHeight, resizeObserver,
+// prev: the tab's previous history entry { key, url, title?, y?, listTop? } (title / y: what that page recorded
+// when it was left); without prev this is the first page of the app in the tab
 function page(opts) {
   opts = opts || {};
   const store = new Map();
-  if (opts.stack) store.set(KEY, JSON.stringify(opts.stack));
+  const prev = opts.prev || null;
+  if (prev && prev.title) {
+    store.set(PAGES, JSON.stringify({ [prev.key]: { url: prev.url, title: prev.title, y: prev.y || 0,
+      listTop: prev.listTop === undefined ? null : prev.listTop, savedAt: now } }));
+  }
   const calls = [];     // scrollTo / expectReturn / assign / history.back, in order
   const cssVars = [];   // document.documentElement.style.setProperty(...)
   const focused = [];   // toggle.focus()
@@ -116,7 +121,13 @@ function page(opts) {
       pathname: path, search: opts.search || '', origin: ORIGIN, href: ORIGIN + path + (opts.search || ''),
       assign: url => calls.push(['assign', url]),
     },
-    history: { back: () => calls.push(['back']) },
+    history: { length: prev ? 2 : 1, back: () => calls.push(['back']) },
+    // Navigation API: this app's entries of the tab, the current one last
+    navigation: {
+      currentEntry: { key: 'kNow', index: prev ? 1 : 0 },
+      entries: () => (prev ? [{ key: prev.key, url: ORIGIN + prev.url }] : [])
+        .concat([{ key: 'kNow', url: ORIGIN + path + (opts.search || '') }]),
+    },
     navMemory: {
       MAX_AGE: 12 * HOUR,
       listTopNow: () => null,
@@ -133,8 +144,8 @@ function page(opts) {
     win, doc, calls, focused, root, toggle, panel, buttons, bottomIcon, links, linkLabels, outside, body, state,
     shown: () => [classes.has('is-open'), toggle.getAttribute('aria-expanded')],
     disabled: () => ['back', 'top', 'bottom'].map(a => buttons[a].getAttribute('aria-disabled')),
-    backLabel: () => [classes.has('has-back'), buttons.back.getAttribute('aria-label'), buttons.back.title],
-    stack: () => JSON.parse(store.get(KEY) || '[]'),
+    backLabel: () => [buttons.back.getAttribute('aria-label'), buttons.back.title],
+    pages: () => JSON.parse(store.get(PAGES) || '{}'),
     // the last --quick-nav-panel-h written (style.css only reads it while the panel is open)
     panelVar: () => { const w = cssVars.filter(c => c[0] === '--quick-nav-panel-h').pop(); return w ? w[1] : null; },
     // move the clock forward, running every timer that falls due on the way, in order
@@ -318,7 +329,7 @@ p.click(p.buttons.top);                          // already at the top
 p.scroll(1200);                                  // now at the bottom
 p.click(p.buttons.bottom);
 p.click(p.buttons.back);                         // nothing to go back to
-out.disabledNoop = [p.disabled(), p.calls, p.stack()];
+out.disabledNoop = [p.disabled(), p.calls];
 
 // the page grew while open (results appended, no scroll / resize yet): 到底 still goes, to the new bottom
 p = page({ scrollHeight: 2000, innerHeight: 800, scrollY: 1200 });
@@ -361,31 +372,22 @@ const onOpen = p.disabled()[2];
 p.doc.documentElement.scrollHeight = 2000; p.bodyResized();
 out.resizeObserver = [observed, whileClosed, onOpen, p.disabled()[2]];
 
-// destination links: only a plain click that leaves this page records a step
+// destination links are ordinary links: clicking them (plain, modified, the current page) does nothing else
 p = page({ path: '/downloads', title: '下载管理 - JMComic 下载控制台', scrollY: 640, scrollHeight: 3000 });
 p.clickToggle();
 [{ ctrlKey: true }, { shiftKey: true }, { metaKey: true }, { altKey: true }, { button: 1 }]
   .forEach(mods => p.click(p.links['/library'], mods));
-out.modifiedClicks = p.stack();
 p.click(p.links['/downloads']);
-out.currentDest = p.stack();
 p.click(p.linkLabels['/library']);  // the click lands on the label inside the link
-out.plainClick = p.stack().map(s => [s.url, s.y, s.title]);
-// on a search page the 搜索 link (address swapped by nav-memory.js) is still the current page
-p = page({ path: '/search', search: '?keyword=a&page=3', title: '搜索 - JMComic 下载控制台' });
-p.links['/search'].attrs.href = '/search?keyword=b';
-p.click(p.links['/search']);
-out.currentSearch = p.stack();
-p.click(p.links['/']);  // Enter on a focused link: the link itself is the target
-out.searchToHome = p.stack().map(s => [s.url, s.title]);
+out.destinationClicks = [p.calls.slice(), p.pages()];
 
-// 返回: one step per click, never adds one, a double click pops once; off while leaving
-p = page({ path: '/downloads', scrollHeight: 3000, stack: [step('/library?page=2', '资源库', 300), step('/settings', '设置', 50)] });
+// 返回: back to the previous page of the tab where it was left; a double click goes back once; off while leaving
+p = page({ path: '/downloads', scrollHeight: 3000, prev: { key: 'kL', url: '/library?page=2', title: '资源库', y: 300 } });
 out.backReady = [p.backLabel(), p.disabled()[0]];
 p.clickToggle();
 p.click(p.buttons.back);
 p.click(p.buttons.back);
-out.backOnce = [p.calls.slice(), p.stack().map(s => s.url), p.disabled()[0]];
+out.backOnce = [p.calls.slice(), p.disabled()[0]];
 p.scroll(500); p.resize();
 out.backWhileLeaving = [p.disabled(), p.shown()];
 p.advance(3999);
@@ -393,29 +395,35 @@ out.backBeforeReset = p.disabled()[0];
 p.advance(1);
 out.backAfterReset = [p.disabled()[0], p.backLabel()];
 p.click(p.buttons.back);
-out.backLast = [p.calls.slice(2), p.stack()];
+out.backAgain = p.calls.slice(2);
 p.pagehide();
 out.pagehideCloses = p.shown();
-p.advance(4000);
-out.backEmpty = [p.disabled()[0], p.backLabel()];
 
 // coming back to the page (pageshow) makes 返回 usable again right away
-p = page({ path: '/downloads', stack: [step('/library', '资源库'), step('/settings', '设置')] });
+p = page({ path: '/downloads', prev: { key: 'kL', url: '/library', title: '资源库', y: 0 } });
 p.clickToggle(); p.click(p.buttons.back);
 const leavingState = p.disabled()[0];
 p.pagehide(); p.pageshow();
-out.pageshow = [leavingState, p.shown(), p.disabled()[0], p.backLabel()[1]];
+out.pageshow = [leavingState, p.shown(), p.disabled()[0], p.backLabel()[0]];
 p.clickToggle(); p.click(p.buttons.back);
 out.pageshowThenBack = p.calls.map(c => c.slice(0, 2));
 
-// has-back and the label follow the stack: a step for this very page or an expired one does not count
-p = page({ path: '/downloads', stack: [step('/downloads', '下载管理')] });
-out.selfOnly = p.backLabel();
-p = page({ path: '/downloads', stack: [step('/library', '资源库')] });
+// the label names the previous page; nothing recorded for it (or the record expired): 返回上一页, still usable
+p = page({ path: '/downloads', prev: { key: 'kX', url: '/settings' } });
+out.unnamed = [p.backLabel(), p.disabled()[0]];
+p.clickToggle(); p.click(p.buttons.back);
+out.unnamedBack = p.calls.slice();
+p = page({ path: '/downloads', prev: { key: 'kL', url: '/library', title: '资源库', y: 5 } });
 const fresh = p.backLabel();
 p.advance(12 * HOUR);
 p.clickToggle();
 out.expired = [fresh, p.backLabel(), p.disabled()[0]];
+
+// leaving records this page, so the next page's 返回 can name it and come back to this place
+p = page({ path: '/downloads', title: '下载管理 - JMComic 下载控制台', scrollY: 640 });
+p.pagehide();
+const recorded = p.pages().kNow;
+out.recordedOnLeave = recorded && [recorded.url, recorded.title, recorded.y];
 
 console.log(JSON.stringify(out));
 """
@@ -440,7 +448,7 @@ def test_a_fresh_page_starts_closed_with_nothing_available(harness):
     shown, disabled, back = harness["initial"]
     assert shown == CLOSED
     assert disabled == ["true", "true", "true"]  # 返回 / 到顶 / 到底 on a page that cannot scroll
-    assert back == [False, NO_BACK_LABEL, NO_BACK_LABEL]
+    assert back == [NO_BACK_LABEL, NO_BACK_LABEL]
 
 
 def test_a_mouse_hover_opens_and_closes_after_a_short_delay(harness):
@@ -520,9 +528,9 @@ def test_top_and_bottom_jump_instantly_and_update_availability(harness):
 
 
 def test_unavailable_buttons_do_nothing(harness):
-    disabled, calls, stack = harness["disabledNoop"]
+    disabled, calls = harness["disabledNoop"]
     assert disabled == ["true", "false", "true"]
-    assert calls == [] and stack == []
+    assert calls == []
 
 
 def test_top_and_bottom_recheck_the_page_before_deciding(harness):
@@ -552,21 +560,14 @@ def test_a_resized_body_updates_an_open_panel_only(harness):
     assert harness["resizeObserver"] == [True, "true", "false", "true"]
 
 
-def test_a_plain_click_on_a_destination_records_one_step(harness):
-    assert harness["plainClick"] == [["/downloads", 640, "下载管理"]]
-    assert harness["searchToHome"] == [["/search?keyword=a&page=3", "搜索“a”"]]
+def test_destination_links_just_navigate(harness):
+    calls, pages = harness["destinationClicks"]
+    assert calls == [] and pages == {}  # no Back, no return target, nothing recorded before leaving
 
 
-def test_modified_clicks_and_the_current_page_record_nothing(harness):
-    assert harness["modifiedClicks"] == []  # Ctrl / Shift / Meta / Alt / middle button open elsewhere
-    assert harness["currentDest"] == []
-    assert harness["currentSearch"] == []
-
-
-def test_return_never_grows_the_stack_and_a_double_click_pops_once(harness):
-    calls, stack, back = harness["backOnce"]
-    assert calls == [["expect", "/settings", 50, None], ["assign", "/settings"]]
-    assert stack == ["/library?page=2"]
+def test_return_goes_back_to_the_previous_page_once_even_on_a_double_click(harness):
+    calls, back = harness["backOnce"]
+    assert calls == [["expect", "/library?page=2", 300, None], ["back"]]
     assert back == "true"
 
 
@@ -578,26 +579,27 @@ def test_return_stays_off_while_leaving_even_on_scroll_or_resize(harness):
 
 
 def test_return_recovers_after_the_reset_delay(harness):
-    assert harness["backAfterReset"] == ["false", [True, "返回：资源库", "返回：资源库"]]
-    calls, stack = harness["backLast"]
-    assert calls == [["expect", "/library?page=2", 300, None], ["assign", "/library?page=2"]]
-    assert stack == []
+    assert harness["backAfterReset"] == ["false", ["返回：资源库", "返回：资源库"]]
+    assert harness["backAgain"] == [["expect", "/library?page=2", 300, None], ["back"]]
 
 
 def test_return_recovers_on_pageshow(harness):
     assert harness["pageshow"] == ["true", CLOSED, "false", "返回：资源库"]
-    assert harness["pageshowThenBack"] == [["expect", "/settings"], ["assign", "/settings"],
-                                           ["expect", "/library"], ["assign", "/library"]]
+    assert harness["pageshowThenBack"] == [["expect", "/library"], ["back"], ["expect", "/library"], ["back"]]
 
 
 def test_pagehide_closes_the_panel(harness):
     assert harness["pagehideCloses"] == CLOSED
 
 
-def test_has_back_and_the_return_label_follow_the_stack(harness):
-    assert harness["backReady"] == [[True, "返回：设置", "返回：设置"], "false"]  # names the latest step
-    assert harness["backEmpty"] == ["true", [False, NO_BACK_LABEL, NO_BACK_LABEL]]
-    assert harness["selfOnly"] == [False, NO_BACK_LABEL, NO_BACK_LABEL]
+def test_the_return_label_names_the_previous_page(harness):
+    assert harness["backReady"] == [["返回：资源库", "返回：资源库"], "false"]
+    assert harness["unnamed"] == [["返回上一页", "返回上一页"], "false"]
+    assert harness["unnamedBack"] == [["back"]]  # no recorded place: plain Back
     fresh, expired, back = harness["expired"]
-    assert fresh == [True, "返回：资源库", "返回：资源库"]
-    assert expired == [False, NO_BACK_LABEL, NO_BACK_LABEL] and back == "true"
+    assert fresh == ["返回：资源库", "返回：资源库"]
+    assert expired == ["返回上一页", "返回上一页"] and back == "false"
+
+
+def test_leaving_records_this_page_for_the_next_return(harness):
+    assert harness["recordedOnLeave"] == ["/downloads", "下载管理", 640]
