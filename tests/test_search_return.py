@@ -52,6 +52,7 @@ function load(opts) {
   let startedAt = now;          // the 返回 was clicked right before this page opened
   let pending = opts.back || null;
   let takes = 0;
+  let moved = false;            // nav-memory's "the user already scrolled / pressed a key on this page"
   const fetches = [], scrolls = [], timers = [], frames = [];
   const els = {};
   IDS.forEach(id => { els[id] = element(); });
@@ -95,6 +96,7 @@ function load(opts) {
         return back;
       },
       hasReturn: () => !!pending && now - startedAt < RETURN_MS,
+      userMoved: () => moved,
     },
   };
   const doc = { visibilityState: 'visible', getElementById: id => els[id] || null, addEventListener() {} };
@@ -120,6 +122,7 @@ function load(opts) {
     sortBy(v) { els['sort-select'].value = v; els['sort-select'].fire('change'); },
     leave() { (winOn.pagehide || []).forEach(fn => fn({})); },
     expectReturn(back) { pending = back; startedAt = now; },
+    userScrolls(y) { win.scrollY = y; moved = true; },
     pageshow(persisted) { (winOn.pageshow || []).forEach(fn => fn({ persisted })); },
     runFrames() { while (frames.length) frames.shift()(); },   // held frames, including ones they request
   };
@@ -171,6 +174,12 @@ const snapStore = (search, extra) => new Map([[KEY, JSON.stringify(Object.assign
   now += 20000;
   await p.respond(0, OK);
   out.slowStaleSnapshot = { searches: staleSearches, scrolls: p.scrolls.slice(), takes: p.takes() };
+  // the user scrolls (or presses 到顶 / 到底) while the slow search runs: stays where they went
+  p = load({ search: HERE, store: snapStore(OTHER), back: RET });
+  p.userScrolls(1200);
+  now += 20000;
+  await p.respond(0, OK);
+  out.movedWhileSearching = { scrolls: p.scrolls.slice(), y: p.win.scrollY, drawn: p.drawn('Fresh result') };
   // leaving before the answer: the snapshot keeps the 返回 place instead of the page top
   p = load({ search: HERE, store: snapStore(OTHER), back: RET });
   p.leave();
@@ -288,6 +297,10 @@ def test_a_slow_search_still_lands_at_the_return_place(harness):
     assert stale["searches"] == 1                       # results older than 12 h are not reused
     assert stale["scrolls"] == [[2600, 300]]            # ...but the 返回 beats the old snapshot's 900 / 250
     assert stale["takes"] == 1
+
+
+def test_scrolling_while_the_search_runs_keeps_the_user_where_they_went(harness):
+    assert harness["movedWhileSearching"] == {"scrolls": [], "y": 1200, "drawn": True}
 
 
 def test_leaving_before_the_results_arrive_keeps_the_return_place(harness):

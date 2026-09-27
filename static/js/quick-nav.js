@@ -62,6 +62,27 @@
     } catch (_) { return null; }
   }
 
+  // 没有 Navigation API 的浏览器：给本标签页的每条浏览历史一个递增的序号，存在 history.state 里
+  // （后退/前进时浏览器连同 state 一起恢复），用来判断一步是在当前这条之前还是之后
+  var SEQ_KEY = 'jm-quick-nav-seq';
+
+  function entrySeq() {
+    try {
+      var state = window.history.state;
+      return state && typeof state.jmQuickNavSeq === 'number' ? state.jmQuickNavSeq : null;
+    } catch (_) { return null; }
+  }
+
+  function ensureSeq() {
+    if (entrySeq() !== null) return;
+    try {
+      var next = (Number(window.sessionStorage.getItem(SEQ_KEY)) || 0) + 1;
+      window.sessionStorage.setItem(SEQ_KEY, String(next));
+      window.history.replaceState(Object.assign({}, window.history.state, { jmQuickNavSeq: next }), '');
+    } catch (_) { /* 存不下 / 不允许：只靠地址判断 */ }
+  }
+  ensureSeq();
+
   /** “返回：…”里显示的页面名称：搜索带关键词，详情带漫画标题 */
   function pageTitle() {
     var title = String(document.title || '').replace(SITE_SUFFIX, '').replace(SITE_PREFIX, '').trim()
@@ -89,6 +110,7 @@
       listTop: memory ? memory.listTopNow() : null,
       title: pageTitle(),
       key: historyKey(),
+      seq: entrySeq(),
       savedAt: Date.now()
     });
     writeStack(stack);
@@ -115,13 +137,15 @@
     var stack = readStack();
     var before = stack.length;
     var history = historyMap();
-    if (history) {
-      for (var i = 0; i < stack.length; i++) {
-        var key = stack[i].key;
-        if (key && Object.prototype.hasOwnProperty.call(history.at, key) && history.at[key] >= history.current) {
-          stack = stack.slice(0, i);
-          break;
-        }
+    var seq = history ? null : entrySeq();
+    for (var i = 0; i < stack.length; i++) {
+      var step = stack[i];
+      var ahead = history
+        ? !!step.key && Object.prototype.hasOwnProperty.call(history.at, step.key) && history.at[step.key] >= history.current
+        : seq !== null && typeof step.seq === 'number' && step.seq >= seq;  // 没有 Navigation API：按序号比
+      if (ahead) {
+        stack = stack.slice(0, i);
+        break;
       }
     }
     var currentKey = historyKey();
@@ -181,7 +205,12 @@
 
   // ── 界面 ──
   var root = document.getElementById('quick-nav');
-  if (!root) return;
+  if (!root) {
+    // 阅读页 / 在线阅读 / 单页预览没有界面：经历史菜单一次跳过几页回到这里时，同样作废已经越过的步
+    prune();
+    window.addEventListener('pageshow', function (event) { if (event && event.persisted) prune(); });
+    return;
+  }
   var toggle = root.querySelector('.quick-nav-toggle');
   var panel = root.querySelector('.quick-nav-panel');
   var backBtn = root.querySelector('[data-quick-action="back"]');
@@ -197,6 +226,11 @@
   var pressing = false;        // 正在快捷导航上按着（按下到这次点击结束）：焦点暂时落到 body 不算离开
   var pressTimer = null;
   var PRESS_GRACE_MS = 1000;   // 抬起后没有等来点击（拖出去了等）最多再算这么久
+  // 面板展开时 Toast 让到它上方（style.css）：在 Toast 上按下、移上去、把焦点移过去都不算离开快捷导航，
+  // 否则面板一收起 Toast 就落回原处，正要点的 × 从指针下面跑掉
+  var toasts = document.getElementById('toast-container');
+
+  function inToasts(node) { return !!(toasts && node && toasts.contains(node)); }
 
   function maxScroll() {
     var doc = document.documentElement;
@@ -225,6 +259,8 @@
       backBtn.title = label;
       backBtn.setAttribute('aria-label', label);
     }
+    // Toast 在展开时让到面板上方：style.css 用面板的实际高度（短窗口里面板被限高；窗口大小变了跟着更新）
+    if (openedBy) document.documentElement.style.setProperty('--quick-nav-panel-h', panel.offsetHeight + 'px');
   }
 
   function setOpen(how) {
@@ -232,11 +268,7 @@
     openedBy = how || null;
     root.classList.toggle('is-open', !!openedBy);
     toggle.setAttribute('aria-expanded', openedBy ? 'true' : 'false');
-    if (openedBy) {
-      refresh();
-      // Toast 在展开时让到面板上方（style.css 用这个高度；面板在短窗口里会被限高）
-      document.documentElement.style.setProperty('--quick-nav-panel-h', panel.offsetHeight + 'px');
-    }
+    if (openedBy) refresh();
   }
 
   /** 焦点是不是用键盘停在快捷导航里（不支持 :focus-visible 的浏览器当作不是） */
@@ -255,13 +287,22 @@
     clearTimeout(closeTimer);
     if (!openedBy) setOpen('hover');
   });
-  root.addEventListener('pointerleave', function (event) {
+  function closeSoonAfterHover(event) {
     if (event.pointerType !== 'mouse' || openedBy !== 'hover') return;
+    if (root.contains(event.relatedTarget) || inToasts(event.relatedTarget)) return; // 移到面板或 Toast 上：还在用
+    clearTimeout(closeTimer);
     closeTimer = setTimeout(function () {
       // 正用键盘在面板里操作时不收起
       if (openedBy === 'hover' && !keyboardFocusInside()) setOpen(null);
     }, HOVER_CLOSE_MS);
-  });
+  }
+  root.addEventListener('pointerleave', closeSoonAfterHover);
+  if (toasts) {
+    toasts.addEventListener('pointerleave', closeSoonAfterHover);
+    toasts.addEventListener('pointerenter', function (event) {
+      if (event.pointerType === 'mouse' && openedBy === 'hover') clearTimeout(closeTimer);
+    });
+  }
 
   // Esc 收起；焦点在面板里时交还给按钮
   document.addEventListener('keydown', function (event) {
@@ -270,9 +311,9 @@
     setOpen(null);
     if (inside) toggle.focus();
   });
-  // 点别处收起
+  // 点别处收起（点 Toast 不算：让它留在原处，关闭按钮点得到）
   document.addEventListener('pointerdown', function (event) {
-    if (openedBy && !root.contains(event.target)) setOpen(null);
+    if (openedBy && !root.contains(event.target) && !inToasts(event.target)) setOpen(null);
   }, true);
   // 焦点离开快捷导航时收起：Tab 到页面别处（relatedTarget 在外面），或 Tab 出页面、切到别的窗口（relatedTarget 为空）。
   // 在面板空白处按下鼠标 / 手指时焦点也会落到 body（鼠标在按下时，触屏在抬起之后），这次按压到它的点击结束前不算离开
@@ -297,6 +338,7 @@
   root.addEventListener('focusout', function (event) {
     if (!openedBy) return;
     var next = event.relatedTarget;
+    if (inToasts(next)) return;  // Tab 到 Toast 的关闭按钮
     if (next ? !root.contains(next) : !pressing) setOpen(null);
   });
 

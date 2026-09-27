@@ -78,6 +78,11 @@ def test_quick_nav_styles_use_only_the_theme_tokens():
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(", rules)  # colours only through var(--…)
     assert "z-index: 1035" in rules  # above the page, below Bootstrap modals (1050+) and toasts (1080)
     assert re.search(r"body:has\(\.quick-nav\) #toast-container \{ bottom: calc\(16px \+ 44px\) !important; \}", rules)
+    # while open, toasts move above the panel but never off the screen (vh, then dvh where supported)
+    lifted = re.search(r"body:has\(\.quick-nav\.is-open\) #toast-container \{(.*?)\}", rules, re.S).group(1)
+    for unit in ("100vh", "100dvh"):
+        assert ("bottom: max(calc(16px + 44px), min(calc(16px + 44px + 8px + var(--quick-nav-panel-h, 195px)), "
+                "calc(%s - 96px))) !important;" % unit) in lifted
     assert re.search(r"@media print \{\s*\.quick-nav \{ display: none !important; \}", rules)
     durations = re.findall(r"(\d+)ms", rules)
     assert durations and all(150 <= int(ms) <= 200 for ms in durations if ms != "0")
@@ -104,7 +109,13 @@ function load(opts) {
       pathname: opts.path, search: opts.search || '', origin: ORIGIN,
       href: ORIGIN + opts.path + (opts.search || ''), assign: url => calls.push(['assign', url]),
     },
-    history: { back: () => calls.push(['back']) },
+    history: {
+      state: opts.state === undefined ? null : opts.state,
+      back: () => calls.push(['back']),
+      replaceState(state) { this.state = state; },
+    },
+    on: {},
+    addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); },
     scrollY: opts.scrollY || 0,
     navMemory: {
       MAX_AGE: 12 * HOUR,
@@ -187,6 +198,38 @@ const skipped = current => {
 out.jumpedBackPastSteps = skipped(0);
 out.jumpedBackOneStep = skipped(1);
 out.stepsStillBehind = skipped(2);
+// without the Navigation API: every history entry of the tab gets an increasing number in history.state
+out.seqAssigned = (() => {
+  const store = new Map();
+  const a = load({ path: '/library', store });
+  const b = load({ path: '/settings', store });
+  const again = load({ path: '/library', store, state: { jmQuickNavSeq: 1, jmSearch: 'kept' } });  // Back: state comes back
+  return [a.win.history.state, b.win.history.state, again.win.history.state, store.get('jm-quick-nav-seq')];
+})();
+out.seqRemembered = (() => {
+  const store = new Map();
+  const r = load({ path: '/library', store, state: { jmQuickNavSeq: 7 } }); r.qn.remember();
+  return JSON.parse(store.get('jm-quick-nav-back-v1'))[0].seq;
+})();
+const seqSkipped = currentSeq => {
+  const store = new Map();
+  store.set('jm-quick-nav-back-v1', JSON.stringify([
+    { url: '/library?page=3', y: 0, title: 'L', key: null, seq: 1, savedAt: now },
+    { url: '/settings', y: 0, title: 'S', key: null, seq: 2, savedAt: now }]));
+  const [path, search] = { 1: ['/library', '?page=3'], 2: ['/settings', ''], 3: ['/downloads', ''] }[currentSeq];
+  const r = load({ path, search, store, state: { jmQuickNavSeq: currentSeq } });
+  return [r.qn.prune().map(e => e.url), r.qn.goBack(), r.calls.map(c => c[0])];
+};
+out.seqJumpedBackPastSteps = seqSkipped(1);
+out.seqStepsStillBehind = seqSkipped(3);
+// pages without the quick-nav (reader, preview) still drop the steps a history-menu jump has passed
+out.readerPrunes = (() => {
+  const store = new Map();
+  store.set('jm-quick-nav-back-v1', JSON.stringify([{ url: '/downloads', y: 0, title: 'D', key: 'kD', savedAt: now }]));
+  const r = load({ path: '/read/5', store, nav: { key: 'kR', index: 1, entries: [['kL', '/library'], ['kR', '/read/5'], ['kD', '/downloads']] } });
+  const onLoad = JSON.parse(store.get('jm-quick-nav-back-v1'));
+  return [onLoad, (r.win.on.pageshow || []).length];
+})();
 out.noNavigationApi = (() => {
   const store = new Map();
   store.set('jm-quick-nav-back-v1', JSON.stringify([{ url: '/library', y: 1, listTop: null, title: 't', key: 'kA', savedAt: now }]));
@@ -275,6 +318,24 @@ def test_jumping_back_past_steps_never_makes_return_go_forward(harness):
     # Back once to 设置: only the 资源库 step is still behind, reached with the browser's Back
     assert harness["jumpedBackOneStep"] == [["/library?page=3"], True, ["expect", "back"]]
     assert harness["stepsStillBehind"] == [["/library?page=3", "/settings"], True, ["expect", "back"]]
+
+
+def test_without_the_navigation_api_history_entries_are_numbered(harness):
+    first, second, again, counter = harness["seqAssigned"]
+    assert first == {"jmQuickNavSeq": 1} and second == {"jmQuickNavSeq": 2}
+    assert again == {"jmQuickNavSeq": 1, "jmSearch": "kept"}  # an entry keeps its number and the rest of its state
+    assert counter == "2"
+    assert harness["seqRemembered"] == 7
+
+
+def test_without_the_navigation_api_jumping_back_past_steps_never_goes_forward(harness):
+    assert harness["seqJumpedBackPastSteps"] == [[], False, []]
+    assert harness["seqStepsStillBehind"] == [["/library?page=3", "/settings"], True, ["expect", "assign"]]
+
+
+def test_reader_pages_without_the_quick_nav_still_drop_passed_steps(harness):
+    stack, pageshow_listeners = harness["readerPrunes"]
+    assert stack == [] and pageshow_listeners == 1
 
 
 def test_steps_are_bounded_fresh_and_same_site(harness):

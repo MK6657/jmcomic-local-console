@@ -83,6 +83,10 @@ function page(opts) {
     linkLabels[d] = node('span', {}, links[d]);
   });
   const outside = node('button', {}, body);
+  // the page's #toast-container (base.html) with one toast's close button
+  const toastBox = node('div', { id: 'toast-container' }, body);
+  toastBox.contains = x => { for (let n = x; n; n = n.parent) if (n === toastBox) return true; return false; };
+  const toastClose = node('button', {}, node('div', {}, toastBox));
   const state = { focusVisible: null };  // the element matching :focus-visible inside #quick-nav, if any
   const found = new Map([
     ['.quick-nav-toggle', toggle], ['.quick-nav-panel', panel], ['[data-quick-action="back"]', buttons.back],
@@ -93,7 +97,7 @@ function page(opts) {
   const doc = {
     title: opts.title || '下载管理 - JMComic 下载控制台', body, activeElement: body, on: {},
     documentElement: { scrollHeight: opts.scrollHeight || 0, style: { setProperty: (k, v) => cssVars.push([k, v]) } },
-    getElementById: id => (id === 'quick-nav' ? root : null),
+    getElementById: id => (id === 'quick-nav' ? root : (id === 'toast-container' ? toastBox : null)),
     querySelector: () => null,
     addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); },
   };
@@ -147,6 +151,11 @@ function page(opts) {
     },
     enter: type => fire(root, 'pointerenter', { pointerType: type || 'mouse' }),
     leave: type => fire(root, 'pointerleave', { pointerType: type || 'mouse' }),
+    // the mouse leaves #quick-nav onto `to` (a toast, the page…)
+    leaveTo: to => fire(root, 'pointerleave', { pointerType: 'mouse', relatedTarget: to }),
+    toastEnter: () => fire(toastBox, 'pointerenter', { pointerType: 'mouse' }),
+    toastLeaveTo: to => fire(toastBox, 'pointerleave', { pointerType: 'mouse', relatedTarget: to }),
+    toastClose,
     // clicks bubble: the toggle / panel first, then #quick-nav itself
     clickToggle() { const e = { target: toggle, button: 0 }; fire(toggle, 'click', e); fire(root, 'click', e); },
     click(target, mods) {
@@ -257,6 +266,26 @@ p.clickToggle(); p.press(p.links['/']); p.press(p.links['/'], 'pointerup'); p.fo
 out.focusLostAfterRelease = p.shown();
 p.advance(1000); p.focusOut(null);   // lifted but no click came (dragged away): no longer a press after a second
 out.focusLostAfterReleaseGrace = p.shown();
+// while the panel is open its toasts sit above it: using a toast is not leaving the quick-nav
+// (closing would drop the toast back down from under the pointer, so its × could not be clicked)
+p = page();
+p.clickToggle(); p.press(p.toastClose);
+out.pressOnToast = p.shown();
+p.focusOut(p.toastClose);
+out.focusToToast = p.shown();
+p = page();
+p.enter(); p.leaveTo(p.toastClose); p.advance(1000);
+out.hoverOntoToast = p.shown();
+p.toastLeaveTo(p.outside); p.advance(299);
+out.hoverOffToastAlmost = p.shown();
+p.advance(1);
+out.hoverOffToast = p.shown();
+p = page();
+p.enter(); p.leaveTo(p.outside); p.advance(100); p.toastEnter(); p.advance(1000);
+out.hoverAcrossToToast = p.shown();
+p = page();
+p.enter(); p.leaveTo(p.toastClose); p.toastLeaveTo(p.root); p.advance(1000);
+out.hoverToastBackToPanel = p.shown();
 // Tab out right after clicking 到顶 in the panel (the case a real browser showed): closes
 p = page({ scrollHeight: 4000, innerHeight: 800, scrollY: 2000 });
 p.clickToggle();
@@ -467,6 +496,16 @@ def test_focus_lost_right_after_a_press_inside_is_forgiven_for_one_second(harnes
     assert harness["focusLostAfterRelease"] == OPEN  # touch: focus moves after the finger lifts
     assert harness["focusLostAfterReleaseGrace"] == CLOSED
     assert harness["tabOutAfterPanelClick"] == CLOSED
+
+
+def test_using_a_toast_above_the_open_panel_does_not_close_it(harness):
+    assert harness["pressOnToast"] == OPEN
+    assert harness["focusToToast"] == OPEN
+    assert harness["hoverOntoToast"] == OPEN
+    assert harness["hoverOffToastAlmost"] == OPEN
+    assert harness["hoverOffToast"] == CLOSED       # leaving the toast for the page closes it like leaving the panel
+    assert harness["hoverAcrossToToast"] == OPEN
+    assert harness["hoverToastBackToPanel"] == OPEN
 
 
 def test_opening_publishes_the_panel_height_for_toasts(harness):

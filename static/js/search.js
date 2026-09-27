@@ -63,7 +63,9 @@
     try {
       history.replaceState(Object.assign({}, history.state, { jmSearch: snapshot }), '', snapshot.url);
     } catch (_) {
-      try { history.replaceState(null, '', snapshot.url); } catch (ignored) {}
+      // 快照太大存不进历史记录：只同步地址栏，但保留快捷导航给这条历史记的序号（quick-nav.js）
+      var seq = history.state && typeof history.state.jmQuickNavSeq === 'number' ? history.state.jmQuickNavSeq : null;
+      try { history.replaceState(seq === null ? null : { jmQuickNavSeq: seq }, '', snapshot.url); } catch (ignored) {}
     }
     try { sessionStorage.setItem(snapshotKey, JSON.stringify(snapshot)); } catch (_) {}
   }
@@ -133,6 +135,8 @@
       requestAnimationFrame(function () {
         if (restoring !== saved) return; // 这期间已经开始了新的搜索/翻页
         restoring = null;
+        // 等重新搜索的这段时间里用户已经自己滚动、按键或点了“到顶 / 到底”：留在他去的地方（nav-memory.js）
+        if (window.navMemory && window.navMemory.userMoved && window.navMemory.userMoved()) return;
         if (window.navMemory) {
           window.navMemory.scrollBack(y, listTop);
         } else {

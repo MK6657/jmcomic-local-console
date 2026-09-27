@@ -267,6 +267,7 @@
 
   window.addEventListener('pageshow', function (event) {
     if (!event.persisted) return;
+    userMoved = false; // 从往返缓存回来算重新打开：之前在这页上的滚动、按键不算“这次已经自己动过”
     // 快捷导航“返回”经浏览器后退回到这里（往返缓存）：内容都还在，直接回到跳走前的位置。
     // 带关键词的搜索页由 search.js 取（它从快照重新画出结果后回去）
     if (!searchRestoresItself()) {
@@ -314,6 +315,8 @@
     takeReturn: takeReturn,
     /** 本页是否是“返回”的目标（不取走） */
     hasReturn: function () { return !!pendingReturn(); },
+    /** 页面打开（或从往返缓存回来）后用户是否已经自己滚动、按键或按下过：是就不再替他跳回原位置 */
+    userMoved: function () { return userMoved; },
     /**
      * 收藏 / 资源库第一次画出列表后调用（只生效一次）：经快捷导航“返回”到这里 → 回到跳走前的位置；
      * 经记忆链接到达、后退/前进或刷新，且地址与离开时相同 → 回到离开时的位置（刷新回到刷新前所在的位置）。

@@ -291,6 +291,16 @@ out.quickJumpCancelsRestore = (() => {
   const s = returning(new Map(), '/library?q=1', 400);
   const r = page({ path: '/library', search: '?q=1', store: s }); r.press('quick-jump'); r.nm.restoreScroll(); return r.win.scrollY;
 })();
+// search.js asks whether the user already moved; coming back from the back/forward cache starts afresh
+out.userMovedFlag = (() => {
+  const r = page({ path: '/search', search: '?keyword=a' });
+  const fresh = r.nm.userMoved();
+  r.press('quick'); const afterLauncher = r.nm.userMoved();
+  r.wheel(); const afterWheel = r.nm.userMoved();
+  r.pageshow(false); const afterNormalShow = r.nm.userMoved();
+  r.pageshow(true); const afterCache = r.nm.userMoved();
+  return [fresh, afterLauncher, afterWheel, afterNormalShow, afterCache];
+})();
 out.pagePressCancelsRestore = (() => {
   const s = arrivedAt(memory({ url: '/library?q=1', scrollY: 900 }), '/library');
   const r = page({ path: '/library', search: '?q=1', store: s }); r.press(false); r.nm.restoreScroll(); return r.win.scrollY;
@@ -449,6 +459,10 @@ def test_opening_the_quick_nav_does_not_cancel_going_back_to_the_place(harness):
     assert harness["launcherTapKeepsRestore"] == 400
     assert harness["quickJumpCancelsRestore"] == 0   # 到顶 / 到底 really move the page
     assert harness["pagePressCancelsRestore"] == 0
+
+
+def test_whether_the_user_moved_is_shared_and_restarts_after_the_page_cache(harness):
+    assert harness["userMovedFlag"] == [False, False, True, True, False]
 
 
 def test_quick_nav_return_through_the_back_forward_cache(harness):
