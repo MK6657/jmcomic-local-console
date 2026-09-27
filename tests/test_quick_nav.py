@@ -119,6 +119,7 @@ function load(opts) {
       MAX_AGE: 12 * HOUR,
       place: () => opts.place || { y: 0, listTop: null },
       expectReturn: (url, y, listTop) => calls.push(['expect', url, y, listTop]),
+      noteBackClick: () => calls.push(['note']),
     },
   };
   if (opts.nav) {
@@ -130,7 +131,9 @@ function load(opts) {
   const doc = {
     title: opts.title || '', referrer: opts.referrer || '',
     getElementById: () => null,  // no #quick-nav: only the logic runs
-    querySelector: sel => (sel === '#album-content .card-title' && opts.heading ? { textContent: opts.heading } : null),
+    // the page heading with the album title: detail, reader (#reader-title) and preview (#album-title)
+    querySelector: sel => (['#album-content .card-title', '#reader-title', '#album-title'].includes(sel) && opts.heading
+      ? { textContent: opts.heading } : null),
   };
   new Function('window', 'document', 'Date', src)(win, doc, FakeDate);
   return {
@@ -154,7 +157,11 @@ out.pagehideListeners = (p.win.on.pagehide || []).length;
 out.titles = [
   ['/settings', '', 'JMComic 下载控制台 - 设置'], ['/search', '?keyword=abc&page=2', 'JMComic 下载控制台 - 搜索'],
   ['/album/123', '', '123 - JMComic 下载控制台', '一部很长的漫画标题'], ['/album/7', '', '7 - JMComic 下载控制台'],
-  ['/wishlist', '', 'x'.repeat(60) + ' - JMComic 下载控制台'], ['/read/5', '', 'JMComic 下载控制台 - 连续阅读'],
+  ['/wishlist', '', 'x'.repeat(60) + ' - JMComic 下载控制台'], ['/read/5', '', 'JMComic 下载控制台 - 连续阅读', '连续阅读'],
+  // reader.js / preview.js retitle the page "<album> - JMComic" / "<album> - JMComic 图片预览"
+  ['/read/5', '', 'Sample - JMComic', 'Sample'], ['/online/5', '', 'Sample - JMComic', 'Sample'],
+  ['/preview/5', '', 'Sample - JMComic 图片预览', 'Sample'], ['/preview/5', '', 'JMComic 下载控制台 - 图片预览', '加载中...'],
+  ['/downloads', '', 'Sample - JMComic'],
 ].map(([path, search, title, heading]) => {
   const store = new Map(); load({ path, search, title, heading, store, nav: { key: 'k', index: 0 } }).leave();
   return pagesOf(store).k.title;
@@ -182,7 +189,24 @@ out.unrecorded = [p.qn.previousEntry(), p.qn.goBack(), p.calls];
 p = load({ path: '/downloads', store: withPages({ kA: saved('/library', '资源库', 5) }),
            nav: { key: 'kNow', index: 0, entries: [['kNow', '/downloads']] } });
 out.first = [p.qn.previousEntry(), p.qn.goBack(), p.calls];
-// no Navigation API: the tab has earlier history and this page was opened from a page of this app
+// a later entry exists (went back once already): 返回 names and targets the entry BEFORE this one, never a later one
+const forward = current => {
+  const store = withPages({ kA: saved('/library?q=1', '资源库', 700, 200, 3000), kB: saved('/downloads', '下载管理', 40, null, 2000),
+                            kC: saved('/settings', '设置', 90, null, 1000) });
+  const entries = [['kA', '/library?q=1'], ['kB', '/downloads'], ['kC', '/settings']];
+  const [path, search] = [['/library', '?q=1'], ['/downloads', ''], ['/settings', '']][current];
+  const r = load({ path, search, store, nav: { key: entries[current][0], index: current, entries } });
+  return [r.qn.previousEntry(), r.qn.goBack(), r.calls];
+};
+out.forwardMiddle = forward(1);
+out.forwardFirst = forward(0);
+// a same-origin address that is not a page of this app (typed /api/… JSON, a /static file): not a page to return to
+out.notAppPages = ['/api/jobs', '/static/js/app.js', '/favicon.ico', '/apiary'].map(prevUrl => {
+  const r = load({ path: '/settings', nav: { key: 'kNow', index: 1, entries: [['kP', prevUrl], ['kNow', '/settings']] } });
+  const previous = r.qn.previousEntry();
+  return previous && previous.url;
+});
+// no Navigation API: nothing to go by (history.length counts later entries too, the referrer survives Back)
 const noApi = (referrer, historyLength) => {
   const r = load({ path: '/downloads', referrer, historyLength });
   return [r.qn.previousEntry(), r.qn.goBack(), r.calls];
@@ -234,41 +258,51 @@ def test_leaving_a_page_records_its_name_and_place(harness):
 
 def test_return_names_the_previous_page(harness):
     long_title = "x" * 39 + "…"
-    assert harness["titles"] == ["设置", "搜索“abc”", "详情“一部很长的漫画标题”", "详情 7", long_title, "连续阅读"]
+    assert harness["titles"] == ["设置", "搜索“abc”", "详情“一部很长的漫画标题”", "详情 7", long_title, "连续阅读",
+                                 "阅读“Sample”", "在线阅读“Sample”", "预览“Sample”", "图片预览", "Sample"]
 
 
 def test_return_goes_to_the_previous_page_where_it_was_left(harness):
     assert harness["previous"] == {"url": "/library?q=1", "title": "资源库", "y": 900, "listTop": 250}
-    assert harness["back"] == [True, [["expect", "/library?q=1", 900, 250], ["back"]]]
+    assert harness["back"] == [True, [["expect", "/library?q=1", 900, 250], ["note"], ["back"]]]
 
 
 def test_return_after_an_ordinary_link_goes_to_that_page_not_an_older_one(harness):
     # 下载管理 → (quick) 搜索 → a result's link → detail: 返回 goes to the search results, not 下载管理
     title, ok, calls = harness["mixed"]
     assert title == "搜索“sample”"
-    assert ok is True and calls == [["expect", "/search?keyword=sample", 1800, 226], ["back"]]
+    assert ok is True and calls == [["expect", "/search?keyword=sample", 1800, 226], ["note"], ["back"]]
 
 
 def test_the_previous_entry_address_wins_over_the_recorded_one(harness):
-    assert harness["addressChanged"] == [True, [["expect", "/library?q=2", 900, None], ["back"]]]
+    assert harness["addressChanged"] == [True, [["expect", "/library?q=2", 900, None], ["note"], ["back"]]]
 
 
 def test_an_unrecorded_previous_page_is_still_reachable(harness):
     previous, ok, calls = harness["unrecorded"]
     assert previous == {"url": "/settings", "title": None, "y": None, "listTop": None}
-    assert ok is True and calls == [["back"]]
+    assert ok is True and calls == [["note"], ["back"]]
 
 
 def test_nothing_to_return_to_on_the_first_page_of_the_tab(harness):
     assert harness["first"] == [None, False, []]
 
 
-def test_without_the_navigation_api_the_referrer_decides(harness):
-    previous, ok, calls = harness["noApiSameSite"]
-    assert previous == {"url": "/library?q=1", "title": None, "y": None, "listTop": None}
-    assert ok is True and calls == [["back"]]
-    for case in ("noApiOtherSite", "noApiNoReferrer", "noApiFirstEntry"):
-        assert harness[case] == [None, False, []], case  # never back to another site or out of the tab
+def test_without_the_navigation_api_return_is_unavailable(harness):
+    # a same-site referrer and history.length > 1 do not prove an earlier page of this app is right behind
+    for case in ("noApiSameSite", "noApiOtherSite", "noApiNoReferrer", "noApiFirstEntry"):
+        assert harness[case] == [None, False, []], case
+
+
+def test_return_never_names_or_targets_a_later_entry(harness):
+    previous, ok, calls = harness["forwardMiddle"]
+    assert previous == {"url": "/library?q=1", "title": "资源库", "y": 700, "listTop": 200}
+    assert ok is True and calls == [["expect", "/library?q=1", 700, 200], ["note"], ["back"]]
+    assert harness["forwardFirst"] == [None, False, []]  # the first entry, with later ones: nothing behind
+
+
+def test_addresses_that_are_not_app_pages_are_not_returned_to(harness):
+    assert harness["notAppPages"] == [None, None, None, "/apiary"]
 
 
 def test_recorded_pages_are_bounded_fresh_and_same_site(harness):

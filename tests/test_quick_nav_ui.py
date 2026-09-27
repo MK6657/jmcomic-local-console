@@ -122,8 +122,8 @@ function page(opts) {
       assign: url => calls.push(['assign', url]),
     },
     history: { length: prev ? 2 : 1, back: () => calls.push(['back']) },
-    // Navigation API: this app's entries of the tab, the current one last
-    navigation: {
+    // Navigation API (left out with opts.noNavigationApi): this app's entries of the tab, the current one last
+    navigation: opts.noNavigationApi ? undefined : {
       currentEntry: { key: 'kNow', index: prev ? 1 : 0 },
       entries: () => (prev ? [{ key: prev.key, url: ORIGIN + prev.url }] : [])
         .concat([{ key: 'kNow', url: ORIGIN + path + (opts.search || '') }]),
@@ -419,6 +419,11 @@ p.advance(12 * HOUR);
 p.clickToggle();
 out.expired = [fresh, p.backLabel(), p.disabled()[0]];
 
+// a browser without the Navigation API: 返回 is unavailable and says to use the browser's Back
+p = page({ path: '/downloads', noNavigationApi: true });
+p.clickToggle(); p.click(p.buttons.back);
+out.noNavigationApi = [p.disabled()[0], p.backLabel(), p.calls];
+
 // leaving records this page, so the next page's 返回 can name it and come back to this place
 p = page({ path: '/downloads', title: '下载管理 - JMComic 下载控制台', scrollY: 640 });
 p.pagehide();
@@ -599,6 +604,11 @@ def test_the_return_label_names_the_previous_page(harness):
     fresh, expired, back = harness["expired"]
     assert fresh == ["返回：资源库", "返回：资源库"]
     assert expired == ["返回上一页", "返回上一页"] and back == "false"
+
+
+def test_without_the_navigation_api_return_is_unavailable_and_says_why(harness):
+    label = "返回（这个浏览器用不了，请用浏览器的后退）"
+    assert harness["noNavigationApi"] == ["true", [label, label], []]
 
 
 def test_leaving_records_this_page_for_the_next_return(harness):

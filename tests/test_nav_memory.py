@@ -74,6 +74,13 @@ function page(opts) {
     click(nav) { fire('window', 'click', { target: target(nav) }); },
     clickQuick() { fire('window', 'click', { target: target('quick') }); },
     press(where) { fire('window', 'pointerdown', { target: target(where) }); },
+    // a mouse event of a click sequence (detail = click count); reports whether the page let it through
+    mouse(type, detail) {
+      const e = { detail, prevented: false, stopped: false, target: target(false),
+                  preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
+      fire('window', type, e);
+      return !(e.prevented || e.stopped);
+    },
     type() { fire('window', 'input', { target: target(false) }); },
     key() { fire('window', 'keydown', { target: target(false) }); },
     hoverLink(i) { fire('document', 'pointerover', { target: { closest: () => links[i] } }); return links[i].attrs.href; },
@@ -291,6 +298,43 @@ out.quickJumpCancelsRestore = (() => {
   const s = returning(new Map(), '/library?q=1', 400);
   const r = page({ path: '/library', search: '?q=1', store: s }); r.press('quick-jump'); r.nm.restoreScroll(); return r.win.scrollY;
 })();
+// double-clicking quick-nav 返回: the second click lands on the page just returned to, within a moment
+const backClicked = (store, age) => { store.set('jm-nav-back-click-v1', JSON.stringify({ at: now - (age || 0) })); return store; };
+out.doubleClickGuard = (() => {
+  const s = backClicked(new Map(), 150);
+  const r = page({ path: '/search', search: '?keyword=a', store: s });
+  const markUsed = !s.has('jm-nav-back-click-v1');
+  r.press(false);                                       // the second press: no "user moved" yet
+  const afterPress = r.nm.userMoved();
+  const passed = ['mousedown', 'mouseup', 'click', 'dblclick'].map(t => r.mouse(t, 2));
+  const movedAfterSecond = r.nm.userMoved();
+  const single = r.mouse('mousedown', 1);               // a separate single click in that moment is a real click
+  const movedAfterSingle = r.nm.userMoved();
+  now += 600;
+  const afterGuard = r.mouse('click', 2);               // past the moment: double clicks are normal again
+  now -= 600;
+  return { markUsed, afterPress, passed, movedAfterSecond, single, movedAfterSingle, afterGuard };
+})();
+out.doubleClickGuardLate = (() => {
+  const r = page({ path: '/search', search: '?keyword=a', store: backClicked(new Map(), 800) });  // page came too late
+  return r.mouse('click', 2);
+})();
+out.doubleClickGuardFromCache = (() => {
+  const s = new Map();
+  const r = page({ path: '/library', search: '?q=1', store: s });
+  backClicked(s, 100); r.pageshow(true);
+  return [r.mouse('click', 2), s.has('jm-nav-back-click-v1')];
+})();
+out.noteBackClickWrites = (() => {
+  const s = new Map(); page({ store: s }).nm.noteBackClick();
+  return JSON.parse(s.get('jm-nav-back-click-v1')).at === now;
+})();
+// the reader and preview restore the page they were on by page number, not by pixel
+out.readerReturnNotByPixel = ['/read/5', '/online/5', '/preview/5'].map(path => {
+  const s = returning(new Map(), path, 2400);
+  const r = page({ path, store: s, docHeight: 9000 });
+  return [r.win.scrollY, s.has('jm-nav-return-v1')];
+});
 // search.js asks whether the user already moved; coming back from the back/forward cache starts afresh
 out.userMovedFlag = (() => {
   const r = page({ path: '/search', search: '?keyword=a' });
@@ -459,6 +503,23 @@ def test_opening_the_quick_nav_does_not_cancel_going_back_to_the_place(harness):
     assert harness["launcherTapKeepsRestore"] == 400
     assert harness["quickJumpCancelsRestore"] == 0   # 到顶 / 到底 really move the page
     assert harness["pagePressCancelsRestore"] == 0
+
+
+def test_the_second_click_of_a_double_clicked_return_is_swallowed(harness):
+    guard = harness["doubleClickGuard"]
+    assert guard["markUsed"] is True
+    assert guard["afterPress"] is False             # its pointerdown does not count as the user moving
+    assert guard["passed"] == [False, False, False, False]
+    assert guard["movedAfterSecond"] is False
+    assert guard["single"] is True and guard["movedAfterSingle"] is True
+    assert guard["afterGuard"] is True
+    assert harness["doubleClickGuardLate"] is True  # the page appeared after the double click was over
+    assert harness["doubleClickGuardFromCache"] == [False, False]
+    assert harness["noteBackClickWrites"] is True
+
+
+def test_reader_pages_are_not_returned_to_by_pixel(harness):
+    assert harness["readerReturnNotByPixel"] == [[0, False], [0, False], [0, False]]  # used up, not applied
 
 
 def test_whether_the_user_moved_is_shared_and_restarts_after_the_page_cache(harness):

@@ -6,8 +6,8 @@
  *     和顶部导航一样回到上次的搜索结果、筛选、页码和位置（nav-memory.js）。
  *   返回：回到本标签页里的上一页——和浏览器的后退一样，但只在本程序的页面之间——并回到离开那一页时所在的位置。
  *     经快捷导航、顶部导航还是页面里的链接去的都算；一直按就一页页往回走，不会在两页之间来回。
- *     本标签页里前面没有本程序的页面（直接打开、在新标签页打开）时不可用。提示和读屏名称带上一页的名字。
- *     连点只算一次。
+ *     本标签页里前面没有本程序的页面（直接打开、在新标签页打开），或浏览器太旧没有 Navigation API 时不可用。
+ *     提示和读屏名称带上一页的名字。连点只算一次（第二下也不会落到退回去的那一页上）。
  *   到顶 / 到底：直接跳到本页最上 / 最下（不做滚动动画），不改地址和筛选；已在最上 / 最下时不可用。
  *
  * 每个页面离开时记下自己的名字和“看到的位置”（按浏览历史记录的标识存在本标签页，12 小时、最近 MAX_PAGES 条），
@@ -22,7 +22,8 @@
   var PAGES_KEY = 'jm-quick-nav-pages-v1'; // { 浏览历史记录的标识: {url, title, y, listTop, savedAt} }
   var MAX_PAGES = 50;
   var HOVER_CLOSE_MS = 300;               // 鼠标移开后稍等再收起，斜着移到面板上不会闪
-  var SITE_SUFFIX = /\s*-\s*JMComic 下载控制台\s*$/;  // “资源库 - JMComic 下载控制台”
+  // “资源库 - JMComic 下载控制台”；阅读页、单页预览由脚本改成“标题 - JMComic”“标题 - JMComic 图片预览”
+  var SITE_SUFFIX = /\s*-\s*JMComic(?:\s*(?:下载控制台|图片预览))?\s*$/;
   var SITE_PREFIX = /^\s*JMComic 下载控制台\s*-\s*/;  // “JMComic 下载控制台 - 设置”
   var TITLE_MAX = 40;
 
@@ -48,7 +49,19 @@
     } catch (_) { return null; }
   }
 
-  /** “返回：…”里显示的页面名称：搜索带关键词，详情带漫画标题 */
+  // 阅读页、单页预览：页头里的漫画标题（还没加载出来时是这些占位字样）
+  var READER_PAGES = [
+    { prefix: '/read/', heading: '#reader-title', label: '阅读', blank: '连续阅读' },
+    { prefix: '/online/', heading: '#reader-title', label: '在线阅读', blank: '在线阅读' },
+    { prefix: '/preview/', heading: '#album-title', label: '预览', blank: '图片预览' }
+  ];
+
+  function headingText(selector) {
+    var heading = document.querySelector(selector);
+    return heading ? String(heading.textContent || '').trim() : '';
+  }
+
+  /** “返回：…”里显示的页面名称：搜索带关键词，详情、阅读、预览带漫画标题 */
   function pageTitle() {
     var title = String(document.title || '').replace(SITE_SUFFIX, '').replace(SITE_PREFIX, '').trim()
       || window.location.pathname;
@@ -58,11 +71,21 @@
       try { keyword = new URLSearchParams(window.location.search).get('keyword') || ''; } catch (_) { /* 忽略 */ }
       if (keyword) title = '搜索“' + keyword + '”';
     } else if (path.indexOf('/album/') === 0) {
-      var heading = document.querySelector('#album-content .card-title');
-      var name = heading ? heading.textContent.trim() : '';
+      var name = headingText('#album-content .card-title');
       title = name ? '详情“' + name + '”' : '详情 ' + title;
+    } else {
+      READER_PAGES.forEach(function (reader) {
+        if (path.indexOf(reader.prefix) !== 0) return;
+        var album = headingText(reader.heading);
+        title = album && album !== reader.blank && album !== '加载中...' ? reader.label + '“' + album + '”' : reader.blank;
+      });
     }
     return title.length > TITLE_MAX ? title.slice(0, TITLE_MAX - 1) + '…' : title;
+  }
+
+  /** 本程序的页面（不是 /api/… 接口、/static/… 文件） */
+  function isAppPage(pathname) {
+    return !/^\/(api|static)(\/|$)/.test(pathname) && pathname !== '/favicon.ico';
   }
 
   /** 记下的各页（过期、格式不对的丢掉） */
@@ -109,35 +132,35 @@
     writePages(pages);
   }
 
+  /** 浏览器有没有 Navigation API（没有时“返回”不可用：无法可靠判断上一条历史是不是本程序的页面） */
+  function hasNavigationApi() {
+    var nav = window.navigation;
+    return !!(nav && nav.currentEntry && typeof nav.entries === 'function');
+  }
+
   /**
    * 本标签页里的上一页（本程序的页面）：{ url, title, y, listTop }（名字和位置不知道时为 null）；没有 → null。
-   * 有 Navigation API：它的历史记录只列出本程序（同源）连续的那一段，当前这条前面有就是上一页；
-   * 没有时照详情页 / 阅读页“返回”的办法：本标签页有更早的历史、而且是从本程序的页面来的。
+   * Navigation API 的历史记录只列出同源、连续的那一段：当前这条前面有、而且是本程序的页面（不是手动打开的
+   * /api/… 接口等），就是上一页。没有 Navigation API 的浏览器一律当作没有（history.length 也数后面的记录、
+   * referrer 在后退时不变，猜错了会点了没反应或退出本程序）。
    */
   function previousEntry() {
-    var nav = window.navigation;
+    if (!hasNavigationApi()) return null;
     try {
-      if (nav && nav.currentEntry && typeof nav.entries === 'function') {
-        var index = nav.currentEntry.index;
-        var entry = index > 0 ? nav.entries()[index - 1] : null;
-        if (!entry || !entry.url) return null;
-        var url = new URL(entry.url, window.location.href);
-        if (url.origin !== window.location.origin) return null;
-        var saved = entry.key ? readPages()[entry.key] : null;
-        return {
-          url: url.pathname + url.search,
-          title: saved ? saved.title : null,
-          y: saved ? saved.y : null,
-          listTop: saved ? saved.listTop : null
-        };
-      }
-      if (window.history.length > 1 && document.referrer) {
-        var from = new URL(document.referrer);
-        if (from.origin !== window.location.origin) return null;
-        return { url: from.pathname + from.search, title: null, y: null, listTop: null };
-      }
-    } catch (_) { /* 取不到：当作没有 */ }
-    return null;
+      var nav = window.navigation;
+      var index = nav.currentEntry.index;
+      var entry = index > 0 ? nav.entries()[index - 1] : null;
+      if (!entry || !entry.url) return null;
+      var url = new URL(entry.url, window.location.href);
+      if (url.origin !== window.location.origin || !isAppPage(url.pathname)) return null;
+      var saved = entry.key ? readPages()[entry.key] : null;
+      return {
+        url: url.pathname + url.search,
+        title: saved ? saved.title : null,
+        y: saved ? saved.y : null,
+        listTop: saved ? saved.listTop : null
+      };
+    } catch (_) { return null; /* 取不到：当作没有 */ }
   }
 
   /** 返回：退回上一页，回到离开它时的位置；没有上一页 → false */
@@ -148,6 +171,8 @@
     if (previous.y !== null && memory && memory.expectReturn) {
       memory.expectReturn(previous.url, previous.y, previous.listTop);
     }
+    // 双击“返回”时第二下会落在退回去的那一页上：让那一页在这一刻之后片刻内忽略双击的第二下（nav-memory.js）
+    if (memory && memory.noteBackClick) memory.noteBackClick();
     window.history.back();
     return true;
   }
@@ -205,8 +230,8 @@
     var previous = previousEntry();
     if (backBtn) {
       setDisabled(backBtn, leaving || !previous);
-      var label = !previous ? '返回（这个标签页里前面没有本程序的页面）'
-        : (previous.title ? '返回：' + previous.title : '返回上一页');
+      var label = previous ? (previous.title ? '返回：' + previous.title : '返回上一页')
+        : (hasNavigationApi() ? '返回（这个标签页里前面没有本程序的页面）' : '返回（这个浏览器用不了，请用浏览器的后退）');
       backBtn.title = label;
       backBtn.setAttribute('aria-label', label);
     }

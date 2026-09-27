@@ -188,10 +188,46 @@
   }
   ['wheel', 'touchmove', 'keydown', 'pointerdown'].forEach(function (type) {
     window.addEventListener(type, function (event) {
-      if (type === 'pointerdown' && pressOnQuickNav(event && event.target)) return;
+      if (type === 'pointerdown' && (pressOnQuickNav(event && event.target) || guardingBackClick())) return;
       userMoved = true;
     }, { capture: true, passive: true });
   });
+
+  // ── 双击快捷导航“返回”的第二下 ──
+  // 退回去的页面出现得很快，双击的第二下会落在它上面（例如搜索结果的卡片，打开另一部漫画）。
+  // quick-nav.js 点“返回”时记下时间；刚退回来的这一页在那之后 BACK_CLICK_GUARD_MS 内吞掉双击的第二下
+  // （detail ≥ 2 的 mousedown / mouseup / click / dblclick），它也不算“用户自己动过”。这期间单独的一次点击照常。
+  var BACK_CLICK_KEY = 'jm-nav-back-click-v1';
+  var BACK_CLICK_GUARD_MS = 700;
+  var backClickGuardUntil = 0;
+
+  function noteBackClick() {
+    writeJson(BACK_CLICK_KEY, { at: Date.now() });
+  }
+
+  function armBackClickGuard() {
+    var mark = readJson(BACK_CLICK_KEY);
+    if (!mark) return;
+    removeKey(BACK_CLICK_KEY);
+    if (ageOk(mark.at, BACK_CLICK_GUARD_MS)) backClickGuardUntil = mark.at + BACK_CLICK_GUARD_MS;
+  }
+
+  function guardingBackClick() {
+    return Date.now() < backClickGuardUntil;
+  }
+
+  ['mousedown', 'mouseup', 'click', 'dblclick', 'auxclick'].forEach(function (type) {
+    window.addEventListener(type, function (event) {
+      if (!guardingBackClick() || !event) return;
+      if (event.detail >= 2) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      } else if (type === 'mousedown') {
+        userMoved = true;  // 这期间的 pointerdown 没算：真正的一次新点击在这里算
+      }
+    }, true);
+  });
+  armBackClickGuard();
   var scrollRestored = false;
   var listDrawn = false; // 列表已经画出（restoreScroll 被调用过）
 
@@ -268,6 +304,7 @@
   window.addEventListener('pageshow', function (event) {
     if (!event.persisted) return;
     userMoved = false; // 从往返缓存回来算重新打开：之前在这页上的滚动、按键不算“这次已经自己动过”
+    armBackClickGuard();
     // 快捷导航“返回”经浏览器后退回到这里（往返缓存）：内容都还在，直接回到离开时的位置。
     // 带关键词的搜索页由 search.js 取（它从快照重新画出结果后回去）
     if (!searchRestoresItself()) {
@@ -317,6 +354,8 @@
     hasReturn: function () { return !!pendingReturn(); },
     /** 页面打开（或从往返缓存回来）后用户是否已经自己滚动、按键或按下过：是就不再替他跳回原位置 */
     userMoved: function () { return userMoved; },
+    /** 快捷导航点“返回”时调用：退回去的那一页片刻内吞掉双击的第二下 */
+    noteBackClick: noteBackClick,
     /**
      * 收藏 / 资源库第一次画出列表后调用（只生效一次）：经快捷导航“返回”到这里 → 回到离开时的位置；
      * 经记忆链接到达、后退/前进或刷新，且地址与离开时相同 → 回到离开时的位置（刷新回到刷新前所在的位置）。
@@ -348,8 +387,10 @@
 
   // 快捷导航“返回”到首页、下载管理、详情、设置、没有关键词的搜索页等：内容加载到够高后回到离开时的位置
   // （收藏、资源库、带关键词的搜索页自己取：restoreScroll / search.js）
+  // 阅读页、单页预览按页码回到读到的那一页（reader.js / preview.js），不按像素：图片陆续加载时像素位置对不上页
   if (LIST_PAGES.indexOf(window.location.pathname) < 0 && !searchRestoresItself()) {
     var backHere = takeReturn();
-    if (backHere && backHere.y > 0) returnWhenTall(backHere, Date.now());
+    var readerPage = /^\/(read|online|preview)\//.test(window.location.pathname);
+    if (backHere && backHere.y > 0 && !readerPage) returnWhenTall(backHere, Date.now());
   }
 })();
