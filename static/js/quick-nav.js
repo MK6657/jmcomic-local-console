@@ -163,16 +163,21 @@
     } catch (_) { return null; /* 取不到：当作没有 */ }
   }
 
-  /** 返回：退回上一页，回到离开它时的位置；没有上一页 → false */
-  function goBack() {
+  /**
+   * 返回：退回上一页，回到离开它时的位置；没有上一页 → false。
+   * event：点“返回”的那次点击（用鼠标点的，detail ≥ 1）——记下位置，退回去的那一页据此吞掉双击的第二下（nav-memory.js）。
+   */
+  function goBack(event) {
     var previous = previousEntry();
     if (!previous) return false;
     var memory = nm();
     if (previous.y !== null && memory && memory.expectReturn) {
       memory.expectReturn(previous.url, previous.y, previous.listTop);
     }
-    // 双击“返回”时第二下会落在退回去的那一页上：让那一页在这一刻之后片刻内忽略双击的第二下（nav-memory.js）
-    if (memory && memory.noteBackClick) memory.noteBackClick();
+    if (memory && memory.noteBackClick) {
+      var byMouse = !!event && event.detail >= 1;
+      memory.noteBackClick(byMouse ? event.clientX : null, byMouse ? event.clientY : null);
+    }
     window.history.back();
     return true;
   }
@@ -328,7 +333,7 @@
     if (action === 'top' || action === 'bottom') refresh();
     if (isDisabled(btn)) return;
     if (action === 'back') {
-      if (goBack()) {
+      if (goBack(event)) {
         leaving = true;
         setDisabled(backBtn, true);
         clearTimeout(leavingTimer);

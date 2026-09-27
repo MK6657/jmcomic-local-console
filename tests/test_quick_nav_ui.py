@@ -132,6 +132,7 @@ function page(opts) {
       MAX_AGE: 12 * HOUR,
       listTopNow: () => null,
       expectReturn: (url, y, listTop) => calls.push(['expect', url, y, listTop]),
+      noteBackClick: (x, y) => calls.push(['note', x, y]),
     },
   };
   let observer = null;
@@ -385,8 +386,8 @@ out.destinationClicks = [p.calls.slice(), p.pages()];
 p = page({ path: '/downloads', scrollHeight: 3000, prev: { key: 'kL', url: '/library?page=2', title: '资源库', y: 300 } });
 out.backReady = [p.backLabel(), p.disabled()[0]];
 p.clickToggle();
-p.click(p.buttons.back);
-p.click(p.buttons.back);
+p.click(p.buttons.back, { detail: 1, clientX: 1100.4, clientY: 649.6 });  // a mouse click: where it happened
+p.click(p.buttons.back, { detail: 2, clientX: 1100.4, clientY: 649.6 });
 out.backOnce = [p.calls.slice(), p.disabled()[0]];
 p.scroll(500); p.resize();
 out.backWhileLeaving = [p.disabled(), p.shown()];
@@ -395,7 +396,7 @@ out.backBeforeReset = p.disabled()[0];
 p.advance(1);
 out.backAfterReset = [p.disabled()[0], p.backLabel()];
 p.click(p.buttons.back);
-out.backAgain = p.calls.slice(2);
+out.backAgain = p.calls.slice(3);  // after the first expect / note / back
 p.pagehide();
 out.pagehideCloses = p.shown();
 
@@ -572,7 +573,7 @@ def test_destination_links_just_navigate(harness):
 
 def test_return_goes_back_to_the_previous_page_once_even_on_a_double_click(harness):
     calls, back = harness["backOnce"]
-    assert calls == [["expect", "/library?page=2", 300, None], ["back"]]
+    assert calls == [["expect", "/library?page=2", 300, None], ["note", 1100.4, 649.6], ["back"]]
     assert back == "true"
 
 
@@ -585,12 +586,14 @@ def test_return_stays_off_while_leaving_even_on_scroll_or_resize(harness):
 
 def test_return_recovers_after_the_reset_delay(harness):
     assert harness["backAfterReset"] == ["false", ["返回：资源库", "返回：资源库"]]
-    assert harness["backAgain"] == [["expect", "/library?page=2", 300, None], ["back"]]
+    # the click without a position (keyboard / detail 0) tells the next page nothing about where it was
+    assert harness["backAgain"] == [["expect", "/library?page=2", 300, None], ["note", None, None], ["back"]]
 
 
 def test_return_recovers_on_pageshow(harness):
     assert harness["pageshow"] == ["true", CLOSED, "false", "返回：资源库"]
-    assert harness["pageshowThenBack"] == [["expect", "/library"], ["back"], ["expect", "/library"], ["back"]]
+    assert harness["pageshowThenBack"] == [["expect", "/library"], ["note", None], ["back"],
+                                           ["expect", "/library"], ["note", None], ["back"]]
 
 
 def test_pagehide_closes_the_panel(harness):
@@ -600,7 +603,7 @@ def test_pagehide_closes_the_panel(harness):
 def test_the_return_label_names_the_previous_page(harness):
     assert harness["backReady"] == [["返回：资源库", "返回：资源库"], "false"]
     assert harness["unnamed"] == [["返回上一页", "返回上一页"], "false"]
-    assert harness["unnamedBack"] == [["back"]]  # no recorded place: plain Back
+    assert harness["unnamedBack"] == [["note", None, None], ["back"]]  # no recorded place: plain Back
     fresh, expired, back = harness["expired"]
     assert fresh == ["返回：资源库", "返回：资源库"]
     assert expired == ["返回上一页", "返回上一页"] and back == "false"

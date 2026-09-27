@@ -195,36 +195,66 @@
 
   // ── 双击快捷导航“返回”的第二下 ──
   // 退回去的页面出现得很快，双击的第二下会落在它上面（例如搜索结果的卡片，打开另一部漫画）。
-  // quick-nav.js 点“返回”时记下时间；刚退回来的这一页在那之后 BACK_CLICK_GUARD_MS 内吞掉双击的第二下
-  // （detail ≥ 2 的 mousedown / mouseup / click / dblclick），它也不算“用户自己动过”。这期间单独的一次点击照常。
+  // quick-nav.js 点“返回”时记下时间和点的位置；刚退回来的这一页在那之后 BACK_CLICK_GUARD_MS 内，
+  // 吞掉紧接着的一次鼠标按压（mousedown 连同它的 mouseup / click / dblclick）——只要它是双击的第二下（detail ≥ 2），
+  // 或者按在同一处（BACK_CLICK_NEAR_PX 以内：换了页面后点击次数可能从 1 重新数）。
+  // 系统的双击间隔最长可以调到 900ms，所以时限取 1.2 秒；只吞这一次，别处的单击、键盘操作（detail 0）照常。
+  // 被吞的这一下不算“用户自己动过”；这期间真正的一次新点击在它的 mousedown 上算（pointerdown 先不算）。
   var BACK_CLICK_KEY = 'jm-nav-back-click-v1';
-  var BACK_CLICK_GUARD_MS = 700;
-  var backClickGuardUntil = 0;
+  var BACK_CLICK_GUARD_MS = 1200;
+  var BACK_CLICK_NEAR_PX = 24;
+  var BACK_CLICK_SEQUENCE_MS = 1000; // 吞下的那次按压，它后续的 mouseup / click / dblclick 最晚在这之内到
+  var backClick = null;              // { until, x, y }：刚退回来，还在等双击的第二下
+  var swallowUntil = 0;              // 正在吞的那次按压：它后续的事件一并吞掉
 
-  function noteBackClick() {
-    writeJson(BACK_CLICK_KEY, { at: Date.now() });
+  /** x / y：点“返回”时指针在窗口里的位置（键盘操作时为 null） */
+  function noteBackClick(x, y) {
+    var point = typeof x === 'number' && typeof y === 'number' && isFinite(x) && isFinite(y);
+    writeJson(BACK_CLICK_KEY, { at: Date.now(), x: point ? Math.round(x) : null, y: point ? Math.round(y) : null });
   }
 
   function armBackClickGuard() {
     var mark = readJson(BACK_CLICK_KEY);
     if (!mark) return;
     removeKey(BACK_CLICK_KEY);
-    if (ageOk(mark.at, BACK_CLICK_GUARD_MS)) backClickGuardUntil = mark.at + BACK_CLICK_GUARD_MS;
+    if (!ageOk(mark.at, BACK_CLICK_GUARD_MS)) return;
+    var point = typeof mark.x === 'number' && typeof mark.y === 'number';
+    backClick = { until: mark.at + BACK_CLICK_GUARD_MS, x: point ? mark.x : null, y: point ? mark.y : null };
   }
 
   function guardingBackClick() {
-    return Date.now() < backClickGuardUntil;
+    return !!backClick && Date.now() < backClick.until;
   }
 
-  ['mousedown', 'mouseup', 'click', 'dblclick', 'auxclick'].forEach(function (type) {
+  /** 这是不是“返回”那次双击的第二下（detail 0 的是键盘、脚本触发的点击，从不算） */
+  function secondClickOfReturn(event) {
+    if (!guardingBackClick() || !(event.detail >= 1)) return false;
+    if (event.detail >= 2) return true;
+    return backClick.x !== null && Math.abs(event.clientX - backClick.x) <= BACK_CLICK_NEAR_PX
+      && Math.abs(event.clientY - backClick.y) <= BACK_CLICK_NEAR_PX;
+  }
+
+  function swallowSecondClick(event) {
+    backClick = null;  // 只吞这一次
+    swallowUntil = Date.now() + BACK_CLICK_SEQUENCE_MS;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
+  window.addEventListener('mousedown', function (event) {
+    if (!event) return;
+    if (secondClickOfReturn(event)) {
+      swallowSecondClick(event);
+      return;
+    }
+    swallowUntil = 0;                                 // 一次新的按压：之前吞的那次已经结束
+    if (guardingBackClick()) userMoved = true;        // 这期间的 pointerdown 没算：真正的一次新点击在这里算
+  }, true);
+  ['mouseup', 'click', 'dblclick', 'auxclick'].forEach(function (type) {
     window.addEventListener(type, function (event) {
-      if (!guardingBackClick() || !event) return;
-      if (event.detail >= 2) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      } else if (type === 'mousedown') {
-        userMoved = true;  // 这期间的 pointerdown 没算：真正的一次新点击在这里算
-      }
+      if (!event || !(event.detail >= 1)) return;
+      // 吞下的按压的后续；或者第二下按下时还在原页面、抬起才落到这一页
+      if (Date.now() < swallowUntil || secondClickOfReturn(event)) swallowSecondClick(event);
     }, true);
   });
   armBackClickGuard();

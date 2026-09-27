@@ -75,8 +75,8 @@ function page(opts) {
     clickQuick() { fire('window', 'click', { target: target('quick') }); },
     press(where) { fire('window', 'pointerdown', { target: target(where) }); },
     // a mouse event of a click sequence (detail = click count); reports whether the page let it through
-    mouse(type, detail) {
-      const e = { detail, prevented: false, stopped: false, target: target(false),
+    mouse(type, detail, x, y) {
+      const e = { detail, clientX: x || 0, clientY: y || 0, prevented: false, stopped: false, target: target(false),
                   preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
       fire('window', type, e);
       return !(e.prevented || e.stopped);
@@ -298,36 +298,53 @@ out.quickJumpCancelsRestore = (() => {
   const s = returning(new Map(), '/library?q=1', 400);
   const r = page({ path: '/library', search: '?q=1', store: s }); r.press('quick-jump'); r.nm.restoreScroll(); return r.win.scrollY;
 })();
-// double-clicking quick-nav 返回: the second click lands on the page just returned to, within a moment
-const backClicked = (store, age) => { store.set('jm-nav-back-click-v1', JSON.stringify({ at: now - (age || 0) })); return store; };
-out.doubleClickGuard = (() => {
-  const s = backClicked(new Map(), 150);
-  const r = page({ path: '/search', search: '?keyword=a', store: s });
-  const markUsed = !s.has('jm-nav-back-click-v1');
-  r.press(false);                                       // the second press: no "user moved" yet
-  const afterPress = r.nm.userMoved();
-  const passed = ['mousedown', 'mouseup', 'click', 'dblclick'].map(t => r.mouse(t, 2));
-  const movedAfterSecond = r.nm.userMoved();
-  const single = r.mouse('mousedown', 1);               // a separate single click in that moment is a real click
-  const movedAfterSingle = r.nm.userMoved();
-  now += 600;
-  const afterGuard = r.mouse('click', 2);               // past the moment: double clicks are normal again
-  now -= 600;
-  return { markUsed, afterPress, passed, movedAfterSecond, single, movedAfterSingle, afterGuard };
+// double-clicking quick-nav 返回: the second click lands on the page just returned to. That page swallows the one
+// press that follows within 1.2 s if it is a double click's second press (detail 2) or lands where 返回 was clicked
+// (x, y: the click count may start again at 1 on the new page); other clicks and the keyboard (detail 0) work
+const backClicked = (store, age, x, y) => {
+  store.set('jm-nav-back-click-v1', JSON.stringify({ at: now - (age || 0), x: x === undefined ? 1100 : x, y: y === undefined ? 650 : y }));
+  return store;
+};
+const HERE = [1100, 650], FAR = [300, 400];
+// one press: mousedown, mouseup, click (and dblclick for a second click); true = the page saw it
+const press = (r, detail, at, withDbl) => ['mousedown', 'mouseup', 'click'].concat(withDbl ? ['dblclick'] : [])
+  .map(t => r.mouse(t, detail, at[0], at[1]));
+const guarded = (age, x, y) => page({ path: '/search', search: '?keyword=a', store: backClicked(new Map(), age, x, y) });
+out.dblSecondPress = (() => {
+  const r = guarded(150);
+  const markUsed = !r.store.has('jm-nav-back-click-v1');
+  r.press(false);                                     // its pointerdown: not "the user moved"
+  const afterPointer = r.nm.userMoved();
+  const second = press(r, 2, FAR, true);              // detail 2, wherever it lands
+  return { markUsed, afterPointer, second, moved: r.nm.userMoved() };
 })();
-out.doubleClickGuardLate = (() => {
-  const r = page({ path: '/search', search: '?keyword=a', store: backClicked(new Map(), 800) });  // page came too late
-  return r.mouse('click', 2);
+out.dblRestartedCount = (() => { const r = guarded(150); return [press(r, 1, [1112, 640]), r.nm.userMoved()]; })();
+out.dblSlow = (() => { const r = guarded(150); now += 900; const seen = press(r, 2, FAR); now -= 900; return seen; })();
+out.dblOnce = (() => {                                // only the one press: the next double click is normal again
+  const r = guarded(150);
+  press(r, 2, FAR, true);
+  return [press(r, 2, FAR, true), press(r, 1, HERE)];
 })();
-out.doubleClickGuardFromCache = (() => {
+out.dblSingleElsewhere = (() => { const r = guarded(150); return [press(r, 1, FAR), r.nm.userMoved()]; })();
+out.dblKeyboard = (() => { const r = guarded(150); return [r.mouse('click', 0, 0, 0), r.mouse('click', 0, 1100, 650)]; })();
+out.dblAfterWindow = (() => { const r = guarded(150); now += 1100; const seen = [press(r, 2, FAR), press(r, 1, HERE)]; now -= 1100; return seen; })();
+out.dblKeyboardReturn = (() => { const r = guarded(150, null, null); return [press(r, 1, HERE), press(r, 2, FAR)]; })();
+out.dblOrphanRelease = (() => {                       // pressed on the old page, released on this one
+  const r = guarded(150);
+  return ['mouseup', 'click', 'dblclick'].map(t => r.mouse(t, 2, 900, 300));
+})();
+out.dblLate = guarded(1300) && (() => { const r = guarded(1300); return press(r, 2, HERE); })();
+out.dblFromCache = (() => {
   const s = new Map();
   const r = page({ path: '/library', search: '?q=1', store: s });
   backClicked(s, 100); r.pageshow(true);
-  return [r.mouse('click', 2), s.has('jm-nav-back-click-v1')];
+  return [press(r, 1, HERE), s.has('jm-nav-back-click-v1')];
 })();
 out.noteBackClickWrites = (() => {
-  const s = new Map(); page({ store: s }).nm.noteBackClick();
-  return JSON.parse(s.get('jm-nav-back-click-v1')).at === now;
+  const s = new Map(); const r = page({ store: s });
+  r.nm.noteBackClick(1100.4, 649.6); const mouse = JSON.parse(s.get('jm-nav-back-click-v1'));
+  r.nm.noteBackClick(null, null); const keys = JSON.parse(s.get('jm-nav-back-click-v1'));
+  return [mouse.at === now, mouse.x, mouse.y, keys.x, keys.y];
 })();
 // the reader and preview restore the page they were on by page number, not by pixel
 out.readerReturnNotByPixel = ['/read/5', '/online/5', '/preview/5'].map(path => {
@@ -505,17 +522,31 @@ def test_opening_the_quick_nav_does_not_cancel_going_back_to_the_place(harness):
     assert harness["pagePressCancelsRestore"] == 0
 
 
+SWALLOWED = [False, False, False]
+SEEN = [True, True, True]
+
+
 def test_the_second_click_of_a_double_clicked_return_is_swallowed(harness):
-    guard = harness["doubleClickGuard"]
-    assert guard["markUsed"] is True
-    assert guard["afterPress"] is False             # its pointerdown does not count as the user moving
-    assert guard["passed"] == [False, False, False, False]
-    assert guard["movedAfterSecond"] is False
-    assert guard["single"] is True and guard["movedAfterSingle"] is True
-    assert guard["afterGuard"] is True
-    assert harness["doubleClickGuardLate"] is True  # the page appeared after the double click was over
-    assert harness["doubleClickGuardFromCache"] == [False, False]
-    assert harness["noteBackClickWrites"] is True
+    second = harness["dblSecondPress"]
+    assert second["markUsed"] is True
+    assert second["afterPointer"] is False          # its pointerdown does not count as the user moving
+    assert second["second"] == [False, False, False, False]
+    assert second["moved"] is False
+    # the click count can start again at 1 on the new page: a press where 返回 was clicked is the second click too
+    assert harness["dblRestartedCount"] == [SWALLOWED, False]
+    assert harness["dblSlow"] == SWALLOWED          # a slow double-click setting (up to 900 ms)
+    assert harness["dblOrphanRelease"] == [False, False, False]  # pressed on the old page, released here
+    assert harness["dblFromCache"] == [SWALLOWED, False]
+
+
+def test_only_that_one_press_is_swallowed(harness):
+    assert harness["dblOnce"] == [[True, True, True, True], SEEN]
+    assert harness["dblSingleElsewhere"] == [SEEN, True]  # a real click elsewhere works and counts as moving
+    assert harness["dblKeyboard"] == [True, True]         # keyboard activation (detail 0) is never swallowed
+    assert harness["dblAfterWindow"] == [SEEN, SEEN]
+    assert harness["dblKeyboardReturn"] == [SEEN, SWALLOWED]  # 返回 by keyboard: no position, only detail 2 counts
+    assert harness["dblLate"] == SEEN                     # the page appeared after the double click was over
+    assert harness["noteBackClickWrites"] == [True, 1100, 650, None, None]
 
 
 def test_reader_pages_are_not_returned_to_by_pixel(harness):
