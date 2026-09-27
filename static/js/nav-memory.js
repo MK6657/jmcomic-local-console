@@ -15,6 +15,9 @@
  * 这个位置只属于当时的地址：换页、换筛选后作废。刷新（F5）不走这条规则，回到刷新前所在的位置。
  * 还原按列表（[data-nav-memory-list]：资源库卡片区、收藏表格、搜索结果区）的偏移计算：上方的内容后加载、
  * 高度变了也回到同一处。列表位置在记下“看到的位置”的那一刻量（手机上展开的导航菜单会把整页往下推）。
+ *
+ * 右下角快捷导航（quick-nav.js）里的 搜索 / 收藏 / 资源库 同样带 data-nav-memory；在它上面点击和点顶部导航一样
+ * 不算“在这里做事”。它的“返回”经 expectReturn / takeReturn 回到跳走前的地址和那一刻所在的位置。
  */
 (function () {
   'use strict';
@@ -126,15 +129,16 @@
     anchor = { y: Math.max(0, Math.round(Number(y) || 0)), url: currentUrl(), listTop: listTopNow() };
   }
 
+  /** 顶部导航和右下角快捷导航（quick-nav.js）：只是“去别处”的入口，在上面点击不算在这里做事 */
   function inNav(target) {
-    return !!(target && target.closest && target.closest('.navbar'));
+    return !!(target && target.closest && (target.closest('.navbar') || target.closest('.quick-nav')));
   }
 
   window.addEventListener('scroll', function () {
     clearTimeout(restTimer);
     restTimer = setTimeout(function () { setAnchor(window.scrollY); }, REST_MS);
   }, { passive: true });
-  // 点击、在输入框里输入/选择 = 就在这里做事。滚动按键（PageUp、方向键、Home…）、触屏滑动不算；点导航本身也不算
+  // 点击、在输入框里输入/选择 = 就在这里做事。滚动按键（PageUp、方向键、Home…）、触屏滑动不算；点导航（含快捷导航）本身也不算
   ['click', 'input', 'change'].forEach(function (type) {
     window.addEventListener(type, function (event) {
       if (!inNav(event.target)) setAnchor(window.scrollY);
@@ -182,9 +186,77 @@
   var scrollRestored = false;
   var listDrawn = false; // 列表已经画出（restoreScroll 被调用过）
 
-  // 从往返缓存（bfcache）回到收藏 / 资源库：页面停在离开时的位置——多半是为了点导航滚到的最上方，回到看到的位置
+  // ── 快捷导航“返回”（quick-nav.js）：回到跳走前所在的地址和位置 ──
+  // 点“返回”时记下目标 { url, y, listTop, at }，目标页画出内容后回到 y（只用一次，RETURN_MS 内有效）。
+  // 搜索、收藏、资源库在画出结果后取（search.js / restoreScroll），它优先于离开时记下的位置；
+  // 其他页面（首页、下载管理、详情、设置……）等内容长到够高再回去。
+  var RETURN_KEY = 'jm-nav-return-v1';
+  var RETURN_MS = 15000;       // 点“返回”到目标页打开之间最多这么久
+  var RETURN_WAIT_MS = 8000;   // 其他页面最多等内容加载这么久（详情等靠请求画出）
+
+  function expectReturn(url, y, listTop) {
+    if (typeof url !== 'string') return;
+    writeJson(RETURN_KEY, {
+      url: url, y: Math.max(0, Math.round(Number(y) || 0)),
+      listTop: typeof listTop === 'number' ? listTop : null, at: Date.now()
+    });
+  }
+
+  /** 本页是不是“返回”的目标（没取走、没过期、地址相同） */
+  function pendingReturn() {
+    var pending = readJson(RETURN_KEY);
+    if (!pending) return null;
+    if (!ageOk(pending.at, RETURN_MS)) { removeKey(RETURN_KEY); return null; }
+    return pending.url === currentUrl() ? pending : null;
+  }
+
+  /** 本页就是“返回”的目标：取出（只用一次）要回到的位置 { y, listTop }；不是或已过期 → null */
+  function takeReturn() {
+    var pending = pendingReturn();
+    if (!pending) return null;
+    removeKey(RETURN_KEY);
+    return { y: pending.y, listTop: typeof pending.listTop === 'number' ? pending.listTop : null };
+  }
+
+  /** 带关键词的搜索页由 search.js 画出结果（含从往返缓存恢复时）后自己取“返回”的位置 */
+  function searchRestoresItself() {
+    return window.location.pathname === '/search' && /(^|[?&])keyword=[^&]/.test(window.location.search);
+  }
+
+  /** 其他页面：页面能滚到 y 了（或等够了）再回去；用户自己先动了就不再跳 */
+  function returnWhenTall(back, startedAt) {
+    if (userMoved) return;
+    var doc = document.documentElement;
+    var room = doc && typeof window.innerHeight === 'number' ? doc.scrollHeight - window.innerHeight : 0;
+    if (room >= back.y || Date.now() - startedAt >= RETURN_WAIT_MS) {
+      scrollBack(back.y, back.listTop);
+      return;
+    }
+    setTimeout(function () { returnWhenTall(back, startedAt); }, 150);
+  }
+
+  /** 等列表画好（两帧）再回到 y，这期间用户自己动了就算了 */
+  function scrollBackSoon(y, listTop) {
+    window.requestAnimationFrame(function () {
+      window.requestAnimationFrame(function () {
+        if (!userMoved) scrollBack(y, listTop);
+      });
+    });
+  }
+
   window.addEventListener('pageshow', function (event) {
-    if (!event.persisted || LIST_PAGES.indexOf(window.location.pathname) < 0) return;
+    if (!event.persisted) return;
+    // 快捷导航“返回”经浏览器后退回到这里（往返缓存）：内容都还在，直接回到跳走前的位置。
+    // 带关键词的搜索页从快照重新画出结果后由 search.js 取
+    if (!searchRestoresItself()) {
+      var back = takeReturn();
+      if (back) {
+        window.requestAnimationFrame(function () { scrollBack(back.y, back.listTop); });
+        return;
+      }
+    }
+    // 从往返缓存回到收藏 / 资源库：页面停在离开时的位置——多半是为了点导航滚到的最上方，回到看到的位置
+    if (LIST_PAGES.indexOf(window.location.pathname) < 0) return;
     var entry = listEntry(window.location.pathname);
     if (!entry || entry.url !== currentUrl() || !(entry.scrollY > TOP_ZONE) || window.scrollY > TOP_ZONE) return;
     window.requestAnimationFrame(function () {
@@ -215,9 +287,15 @@
     /** 页面把用户送回某个位置后调用：这就是当前“看到的地方”，马上滚回顶部点导航也不会丢 */
     markPlace: setAnchor,
     scrollBack: scrollBack,
+    /** 快捷导航“返回”：记下目标地址和要回到的位置（quick-nav.js 在跳转前调用） */
+    expectReturn: expectReturn,
+    /** 本页是“返回”的目标时取出要回到的位置 { y, listTop }（只用一次），否则 null */
+    takeReturn: takeReturn,
+    /** 本页是否是“返回”的目标（不取走） */
+    hasReturn: function () { return !!pendingReturn(); },
     /**
-     * 收藏 / 资源库第一次画出列表后调用（只生效一次）：经记忆链接到达、后退/前进或刷新，
-     * 且地址与离开时相同，就回到离开时的位置（刷新回到刷新前所在的位置）。
+     * 收藏 / 资源库第一次画出列表后调用（只生效一次）：经快捷导航“返回”到这里 → 回到跳走前的位置；
+     * 经记忆链接到达、后退/前进或刷新，且地址与离开时相同 → 回到离开时的位置（刷新回到刷新前所在的位置）。
      */
     restoreScroll: function () {
       if (scrollRestored) return;
@@ -226,6 +304,11 @@
       var path = window.location.pathname;
       var arrival = readJson(ARRIVAL_KEY);
       if (arrival) removeKey(ARRIVAL_KEY);
+      var back = takeReturn();
+      if (back) {
+        if (!userMoved) scrollBackSoon(back.y, back.listTop);
+        return;
+      }
       var type = navigationType();
       var arrived = !!arrival && arrival.path === path && ageOk(arrival.at, ARRIVAL_MS);
       if (!arrived && type !== 'back_forward' && type !== 'reload') return; // 直接输入地址等：初始页面
@@ -235,11 +318,14 @@
       var y = reload ? entry.rawScrollY : entry.scrollY;
       var listTop = reload ? entry.rawListTop : entry.listTop;
       if (!(y > 0)) return;
-      window.requestAnimationFrame(function () {
-        window.requestAnimationFrame(function () {
-          if (!userMoved) scrollBack(y, listTop);
-        });
-      });
+      scrollBackSoon(y, listTop);
     }
   };
+
+  // 快捷导航“返回”到首页、下载管理、详情、设置、没有关键词的搜索页等：内容加载到够高后回到跳走前的位置
+  // （收藏、资源库、带关键词的搜索页画出结果后自己取：restoreScroll / search.js）
+  if (LIST_PAGES.indexOf(window.location.pathname) < 0 && !searchRestoresItself()) {
+    var backHere = takeReturn();
+    if (backHere && backHere.y > 0) returnWhenTall(backHere, Date.now());
+  }
 })();

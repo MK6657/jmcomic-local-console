@@ -40,6 +40,9 @@
     var statusSelect = document.getElementById('library-status');
     var sortSelect = document.getElementById('library-sort');
 
+    // 卡片正文空白处点一下是否打开详情：设置“点击资源库卡片空白处打开详情”（默认关），页面渲染时带在 data-card-click
+    var cardClickOpens = grid.dataset.cardClick === 'true';
+
     // ── 异常 → Toast 文案（服务端错误/超时显示具体消息，网络错误显示通用文案） ──
     function toastErr(err, fallback) {
         if (err && (err.status || err.isTimeout)) return err.message || fallback || '操作失败';
@@ -283,7 +286,7 @@
         }
         card.appendChild(coverLink);
 
-        // 正文：点空白处在新标签页打开详情（委托处理，链接/按钮不会重复打开）
+        // 正文：设置开启时点空白处在新标签页打开详情（委托处理，链接/按钮不会重复打开）
         var body = el('div', 'card-body');
 
         // 标题
@@ -809,6 +812,21 @@
         loadStats();
     }
 
+    // 设置页改了“点击卡片空白处打开详情”：切回本页或从往返缓存回来时重新读一次（失败则保持现状）
+    function setCardClick(on) {
+        cardClickOpens = on;
+        grid.dataset.cardClick = on ? 'true' : 'false';
+        grid.classList.toggle('library-grid--card-click', on);
+    }
+
+    function refreshCardClickSetting() {
+        window.apiFetch('/api/settings', { timeoutMs: 10000, abortKey: 'library-card-click' })
+            .then(function (data) {
+                if (data.status === 'ok' && data.settings) setCardClick(data.settings.library_card_click === 'true');
+            })
+            .catch(function () { /* 静默 */ });
+    }
+
     // ══════════════════════════════════════════════════════════════
     //  9. 事件委托（取代内联 onclick；参数只从 data-* 读取）
     // ══════════════════════════════════════════════════════════════
@@ -830,7 +848,8 @@
             }
             return;
         }
-        // 卡片正文空白处 → 新标签页打开详情；链接和按钮各自处理，不重复打开
+        // 卡片正文空白处 → 新标签页打开详情（设置里开启时）；链接和按钮各自处理，不重复打开
+        if (!cardClickOpens) return;
         if (e.target.closest('a, button, input, select, textarea')) return;
         var body = e.target.closest('.card-body');
         var cardEl = body ? body.closest('.library-card') : null;
@@ -912,11 +931,14 @@
         if (!event.persisted) return;
         loadLibrary(currentPage, { showSpinner: false });
         loadStats();
+        refreshCardClickSetting();
         startAutoRefresh();
     });
     // 切回本标签页时立即刷新（例如在别的标签页下载完成，或本地文件被移走）
     document.addEventListener('visibilitychange', function () {
-        if (document.visibilityState === 'visible' && _refreshTimer && canRefreshNow()) {
+        if (document.visibilityState !== 'visible') return;
+        refreshCardClickSetting();
+        if (_refreshTimer && canRefreshNow()) {
             loadLibrary(currentPage, { showSpinner: false });
         }
     });

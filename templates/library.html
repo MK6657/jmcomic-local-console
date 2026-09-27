@@ -74,7 +74,9 @@
 <div id="library-active-filters" class="library-active-filters" hidden></div>
 
 <!-- ===== 漫画网格列表 ===== -->
-<div id="library-grid" class="library-grid" data-nav-memory-list></div>
+<!-- data-card-click：卡片正文空白处点一下是否打开详情（设置“点击资源库卡片空白处打开详情”，library.js 读取） -->
+<div id="library-grid" class="library-grid{% if card_click %} library-grid--card-click{% endif %}" data-nav-memory-list
+     data-card-click="{{ 'true' if card_click else 'false' }}"></div>
 
 <!-- ===== 分页 ===== -->
 <div id="library-pagination" class="pagination-container"></div>

@@ -95,8 +95,11 @@
     searchInput.value = currentQuery;
     sortSelect.value = currentSort;
     pageSizeSelect.value = String(currentPageSize);
-    var reload = !fromCache && !!window.navMemory && window.navMemory.navigationType() === 'reload';
+    var nm = window.navMemory;
+    var reload = !fromCache && !!nm && nm.navigationType() === 'reload';
     var saved = snapshotForHere(reload);
+    // 没有这个地址的结果快照（之后又搜过别的），但这里是快捷导航“返回”的目标：重新搜索，画出后回到跳走前的位置
+    if (!saved && nm && nm.hasReturn && nm.hasReturn()) saved = { url: location.pathname + location.search };
     restoring = saved;
     var fetchedAt = saved ? (saved.fetchedAt || saved.savedAt) : 0;
     var age = Date.now() - fetchedAt;
@@ -112,11 +115,19 @@
     return true;
   }
 
-  /** 回到快照记下的位置：刷新回到刷新前所在处，其余回到“看到的位置”；在结果区内时按结果区现在的位置换算 */
+  /**
+   * 回到快照记下的位置：刷新回到刷新前所在处，其余回到“看到的位置”；在结果区内时按结果区现在的位置换算。
+   * 经快捷导航“返回”到这里时，回到跳走前那一刻所在的位置（nav-memory.js takeReturn）。
+   */
   function scrollToSaved(saved, reload) {
     var raw = reload && typeof saved.rawScrollY === 'number';
     var y = raw ? saved.rawScrollY : (saved.scrollY || 0);
     var listTop = raw ? saved.rawResultsTop : saved.resultsTop;
+    var back = window.navMemory && window.navMemory.takeReturn ? window.navMemory.takeReturn() : null;
+    if (back) {
+      y = back.y;
+      listTop = back.listTop;
+    }
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
         if (restoring !== saved) return; // 这期间已经开始了新的搜索/翻页
