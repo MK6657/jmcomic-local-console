@@ -131,7 +131,8 @@ def remove_wishlist(album_id: str):
 def list_wishlist():
     """获取收藏列表 GET /api/wishlist?page=&page_size=&q=&status=&sort=
 
-    status：readable 已下载（可阅读）/ active 排队中·下载中 / failed 失败 / none 未下载，其他值 = 全部；
+    status：readable 已下载（可阅读）/ active 排队中·下载中 / failed 失败 / missing 下载过·文件已删除 /
+    none 未下载（从未下载或已取消），其他值 = 全部；
     sort：added_at 最新添加 / added_asc 最早添加 / title / author / status（白名单外 = added_at）。
     筛选、排序、分页都在 SQL 里做，total 是筛选后的总数。
     """

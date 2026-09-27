@@ -71,11 +71,11 @@ def favourites(downloads):
     _job("j105", "105", "running")
     _fav("106", "Failed one", "Bob", "2026-01-01T00:00:06", status="failed")   # failed
     _job("j106", "106", "failed")
-    _fav("107", "Gone", "Bob", "2026-01-01T00:00:07", status="completed")      # none, files missing
+    _fav("107", "Gone", "Bob", "2026-01-01T00:00:07", status="completed")      # missing filter, files missing
     _job("j107", "107", "completed", downloads / "deleted")
     _fav("108", "Legacy dl", "Cat", "2026-01-01T00:00:08", status="downloading")  # active (no jobs)
     _fav("109", "Legacy fail", "Cat", "2026-01-01T00:00:09", status="failed")     # failed (no jobs)
-    _fav("110", "Legacy done", "Cat", "2026-01-01T00:00:10", status="completed")  # none, files missing
+    _fav("110", "Legacy done", "Cat", "2026-01-01T00:00:10", status="completed")  # missing filter, files missing
     _fav("111", "Read+queued", "Dan", "2026-01-01T00:00:11", status="queued")     # readable (+ queued)
     _job("j111a", "111", "completed", ok, created_at="2026-01-02T00:00:00")
     _job("j111b", "111", "queued", created_at="2026-01-03T00:00:00")
@@ -96,7 +96,8 @@ EXPECTED_GROUPS = {
     "readable": {"101", "111", "112"},
     "active": {"104", "105", "108", "114", "115"},
     "failed": {"106", "109"},
-    "none": {"102", "103", "107", "110", "113"},
+    "missing": {"107", "110"},
+    "none": {"102", "103", "113"},
 }
 
 
@@ -112,7 +113,11 @@ def test_wishlist_status_filter_partitions_every_favourite(client, favourites):
         assert set(_ids_of(data)) == expected, group
         assert data["total"] == len(expected)  # pagination total reflects the filter
         assert data["applied"]["status"] == group
-        assert all(item["status_group"] == group for item in data["items"])
+        assert all(item["status_group"] == ("none" if group == "missing" else group)
+                   and item["files_missing"] == (group == "missing")
+                   for item in data["items"] if group in ("missing", "none"))
+        if group not in ("missing", "none"):
+            assert all(item["status_group"] == group for item in data["items"])
 
 
 def _ids_of(data):
@@ -142,14 +147,14 @@ def test_wishlist_readable_uses_the_shared_rule(client, favourites, downloads):
     shutil.rmtree(downloads / "ok")  # folder deleted after download: nothing is readable any more
     data = client.get("/api/wishlist?status=readable").get_json()
     assert data["total"] == 0 and data["group_counts"]["readable"] == 0
-    assert {i["album_id"] for i in client.get("/api/wishlist?status=none&page_size=200").get_json()["items"]} >= {"101"}
+    assert {i["album_id"] for i in client.get("/api/wishlist?status=missing&page_size=200").get_json()["items"]} >= {"101"}
 
 
 def test_wishlist_keyword_combines_with_status_and_escapes_wildcards(client, favourites):
     data = client.get("/api/wishlist", query_string={"q": "legacy", "status": "failed"}).get_json()
     assert _ids_of(data) == ["109"] and data["total"] == 1
     # "Legacy dl" + "Odd legacy" / "Legacy fail" / "Legacy done": counts follow the keyword
-    assert data["group_counts"] == {"readable": 0, "active": 2, "failed": 1, "none": 1}
+    assert data["group_counts"] == {"readable": 0, "active": 2, "failed": 1, "missing": 1, "none": 0}
     assert _ids_of(client.get("/api/wishlist", query_string={"q": "meta author"}).get_json()) == ["102"]
     _fav("120", "100% pure", "x", "2026-01-01T00:00:20")
     assert _ids_of(client.get("/api/wishlist", query_string={"q": "%"}).get_json()) == ["120"]
@@ -177,8 +182,8 @@ def test_wishlist_sorts(client, favourites):
     assert non_empty == sorted(non_empty)
     assert by_author.index("104") < by_author.index("105")   # same author (Amy/amy): then by title
     by_status = order("status")
-    rank = {"readable": 0, "active": 1, "failed": 2, "none": 3}
-    groups = [items[a]["status_group"] for a in by_status]
+    rank = {"readable": 0, "active": 1, "failed": 2, "missing": 3, "none": 4}
+    groups = [("missing" if items[a]["files_missing"] else items[a]["status_group"]) for a in by_status]
     assert [rank[g] for g in groups] == sorted(rank[g] for g in groups)
     assert order("status", status="readable") == ["112", "111", "101"]  # newest first within a group
 
@@ -331,7 +336,7 @@ def test_library_labels_completed_jobs_as_downloaded_before(client):
 
 # ─── Library: download-status buckets ───
 
-# Library bucket → favourites group: the library splits favourites' 未下载 into 文件已删除 / 未下载
+# Library bucket → shared status_group and files_missing (the favourites filter splits them too)
 LIBRARY_BUCKETS = {
     "readable": ("readable", False), "active": ("active", False), "failed": ("failed", False),
     "missing": ("none", True), "undownloaded": ("none", False),
@@ -389,10 +394,11 @@ def test_library_buckets_match_the_favourites_groups(client, mixed_library):
     for bucket in EXPECTED_BUCKETS:
         for album_id in _ids_of(client.get(f"/api/library?status={bucket}&page_size=200").get_json()):
             library[album_id] = LIBRARY_BUCKETS[bucket][0]
-    for group in ("readable", "active", "failed", "none"):
+    for group in EXPECTED_GROUPS:
         favourites = set(_ids_of(client.get(f"/api/wishlist?status={group}&page_size=200").get_json()))
         assert favourites == EXPECTED_GROUPS[group]
-        assert {a for a in favourites if library[a] != group} == set(), group
+        shared_group = "none" if group == "missing" else group
+        assert {a for a in favourites if library[a] != shared_group} == set(), group
 
 
 def test_library_favourites_without_jobs_follow_the_status_column(client, mixed_library):

@@ -26,6 +26,7 @@
   var STATUS_LABELS = {
     '': '状态：全部',
     'none': '未下载',
+    'missing': '下载过 · 文件已删除',
     'active': '排队中 / 下载中',
     'readable': '已下载 · 可离线阅读',
     'failed': '失败'

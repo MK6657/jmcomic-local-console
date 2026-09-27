@@ -22,22 +22,24 @@
     </div>
 </div>
 
-<!-- 搜索 / 下载状态筛选 / 排序（条件与页码同步到地址栏，刷新或返回后保留） -->
+<!-- 搜索 / 下载状态筛选 / 排序（条件与页码同步到地址栏，刷新或返回后保留）
+     768–1199px 搜索框独占一行，状态与排序在第二行：带数量的“下载过 · 文件已删除（123）”才放得下；≥1200px 四个控件一行 -->
 <div class="row g-2 mb-3">
-    <div class="col-md-4">
+    <div class="col-12 col-xl-4">
         <input type="text" id="wishlist-search" class="form-control" placeholder="搜索标题/作者/车号..."
                aria-label="搜索收藏" autocomplete="off">
     </div>
-    <div class="col-md-3">
+    <div class="col-md-5 col-xl-3">
         <select id="wishlist-status" class="form-select" aria-label="按下载状态筛选" autocomplete="off">
             <option value="">状态：全部</option>
             <option value="none">未下载</option>
+            <option value="missing">下载过 · 文件已删除</option>
             <option value="active">排队中 / 下载中</option>
             <option value="readable">已下载 · 可离线阅读</option>
             <option value="failed">失败</option>
         </select>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-5 col-xl-3">
         <select id="wishlist-sort" class="form-select" aria-label="排序方式" autocomplete="off">
             <option value="added_at">排序：最新添加</option>
             <option value="added_asc">排序：最早添加</option>

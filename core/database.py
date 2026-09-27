@@ -455,15 +455,16 @@ def get_wishlist(album_id: str) -> dict | None:
 #   active   有排队 / 下载中 / 已暂停的任务
 #   failed   最近一次任务失败
 #   none     其余：从未下载、已取消，或下载过但本地文件已不在（files_missing）
+# 收藏筛选将 none 再拆成 missing / none；返回条目的 status_group 仍与资源库一致。
 # 任务表是事实来源；某部漫画一条任务都没有时（任务被清理 / 旧数据），才退回看 wishlist.download_status。
-WISHLIST_STATUS_GROUPS = ("readable", "active", "failed", "none")
+WISHLIST_STATUS_GROUPS = ("readable", "active", "failed", "missing", "none")
 WISHLIST_SORTS = {
     "added_at": "added_at IS NULL, added_at DESC, id DESC",  # 最新添加（默认）
     "added_asc": "added_at IS NULL, added_at ASC, id ASC",  # 最早添加
     "title": "title = '', LOWER(title), id DESC",  # 没有标题的排最后
     "author": "author = '', LOWER(author), title = '', LOWER(title), id DESC",  # 没有作者的排最后
-    "status": ("CASE status_group WHEN 'readable' THEN 0 WHEN 'active' THEN 1 WHEN 'failed' THEN 2 "
-               "ELSE 3 END, added_at IS NULL, added_at DESC, id DESC"),
+    "status": ("CASE filter_group WHEN 'readable' THEN 0 WHEN 'active' THEN 1 WHEN 'failed' THEN 2 "
+               "WHEN 'missing' THEN 3 ELSE 4 END, added_at IS NULL, added_at DESC, id DESC"),
 }
 _WISHLIST_ACTIVITY = {"running": "downloading", "paused": "paused", "queued": "queued"}
 _LEGACY_ACTIVE = ("queued", "downloading", "running", "paused")
@@ -546,9 +547,16 @@ _WISHLIST_ITEMS_CTE = f"""
         FROM wishlist w
         LEFT JOIN album_meta m ON m.album_id = w.album_id
     ),
-    items AS (
-        SELECT facts.*, {_status_group_sql('download_status')} AS status_group
+    classified AS (
+        SELECT facts.*, {_status_group_sql('download_status')} AS status_group,
+               {_files_missing_sql('download_status')} AS had_download
         FROM facts
+    ),
+    items AS (
+        SELECT classified.*,
+               CASE WHEN status_group = 'none' AND had_download THEN 'missing'
+                    ELSE status_group END AS filter_group
+        FROM classified
     )
 """
 
@@ -557,6 +565,8 @@ def _wishlist_item(row) -> dict:
     """SQL 行 → API 条目：readable 转 bool，附上 status_group / activity / files_missing（download_state）。"""
     item = dict(row)
     item["readable"] = bool(item["readable"])
+    item.pop("filter_group")
+    item.pop("had_download")
     item.update(download_state(
         item["readable"], item.pop("active_job"), item.pop("latest_job"),
         item.pop("has_completed"), item["download_status"],
@@ -571,7 +581,8 @@ def get_all_wishlist(
 ) -> dict:
     """获取收藏列表（分页）：关键词搜索 + 下载状态筛选 + 排序，全部在 SQL 里完成。
 
-    status 取 WISHLIST_STATUS_GROUPS 之一（其他值 = 不筛选）；sort 取 WISHLIST_SORTS 的键（其他值 = 最新添加）。
+    status 取 WISHLIST_STATUS_GROUPS 之一（其他值 = 不筛选）；missing 是 status_group=none 且 files_missing。
+    sort 取 WISHLIST_SORTS 的键（其他值 = 最新添加）。
     readable_ids 是本地可读的 album_id 集合（core.local_availability），决定 readable 分组。
     返回 {items, total, page, page_size, group_counts}；total 与 group_counts 都已按关键词过滤，
     total 另按 status 过滤。每项含 status_group / readable / activity / files_missing。
@@ -594,13 +605,13 @@ def get_all_wishlist(
     try:
         counts = {group: 0 for group in WISHLIST_STATUS_GROUPS}
         for row in conn.execute(
-            f"{_WISHLIST_ITEMS_CTE} SELECT status_group, COUNT(*) FROM items WHERE 1=1{where} "
-            "GROUP BY status_group", params,
+            f"{_WISHLIST_ITEMS_CTE} SELECT filter_group, COUNT(*) FROM items WHERE 1=1{where} "
+            "GROUP BY filter_group", params,
         ):
             counts[row[0]] = row[1]
         total = counts[status] if status else sum(counts.values())
         if status:
-            where += " AND status_group = ?"
+            where += " AND filter_group = ?"
             params.append(status)
         rows = conn.execute(
             f"{_WISHLIST_ITEMS_CTE} SELECT * FROM items WHERE 1=1{where} ORDER BY {order} LIMIT ? OFFSET ?",
