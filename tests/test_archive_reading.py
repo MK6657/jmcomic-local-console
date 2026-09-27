@@ -1576,7 +1576,8 @@ const flush = () => new Promise(r => setImmediate(r));
   for (let i = 0; i < 8; i++) await flush();
   out.replaced = replaced.slice();
   if (scenario.loadError) {
-    out.previewError = { message: ids['error-message'].textContent, retryHidden: ids['preview-retry'].classList.contains('d-none') };
+    out.previewError = { message: ids['error-message'].textContent, retryHidden: ids['preview-retry'].classList.contains('d-none'),
+                         heading: ids['album-title'].textContent, title: document.title };
     process.stdout.write(JSON.stringify(out)); return;
   }
   if (!scenario.failPage) { process.stdout.write(JSON.stringify(out)); return; }
@@ -1727,7 +1728,9 @@ def test_the_preview_error_offers_retry_only_when_the_archive_is_busy():
 @pytest.mark.parametrize("status, hidden", [(503, False), (422, True), (404, True)])
 def test_preview_load_error_retry(status, hidden):
     out = _reader("preview.js", "http://x/preview/101", load_error={"status": status, "message": "说明"})
-    assert out["previewError"] == {"message": "说明", "retryHidden": hidden}
+    # the heading no longer stays on “加载中...”; the reason is in the error panel
+    assert out["previewError"] == {"message": "说明", "retryHidden": hidden, "heading": "无法预览本地文件",
+                                   "title": "无法预览本地文件 - JMComic 图片预览"}
 
 
 @pytest.mark.parametrize("script", ["reader.js", "preview.js"])

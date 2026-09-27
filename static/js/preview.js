@@ -230,6 +230,9 @@
 
     // ── 错误 ──
     function showError(msg, canRetry) {
+        // 标题不再停在“加载中...”；具体原因在下面的错误提示里
+        $('album-title').textContent = '无法预览本地文件';
+        document.title = '无法预览本地文件 - JMComic 图片预览';
         $('preview-loading').classList.add('d-none');
         $('reader-content').classList.add('d-none');
         $('preview-error').classList.remove('d-none');
