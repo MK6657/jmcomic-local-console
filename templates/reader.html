@@ -38,6 +38,10 @@
             <div class="reader-state-actions">
                 <a class="btn btn-outline-primary btn-sm" href="/album/{{ album_id }}">查看详情</a>
                 <a class="btn btn-outline-secondary btn-sm" href="/downloads">下载管理</a>
+                {% if not online %}
+                {# 本地读不了（压缩包损坏 / 没有图片、文件不在）：可以改为在线阅读 #}
+                <a class="btn btn-outline-primary btn-sm" href="/online/{{ album_id }}" id="reader-go-online"><i class="bi bi-globe2" aria-hidden="true"></i> 在线阅读</a>
+                {% endif %}
                 <button class="btn btn-outline-primary btn-sm" type="button" id="reader-retry">重试</button>
             </div>
         </div>

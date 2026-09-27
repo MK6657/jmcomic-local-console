@@ -327,7 +327,7 @@ def test_library_status_for_downloads_that_are_not_favourites(client, library):
 def test_library_labels_completed_jobs_as_downloaded_before(client):
     # "已下载" for a comic whose files are gone contradicted favourites' "未下载" for the same comic
     html = client.get("/library").get_data(as_text=True)
-    assert '<option value="missing">下载过 · 文件已删除</option>' in html
+    assert '<option value="missing">下载过 · 本地文件不可用</option>' in html
     assert re.search(r"下载过 <strong id=\"stat-downloaded\">", html)
     assert "已下载" not in html.replace("已下载 · 可离线阅读", "")
     source = (STATIC_JS / "library.js").read_text(encoding="utf-8")
@@ -447,7 +447,7 @@ def test_library_status_select_offers_the_buckets(client):
     select = select[:select.index("</select>")]
     options = re.findall(r'<option value="([^"]*)">([^<]*)</option>', select)
     assert options == [("", "状态：全部"), ("readable", "可离线阅读"), ("active", "排队中 / 下载中"),
-                       ("failed", "失败"), ("missing", "下载过 · 文件已删除"), ("undownloaded", "未下载")]
+                       ("failed", "失败"), ("missing", "下载过 · 本地文件不可用"), ("undownloaded", "未下载")]
     wishlist = client.get("/wishlist").get_data(as_text=True)
     for value, label in (("active", "排队中 / 下载中"), ("failed", "失败"), ("none", "未下载")):
         assert f'<option value="{value}">{label}</option>' in wishlist  # same wording on both pages

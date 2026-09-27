@@ -25,9 +25,19 @@
     <div class="preview-error d-none" id="preview-error" role="alert">
         <i class="bi bi-emoji-frown" aria-hidden="true"></i>
         <h2 class="h5" id="error-message">无法加载预览</h2>
-        <a href="/downloads" class="btn btn-outline-primary mt-3">
-            <i class="bi bi-arrow-left" aria-hidden="true"></i> 返回下载管理
-        </a>
+        <div class="preview-error-actions">
+            <a href="/downloads" class="btn btn-outline-primary">
+                <i class="bi bi-arrow-left" aria-hidden="true"></i> 返回下载管理
+            </a>
+            {# 本地读不了（压缩包损坏 / 没有图片、文件不在）：可以改为在线阅读 #}
+            <a href="/online/{{ album_id }}" class="btn btn-outline-secondary" id="preview-go-online">
+                <i class="bi bi-globe2" aria-hidden="true"></i> 在线阅读
+            </a>
+            {# 压缩包暂时打不开（被别的程序占用）：稍后重试即可 #}
+            <button type="button" class="btn btn-outline-primary d-none" id="preview-retry">
+                <i class="bi bi-arrow-clockwise" aria-hidden="true"></i> 重试
+            </button>
+        </div>
     </div>
 
     <!-- 加载中 -->

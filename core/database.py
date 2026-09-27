@@ -514,6 +514,31 @@ def download_state(readable, active_job, latest_job, has_completed, legacy_statu
     return {"status_group": group, "activity": activity, "files_missing": files_missing}
 
 
+def album_job_facts(album_ids, conn=None) -> dict[str, dict]:
+    """各 album_id 的任务事实（进行中的任务、最近一次任务、是否完成过）+ 收藏里的旧状态列，即 download_state 的输入；
+    一次查询。conn 传入时复用它（不关闭）。"""
+    ids = list(dict.fromkeys(str(a) for a in album_ids))
+    if not ids:
+        return {}
+    own = conn is None
+    conn = conn or get_db()
+    try:
+        rows = conn.execute(
+            f"""SELECT p.value AS album_id,
+                       w.download_status AS legacy_status,{_job_facts_sql('p.value')}
+                FROM json_each(?) p
+                LEFT JOIN wishlist w ON w.album_id = p.value""",
+            (json.dumps(ids),),
+        ).fetchall()
+    finally:
+        if own:
+            conn.close()
+    return {row["album_id"]: {
+        "active_job": row["active_job"], "latest_job": row["latest_job"],
+        "has_completed": bool(row["has_completed"]), "legacy_status": row["legacy_status"],
+    } for row in rows}
+
+
 def _status_group_sql(legacy: str) -> str:
     """download_state 的 status_group 规则的 SQL 版（收藏与资源库的筛选/计数共用）。
     需要 readable / active_job / latest_job 三列（_job_facts_sql）；legacy 是已 LOWER(TRIM()) 的旧状态列名，
@@ -1234,14 +1259,7 @@ def get_library(
 
         # One query for the current page instead of one connection/SELECT per album:
         # 与收藏同一套任务事实（进行中 / 最近一次 / 是否完成过）+ 收藏里的旧状态列
-        fact_rows = conn.execute(
-            f"""SELECT p.value AS album_id,
-                       w.download_status AS legacy_status,{_job_facts_sql('p.value')}
-                FROM json_each(?) p
-                LEFT JOIN wishlist w ON w.album_id = p.value""",
-            (json.dumps(album_ids),),
-        ).fetchall()
-        facts = {row["album_id"]: dict(row) for row in fact_rows}
+        facts = album_job_facts(album_ids, conn)
         result_items = []
         for it in items_list:
             aid = it["album_id"]

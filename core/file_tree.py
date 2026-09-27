@@ -28,11 +28,12 @@ def _entry_is_link(entry):
     return bool(entry.stat(follow_symlinks=False).st_file_attributes & _REPARSE_POINT)
 
 
-def iter_safe_files(root, accept=None):
+def iter_safe_files(root, accept=None, nonempty=False):
     """Yield regular descendants lazily, top-down in folder-listing order (not sorted); never follows links.
 
     Linked entries (symlinks, junctions, other reparse points) are skipped whether they are files or folders;
-    unreadable folders are skipped like os.walk does. accept(path), if given, filters the files. Each folder is
+    unreadable folders are skipped like os.walk does. accept(path), if given, filters the files; nonempty=True
+    also skips empty files (the size comes with the folder listing on Windows). Each folder is
     listed once and its entries are classified from the listing itself, so a caller that only needs the first
     match (next(...)) pays for one listing per level it descends and nothing for the rest of the tree.
     A linked root raises ValueError on the first next(), as safe_files always did.
@@ -55,6 +56,8 @@ def iter_safe_files(root, accept=None):
                             continue
                         if not entry.is_file(follow_symlinks=False):
                             continue
+                        if nonempty and entry.stat(follow_symlinks=False).st_size <= 0:
+                            continue
                     except OSError:
                         continue
                     path = Path(entry.path)
@@ -65,7 +68,8 @@ def iter_safe_files(root, accept=None):
         pending.extend(reversed(subfolders))  # depth-first, in listing order
 
 
-def safe_files(root):
-    """Return regular descendants only; reject links instead of exporting their targets."""
+def safe_files(root, nonempty=False):
+    """Return regular descendants only; reject links instead of exporting their targets.
+    nonempty=True leaves out empty files (e.g. the 0-byte temp file of a download that was killed)."""
     root = Path(root)
-    return sorted(iter_safe_files(root), key=lambda path: natural_key(path.relative_to(root)))
+    return sorted(iter_safe_files(root, nonempty=nonempty), key=lambda path: natural_key(path.relative_to(root)))

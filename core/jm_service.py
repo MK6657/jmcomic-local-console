@@ -26,9 +26,8 @@ from .settings import get_settings, build_jmcomic_option
 from .validation import safe_dirname as _safe_dirname
 from .path_guard import DOWNLOAD_ROOT, is_safe_path
 from .packer import CbzPacker
-from .file_tree import safe_files
-from .local_availability import has_page_image
-from .validation import EXPORT_IMAGE_EXTENSIONS
+from . import archive_pages
+from .local_availability import forget as forget_local_state, has_local_pages
 
 
 # ── 全局复用客户端（搜索/详情用，避免每次新建 client + 连接池）──
@@ -814,6 +813,7 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
 
     client = None  # 在 finally 中按需关闭
     pause_ev = None
+    written_dirs = []  # 这次写过的目录：结束时（无论成败）让“本地可读”重新判断
 
     try:
         if _should_stop(job_id, album_id, tracker, pause_ev):
@@ -852,9 +852,12 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
             raise ValueError("专辑输出路径越权")
         # 目录不在（被删除了）或只剩没有图片的空壳（例如“打开文件夹”替排队中的重试建出的）：更早完成、写到这里的
         # 任务，它们的文件已经不在了。这次下载会把目录重新建出来——标记那些任务被取代，这次若失败或被取消，
-        # 残缺的几页不能让它们重新显示成完整、可离线阅读（core.local_availability）
-        recreated = not has_page_image(album_dir)
+        # 残缺的几页不能让它们重新显示成完整、可离线阅读（core.local_availability）。
+        # 只剩能读的压缩包（自动打包后删了原图）不算空壳：那次下载的内容还在
+        recreated = not has_local_pages(album_dir)
         album_dir.mkdir(parents=True, exist_ok=True)
+        forget_local_state(album_dir)  # 马上要往里写：各页面下次重新判断，不等有效期
+        written_dirs.append(album_dir)
         output_path = str(album_dir)
 
         db.update_job(job_id, total_pages=total_pages, output_path=output_path)
@@ -966,13 +969,31 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
             # Preserve a valid output directory for the library and open-folder.
             cbz_path = output_dir / f"{output_dir.name}{suffix}"
             try:
+                # 只删真正打进包里的原图（空的、过大的图片不打包，也不删）
                 originals = {
                     path: (path.stat().st_size, path.stat().st_mtime_ns)
-                    for path in safe_files(output_dir)
-                    if path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS
+                    for path in CbzPacker.packable_images(output_dir)
                 }
-                packer.pack(output_dir, cbz_path)
+                written_dirs.append(output_dir)
+                # 目录里已有的压缩包（同名的会被新包覆盖；另一种格式的、别的 .cbz 不动，但新包优先，它们会被“挡住”）：
+                # 它们里面散图没有的页都放进新包，一页不丢。有一个暂时打不开、或有带不过来的页，
+                # 或者要被覆盖的那个打不开：不打包（原图也不删），那些页可能只存在于旧包里
+                bases = []
+                for path in archive_pages.candidates(output_dir):
+                    index = archive_pages.read_index(path)
+                    replaced = path.name.lower() == cbz_path.name.lower()
+                    if index.transient or index.skipped or (replaced and index.status == "corrupt"):
+                        raise ValueError(f"旧压缩包 {path.name} 暂时打不开或有读不了的页（{index.status}，"
+                                         f"跳过 {index.skipped} 页），没有打包，原图保留")
+                    if index.status in ("ok", "empty"):
+                        bases.append(index)
+                packer.pack(output_dir, cbz_path, base=bases)
                 log.info(f"CBZ 打包完成: {cbz_path}")
+                # 删原图前核对新包：能打开、没有跳过的页、页数对得上；不对就保留原图
+                check = archive_pages.read_index(cbz_path)
+                if check.status not in ("ok", "empty") or check.skipped or len(check.pages) != packer.packed_count:
+                    raise ValueError(f"新压缩包 {cbz_path.name} 核对不通过（{check.status}，{len(check.pages)}/"
+                                     f"{packer.packed_count} 页），原图保留")
                 if settings.get("delete_originals") == "true":
                     if not is_safe_path(output_dir):
                         log.error(f"delete_originals 安全校验失败，拒绝删除: {output_dir}")
@@ -987,6 +1008,8 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
                         log.info(f"已清理打包原图，保留归档及其他文件: {output_dir}")
             except Exception as e:
                 log.warning(f"CBZ 打包失败（不影响下载完成状态）job_id={job_id} error={e}")
+            finally:
+                forget_local_state(output_dir)
 
         try:
             db.upsert_album_meta(album_id, title=album.name, author=album.author,
@@ -1090,6 +1113,8 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
             log.error(f"推送失败事件到 tracker 出错: {tr_err}")
     finally:
         close_client(client)
+        for folder in written_dirs:
+            forget_local_state(folder)
 
 
 def _safe_str(val: Any) -> str:

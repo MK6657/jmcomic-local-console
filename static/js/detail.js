@@ -94,8 +94,8 @@
         html += '<div class="col-12 col-md-8 col-lg-9">';
         html += '<div class="card"><div class="card-body">';
         html += '<h3 class="card-title">' + window.escapeHtml(album.title) + ' <button type="button" id="wishlist-toggle-btn" class="btn btn-sm wishlist-btn btn-outline-warning ms-2" title="收藏" aria-label="收藏" aria-pressed="false"><i class="bi bi-star" aria-hidden="true"></i></button></h3>';
-        // 已下载标记：本地可读时由 refreshOfflineStatus 显示（放在标题外，收藏时取的标题文字不受影响）
-        html += '<div id="album-offline-status" hidden><span class="offline-badge"><i class="bi bi-check-circle-fill" aria-hidden="true"></i> 已下载 · 可离线阅读</span></div>';
+        // 已下载标记（+ 压缩包标记）或本地文件不可用的原因：由 refreshOfflineStatus 显示（放在标题外，收藏时取的标题文字不受影响）
+        html += '<div id="album-offline-status" class="local-status-row" hidden><span class="offline-badge" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i> 已下载 · 可离线阅读</span></div>';
         html += '<div class="row mt-3">';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-person"></i> 作者：</strong> ' + window.escapeHtml(album.author || '-') + '</div>';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-hash"></i> 车号：</strong> <code>' + window.escapeHtml(album.album_id) + '</code></div>';
@@ -223,10 +223,19 @@
     }
 
     // ── 本地可读（已下载）状态 ──
-    function setOfflineStatus(readable) {
+    // archive：只剩压缩包也能读时的格式（跟一个 CBZ / ZIP 标记）；
+    // problem：“下载过 · 本地文件不可用”的原因（文件已删除 / 压缩包损坏 / 压缩包无可阅读图片）
+    function setOfflineStatus(readable, archive, problem) {
         var marker = document.getElementById('album-offline-status');
         var readBtn = document.getElementById('local-read-btn');
-        if (marker) marker.hidden = !readable;
+        if (marker) {
+            var offline = marker.querySelector('.offline-badge');
+            if (offline) offline.hidden = !readable;
+            Array.prototype.forEach.call(marker.querySelectorAll('.badge'), function (b) { b.remove(); });
+            var extra = readable ? window.localBadges.archive(archive) : window.localBadges.problem(problem);
+            if (extra) marker.appendChild(extra);
+            marker.hidden = !(readable || extra);
+        }
         if (readBtn) readBtn.hidden = !readable;
     }
 
@@ -240,7 +249,9 @@
         })
         .then(function (data) {
             if (data.status !== 'ok') return;
-            setOfflineStatus((data.readable || []).map(String).indexOf(String(albumId)) >= 0);
+            var id = String(albumId);
+            setOfflineStatus((data.readable || []).map(String).indexOf(id) >= 0,
+                (data.archives || {})[id], (data.unavailable || {})[id]);
         })
         .catch(function () { /* 静默：保持当前显示，不影响详情页其他功能 */ });
     }

@@ -83,8 +83,11 @@ def test_a_folder_without_pages_is_not_readable(client, downloads):
     _job("c", "503", "completed", downloads / "empty-chapters")
     assert readable_album_ids(["501", "502", "503"]) == set()
     assert client.post("/api/preview/available", json={"album_ids": ["501", "502", "503"]}).get_json()["readable"] == []
-    for album_id in ("501", "502", "503"):  # the reader agrees: nothing to show
+    for album_id in ("501", "503"):  # the reader agrees: nothing to show
         assert client.get(f"/api/preview/{album_id}").status_code == 404
+    # 502's only "page source" is a .cbz that is not a zip at all: the reader explains that instead of a bare 404
+    response = client.get("/api/preview/502")
+    assert response.status_code == 422 and response.get_json()["reason"] == "archive_corrupt"
 
 
 @pytest.mark.parametrize("page", ["001.jpg", "001.JPEG", "p.png", "p.webp", "p.gif", "第1话/001.jpg", "a/b/c/001.png"])

@@ -26,7 +26,7 @@
   var STATUS_LABELS = {
     '': '状态：全部',
     'none': '未下载',
-    'missing': '下载过 · 文件已删除',
+    'missing': '下载过 · 本地文件不可用',
     'active': '排队中 / 下载中',
     'readable': '已下载 · 可离线阅读',
     'failed': '失败'
@@ -243,7 +243,7 @@
     info.appendChild(icon('bi-info-circle'));
     actions.appendChild(info);
     actions.appendChild(actionButton('btn-outline-danger', 'bi-trash', '移除', 'remove'));
-    var read = window.readLink.create(albumId, item.readable === true, 'btn-sm');
+    var read = window.readLink.create(albumId, window.readLink.stateFor(item.readable, item.archive_problem), 'btn-sm');
     if (read) actions.appendChild(read);
     tr.appendChild(cell(actions, null, 'wishlist-col-actions'));
     return tr;
@@ -272,13 +272,16 @@
       offline.appendChild(el('span', 'visually-hidden', '已下载 · '));
       offline.appendChild(el('span', null, '可离线阅读'));
       box.appendChild(offline);
+      // 只剩压缩包也能读：跟一个 CBZ / ZIP 标记（item.archive，与其他页面同一规则）
+      if (item.archive) box.appendChild(window.localBadges.archive(item.archive));
       if (item.activity) box.appendChild(activityBadge(item.activity)); // 可读，同时又在下载（更新/补章节）
     } else if (group === 'active') {
       box.appendChild(activityBadge(item.activity));
     } else if (group === 'failed') {
       box.appendChild(badge('bg-danger', '失败', '最近一次下载失败，可以重新下载'));
     } else if (item.files_missing) {
-      box.appendChild(badge('status-badge-muted', '文件已删除', '下载过，但本地文件已不在，需要重新下载'));
+      // “下载过 · 本地文件不可用”：文件已删除 / 压缩包损坏 / 压缩包无可阅读图片（item.local_problem）
+      box.appendChild(window.localBadges.problem(item.local_problem) || window.localBadges.problem('deleted'));
     } else {
       box.appendChild(badge('bg-secondary', '未下载'));
     }

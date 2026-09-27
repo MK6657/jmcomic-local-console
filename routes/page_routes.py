@@ -81,14 +81,22 @@ def preview_page(album_id: str):
     return render_template("preview.html", title="图片预览", album_id=album_id)
 
 
+def _archive_problem(album_id: str) -> bool:
+    """本地只剩打不开的压缩包（损坏 / 没有可阅读的图片）"""
+    state = local_availability.local_state(album_id)
+    return bool(state and state.problem in ("archive_corrupt", "archive_empty"))
+
+
 @page_bp.get("/read/<album_id>")
 def continuous_reader(album_id: str):
     """“阅读”入口，各页面的“阅读”按钮都指向这里，点击时才决定去向：
-    本地可读（core.local_availability，全站同一标准）→ 连续阅读本地文件；否则 → 在线阅读 /online/<id>（保留 ?page=）。
+    本地可读（core.local_availability，全站同一标准：散图，或只剩能读的压缩包）→ 连续阅读本地文件；
+    本地只有损坏 / 没有图片的压缩包 → 仍打开本地阅读页，由它说明压缩包的问题（不悄悄转去在线阅读）；
+    否则 → 在线阅读 /online/<id>（保留 ?page=）。
     页面打开后才下载完成、或本地文件被删除，点“阅读”也能去对地方。从不启动下载。"""
     if not validate_numeric(album_id):
         abort(400)
-    if not local_availability.is_readable(album_id):
+    if not local_availability.is_readable(album_id) and not _archive_problem(album_id):
         page = request.args.get("page", type=int)
         log.info(f"本地未下载，转到在线阅读 album_id={album_id}")
         return redirect(f"/online/{album_id}" + (f"?page={page}" if page and page > 0 else ""))

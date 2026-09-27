@@ -343,7 +343,7 @@
         setStarState(star, !!item.is_wishlisted);
         buttons.appendChild(star);
         // “阅读”每张卡片都有：已下载打开本地文件，否则在线阅读（utils.js readLink）
-        var read = window.readLink.create(albumId, item.readable === true, 'btn-sm');
+        var read = window.readLink.create(albumId, window.readLink.stateFor(item.readable, item.archive_problem), 'btn-sm');
         if (read) buttons.appendChild(read);
         actions.appendChild(buttons);
         body.appendChild(actions);
@@ -364,7 +364,9 @@
     }
 
     // 状态由服务端按与收藏相同的规则算好（core.database.download_state）：
-    // status_group = readable / active / failed / none，activity = 进行中任务的状态，files_missing = 文件已删除；
+    // status_group = readable / active / failed / none，activity = 进行中任务的状态，
+    // files_missing = 下载过 · 本地文件不可用（原因 local_problem：文件已删除 / 压缩包损坏 / 压缩包无可阅读图片），
+    // archive = 只剩压缩包也能读时的格式（CBZ / ZIP 标记）；
     // 可读判定是共用规则（core.local_availability）：item.readable
     var ACTIVITY_BADGES = {
         'queued': ['bg-info text-dark', '排队中'],
@@ -391,19 +393,21 @@
         return b;
     }
 
-    // 与收藏清单同样的徽章：可读（+ 正在更新时的任务状态）/ 排队中·下载中·已暂停 / 失败 / 文件已删除 / 未下载
+    // 与收藏清单同样的徽章：可读（+ 压缩包标记、正在更新时的任务状态）/ 排队中·下载中·已暂停 / 失败 /
+    // 本地文件不可用的原因 / 未下载
     function getStatusBadge(item) {
         var frag = document.createDocumentFragment();
         var group = item.status_group;
         if (group === 'readable') {
             frag.appendChild(offlineBadge());
+            if (item.archive) frag.appendChild(window.localBadges.archive(item.archive));
             if (item.activity) frag.appendChild(activityBadge(item.activity));
         } else if (group === 'active') {
             frag.appendChild(activityBadge(item.activity));
         } else if (group === 'failed') {
             frag.appendChild(badge('bg-danger', '失败', '最近一次下载失败，可以重新下载'));
         } else if (item.files_missing) {
-            frag.appendChild(badge('status-badge-muted', '文件已删除', '下载过，但本地文件已不在，需要重新下载'));
+            frag.appendChild(window.localBadges.problem(item.local_problem) || window.localBadges.problem('deleted'));
         } else {
             frag.appendChild(badge('bg-secondary', '未下载'));
         }

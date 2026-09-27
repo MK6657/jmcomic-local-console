@@ -19,7 +19,8 @@
   position: absolute; top: 50%; left: 50%; z-index: 1; transform: translate(-50%, -50%);
 }
 .preview-image-hint { color: var(--text-secondary); }
-.preview-image-hint i { font-size: 3rem; }
+/* 只放大提示图标本身，“重试”“在线阅读这一页”按钮里的图标保持按钮大小 */
+.preview-image-hint > i { font-size: 3rem; }
 
 /* ── Page controls ── */
 .preview-nav {
@@ -72,7 +73,9 @@
 
 /* ── Empty / error ── */
 .preview-error { padding: 48px 16px; text-align: center; }
-.preview-error i { display: block; margin-bottom: 16px; font-size: 4rem; color: var(--text-tertiary); }
+/* 只放大提示图标本身（原来的 .preview-error i 连按钮里的小图标也放大成 4rem） */
+.preview-error > i { display: block; margin-bottom: 16px; font-size: 4rem; color: var(--text-tertiary); }
+.preview-error-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
 .preview-error h2 { color: var(--text-secondary); }
 
 @media (max-width: 768px) {
