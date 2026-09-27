@@ -49,20 +49,38 @@ function page(opts) {
   };
   // the list sits at listTop in the document (its viewport top moves with the scroll)
   const list = { top: opts.listTop, getBoundingClientRect() { return { top: this.top - win.scrollY }; } };
+  win.innerHeight = opts.innerHeight || 800;
   const doc = {
     visibilityState: 'visible', addEventListener: add('document'), querySelectorAll: () => links,
     querySelector: sel => sel === '[data-nav-memory-list]' && typeof opts.listTop === 'number' ? list : null,
+    documentElement: { scrollHeight: opts.docHeight || 0 },  // how far the page can scroll: scrollHeight - innerHeight
   };
   const setT = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
   const clearT = id => { if (timers[id - 1]) timers[id - 1].fn = null; };
   new Function('window', 'document', 'setTimeout', 'clearTimeout', 'Date', src)(win, doc, setT, clearT, FakeDate);
   const fire = (where, type, event) => (on[where][type] || []).forEach(fn => fn(event || {}));
-  const target = (nav) => ({ closest: sel => sel === '.navbar' ? (nav ? {} : null) : null });
+  // where: true = the top navigation, 'quick' = the floating quick-nav, 'quick-jump' = its 到顶 / 到底,
+  // false = the page itself
+  const JUMP = '[data-quick-action="top"], [data-quick-action="bottom"]';
+  const target = (where) => ({
+    closest: sel => (sel === '.navbar' && where === true)
+      || (sel === '.quick-nav' && (where === 'quick' || where === 'quick-jump'))
+      || (sel === JUMP && where === 'quick-jump') ? {} : null,
+  });
   return {
     win, doc, store, links, list, nm: win.navMemory,
     scroll(y) { win.scrollY = y; fire('window', 'scroll'); },
     rest() { timers.splice(0).forEach(t => t.fn && t.fn()); },
     click(nav) { fire('window', 'click', { target: target(nav) }); },
+    clickQuick() { fire('window', 'click', { target: target('quick') }); },
+    press(where) { fire('window', 'pointerdown', { target: target(where) }); },
+    // a mouse event of a click sequence (detail = click count); reports whether the page let it through
+    mouse(type, detail, x, y) {
+      const e = { detail, clientX: x || 0, clientY: y || 0, prevented: false, stopped: false, target: target(false),
+                  preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
+      fire('window', type, e);
+      return !(e.prevented || e.stopped);
+    },
     type() { fire('window', 'input', { target: target(false) }); },
     key() { fire('window', 'keydown', { target: target(false) }); },
     hoverLink(i) { fire('document', 'pointerover', { target: { closest: () => links[i] } }); return links[i].attrs.href; },
@@ -211,6 +229,160 @@ p.scroll(300); p.leave();       // another address: nothing to keep
 out.otherUrlBeforeDrawn = JSON.parse(shared.get('jm-nav-memory-v1'))['/library'];
 out.navType = [page({ navType: 'reload' }).nm.navigationType(), page({ navType: 'back_forward' }).nm.navigationType()];
 out.maxAgeHours = p.nm.MAX_AGE / HOUR;
+
+// ── the floating quick-nav (quick-nav.js) ──
+// opening it or using 到顶 in it is not "acting here": the place stays where the user rested
+p = page({ path: '/library' });
+p.scroll(1500); p.rest(); p.scroll(30); p.clickQuick();
+out.quickClickKeepsPlace = p.nm.place().y;
+
+// its 返回 leaves a return target for the next page, used once by that page only
+const returning = (store, url, y, listTop, age) => {
+  store.set('jm-nav-return-v1', JSON.stringify({ url, y, listTop: listTop === undefined ? null : listTop, at: now - (age || 0) }));
+  return store;
+};
+shared = new Map();
+p = page({ path: '/downloads', store: shared });
+p.nm.expectReturn('/library?q=1', 1234.4, 300);
+const pendingSaved = JSON.parse(shared.get('jm-nav-return-v1'));
+out.returnSaved = [pendingSaved.url, pendingSaved.y, pendingSaved.listTop, pendingSaved.at === now];
+out.returnNotForThisPage = [p.nm.takeReturn(), p.nm.hasReturn(), shared.has('jm-nav-return-v1')];
+let q = page({ path: '/library', search: '?q=1', store: shared, listTop: 300 });
+out.returnHasBeforeDrawn = q.nm.hasReturn();
+q.nm.restoreScroll();
+out.returnRestored = [q.win.scrollY, q.win.lastBehavior, shared.has('jm-nav-return-v1')];
+out.returnBeatsMemory = (() => {
+  const s = returning(arrivedAt(memory({ url: '/library?q=1', scrollY: 900 }), '/library'), '/library?q=1', 400);
+  const r = page({ path: '/library', search: '?q=1', store: s }); r.nm.restoreScroll(); return [r.win.scrollY, s.has('jm-nav-arrival-v1')];
+})();
+out.returnStale = (() => {
+  const s = returning(new Map(), '/library?q=1', 400, null, 20000);
+  const r = page({ path: '/library', search: '?q=1', store: s }); r.nm.restoreScroll(); return [r.win.scrollY, s.has('jm-nav-return-v1')];
+})();
+out.returnOtherFilters = (() => {
+  const r = page({ path: '/library', search: '?q=2', store: returning(new Map(), '/library?q=1', 400) }); r.nm.restoreScroll(); return r.win.scrollY;
+})();
+out.returnFollowsList = (() => {
+  const r = page({ path: '/wishlist', listTop: 500, store: returning(new Map(), '/wishlist', 900, 300) }); r.nm.restoreScroll(); return r.win.scrollY;
+})();
+out.returnUserMovedFirst = (() => {
+  const r = page({ path: '/library', search: '?q=1', store: returning(new Map(), '/library?q=1', 400) }); r.wheel(); r.nm.restoreScroll(); return r.win.scrollY;
+})();
+// pages without a remembered list: follow the content down as it arrives (by request, lazily) until y fits
+shared = returning(new Map(), '/downloads', 1500);
+q = page({ path: '/downloads', store: shared, docHeight: 1000 });   // can scroll 200 px so far
+out.genericWaits = [q.win.scrollY, shared.has('jm-nav-return-v1')];
+q.doc.documentElement.scrollHeight = 1500; q.rest();                // grew: follow it down
+out.genericFollows = q.win.scrollY;
+q.doc.documentElement.scrollHeight = 2600; q.rest();                // tall enough: exactly there
+out.genericArrived = q.win.scrollY;
+q.rest();
+out.genericStopsAfterArriving = q.win.scrollY;
+q = page({ path: '/', store: returning(new Map(), '/', 1500), docHeight: 1000 });
+now += 9000; q.rest(); now -= 9000;
+q.doc.documentElement.scrollHeight = 2600; q.rest();
+out.genericNoLateJump = q.win.scrollY;   // gave up: stays as far as it got, never jumps seconds later
+q = page({ path: '/settings', store: returning(new Map(), '/settings', 1500), docHeight: 1000 });
+q.wheel(); q.doc.documentElement.scrollHeight = 2600; q.rest();
+out.genericUserMovedFirst = q.win.scrollY;
+q = page({ path: '/downloads', store: returning(new Map(), '/downloads', 1500), docHeight: 1000 });
+q.leave(); q.doc.documentElement.scrollHeight = 2600; q.rest();
+out.genericStopsOnLeave = q.win.scrollY;   // went into the back/forward cache: does not carry on when it comes back
+// tapping the quick-nav launcher while the list is still loading does not cancel going back to the place;
+// its 到顶 / 到底 and real scrolling do
+out.launcherTapKeepsRestore = (() => {
+  const s = returning(new Map(), '/library?q=1', 400);
+  const r = page({ path: '/library', search: '?q=1', store: s }); r.press('quick'); r.nm.restoreScroll(); return r.win.scrollY;
+})();
+out.quickJumpCancelsRestore = (() => {
+  const s = returning(new Map(), '/library?q=1', 400);
+  const r = page({ path: '/library', search: '?q=1', store: s }); r.press('quick-jump'); r.nm.restoreScroll(); return r.win.scrollY;
+})();
+// double-clicking quick-nav 返回: the second click lands on the page just returned to. That page swallows the one
+// press that follows within 1.2 s if it is a double click's second press (detail 2) or lands where 返回 was clicked
+// (x, y: the click count may start again at 1 on the new page); other clicks and the keyboard (detail 0) work
+const backClicked = (store, age, x, y) => {
+  store.set('jm-nav-back-click-v1', JSON.stringify({ at: now - (age || 0), x: x === undefined ? 1100 : x, y: y === undefined ? 650 : y }));
+  return store;
+};
+const HERE = [1100, 650], FAR = [300, 400];
+// one press: mousedown, mouseup, click (and dblclick for a second click); true = the page saw it
+const press = (r, detail, at, withDbl) => ['mousedown', 'mouseup', 'click'].concat(withDbl ? ['dblclick'] : [])
+  .map(t => r.mouse(t, detail, at[0], at[1]));
+const guarded = (age, x, y) => page({ path: '/search', search: '?keyword=a', store: backClicked(new Map(), age, x, y) });
+out.dblSecondPress = (() => {
+  const r = guarded(150);
+  const markUsed = !r.store.has('jm-nav-back-click-v1');
+  r.press(false);                                     // its pointerdown: not "the user moved"
+  const afterPointer = r.nm.userMoved();
+  const second = press(r, 2, FAR, true);              // detail 2, wherever it lands
+  return { markUsed, afterPointer, second, moved: r.nm.userMoved() };
+})();
+out.dblRestartedCount = (() => { const r = guarded(150); return [press(r, 1, [1112, 640]), r.nm.userMoved()]; })();
+out.dblSlow = (() => { const r = guarded(150); now += 900; const seen = press(r, 2, FAR); now -= 900; return seen; })();
+out.dblOnce = (() => {                                // only the one press: the next double click is normal again
+  const r = guarded(150);
+  press(r, 2, FAR, true);
+  return [press(r, 2, FAR, true), press(r, 1, HERE)];
+})();
+out.dblSingleElsewhere = (() => { const r = guarded(150); return [press(r, 1, FAR), r.nm.userMoved()]; })();
+out.dblKeyboard = (() => { const r = guarded(150); return [r.mouse('click', 0, 0, 0), r.mouse('click', 0, 1100, 650)]; })();
+out.dblAfterWindow = (() => { const r = guarded(150); now += 1100; const seen = [press(r, 2, FAR), press(r, 1, HERE)]; now -= 1100; return seen; })();
+out.dblKeyboardReturn = (() => { const r = guarded(150, null, null); return [press(r, 1, HERE), press(r, 2, FAR)]; })();
+out.dblOrphanRelease = (() => {                       // pressed on the old page, released on this one
+  const r = guarded(150);
+  return ['mouseup', 'click', 'dblclick'].map(t => r.mouse(t, 2, 900, 300));
+})();
+out.dblLate = guarded(1300) && (() => { const r = guarded(1300); return press(r, 2, HERE); })();
+out.dblFromCache = (() => {
+  const s = new Map();
+  const r = page({ path: '/library', search: '?q=1', store: s });
+  backClicked(s, 100); r.pageshow(true);
+  return [press(r, 1, HERE), s.has('jm-nav-back-click-v1')];
+})();
+out.noteBackClickWrites = (() => {
+  const s = new Map(); const r = page({ store: s });
+  r.nm.noteBackClick(1100.4, 649.6); const mouse = JSON.parse(s.get('jm-nav-back-click-v1'));
+  r.nm.noteBackClick(null, null); const keys = JSON.parse(s.get('jm-nav-back-click-v1'));
+  return [mouse.at === now, mouse.x, mouse.y, keys.x, keys.y];
+})();
+// the reader and preview restore the page they were on by page number, not by pixel
+out.readerReturnNotByPixel = ['/read/5', '/online/5', '/preview/5'].map(path => {
+  const s = returning(new Map(), path, 2400);
+  const r = page({ path, store: s, docHeight: 9000 });
+  return [r.win.scrollY, s.has('jm-nav-return-v1')];
+});
+// search.js asks whether the user already moved; coming back from the back/forward cache starts afresh
+out.userMovedFlag = (() => {
+  const r = page({ path: '/search', search: '?keyword=a' });
+  const fresh = r.nm.userMoved();
+  r.press('quick'); const afterLauncher = r.nm.userMoved();
+  r.wheel(); const afterWheel = r.nm.userMoved();
+  r.pageshow(false); const afterNormalShow = r.nm.userMoved();
+  r.pageshow(true); const afterCache = r.nm.userMoved();
+  return [fresh, afterLauncher, afterWheel, afterNormalShow, afterCache];
+})();
+out.pagePressCancelsRestore = (() => {
+  const s = arrivedAt(memory({ url: '/library?q=1', scrollY: 900 }), '/library');
+  const r = page({ path: '/library', search: '?q=1', store: s }); r.press(false); r.nm.restoreScroll(); return r.win.scrollY;
+})();
+out.searchKeywordLeftForSearchJs = (() => {
+  const s = returning(new Map(), '/search?keyword=a', 700);
+  const r = page({ path: '/search', search: '?keyword=a', store: s, docHeight: 3000 }); return [r.win.scrollY, s.has('jm-nav-return-v1')];
+})();
+out.searchWithoutKeyword = page({ path: '/search', store: returning(new Map(), '/search', 700), docHeight: 3000 }).win.scrollY;
+// back/forward cache: 返回 used the browser's Back; the page comes back as it was, then goes to the saved place
+out.bfcacheReturn = (() => {
+  const s = new Map(); const r = page({ path: '/downloads', store: s }); returning(s, '/downloads', 640); r.pageshow(true); return r.win.scrollY;
+})();
+out.bfcacheReturnBeatsListMemory = (() => {
+  const s = memory({ url: '/library?q=1', scrollY: 1400 });
+  const r = page({ path: '/library', search: '?q=1', store: s }); returning(s, '/library?q=1', 300); r.pageshow(true); return r.win.scrollY;
+})();
+out.bfcacheSearchLeftForSearchJs = (() => {
+  const s = new Map(); const r = page({ path: '/search', search: '?keyword=a', store: s });
+  returning(s, '/search?keyword=a', 640); r.pageshow(true); return [r.win.scrollY, s.has('jm-nav-return-v1')];
+})();
 console.log(JSON.stringify(out));
 """
 
@@ -314,6 +486,83 @@ def test_place_keeps_the_list_position_it_was_taken_with(harness):
     assert harness["phoneRestored"] == 2500
 
 
+# ── the floating quick-nav (static/js/quick-nav.js) ──
+
+def test_using_the_quick_nav_is_not_acting_on_the_page(harness):
+    assert harness["quickClickKeepsPlace"] == 1500  # like the top navigation: the rested place is kept
+
+
+def test_quick_nav_return_target_is_used_once_by_its_page(harness):
+    assert harness["returnSaved"] == ["/library?q=1", 1234, 300, True]
+    assert harness["returnNotForThisPage"] == [None, False, True]  # left for the page it belongs to
+    assert harness["returnHasBeforeDrawn"] is True
+    assert harness["returnRestored"] == [1234, "instant", False]
+    assert harness["returnBeatsMemory"] == [400, False]  # the place at the moment of the jump, not the older memory
+    assert harness["returnStale"] == [0, False]
+    assert harness["returnOtherFilters"] == 0
+    assert harness["returnFollowsList"] == 1100  # content above the list grew by 200 px
+    assert harness["returnUserMovedFirst"] == 0
+
+
+def test_quick_nav_return_on_other_pages_follows_the_content(harness):
+    assert harness["genericWaits"] == [200, False]   # as far as the page goes so far
+    assert harness["genericFollows"] == 700
+    assert harness["genericArrived"] == 1500
+    assert harness["genericStopsAfterArriving"] == 1500
+    assert harness["genericNoLateJump"] == 200
+    assert harness["genericUserMovedFirst"] == 200    # stopped following once the user scrolled
+    assert harness["genericStopsOnLeave"] == 200
+    assert harness["searchKeywordLeftForSearchJs"] == [0, True]
+    assert harness["searchWithoutKeyword"] == 700
+
+
+def test_opening_the_quick_nav_does_not_cancel_going_back_to_the_place(harness):
+    assert harness["launcherTapKeepsRestore"] == 400
+    assert harness["quickJumpCancelsRestore"] == 0   # 到顶 / 到底 really move the page
+    assert harness["pagePressCancelsRestore"] == 0
+
+
+SWALLOWED = [False, False, False]
+SEEN = [True, True, True]
+
+
+def test_the_second_click_of_a_double_clicked_return_is_swallowed(harness):
+    second = harness["dblSecondPress"]
+    assert second["markUsed"] is True
+    assert second["afterPointer"] is False          # its pointerdown does not count as the user moving
+    assert second["second"] == [False, False, False, False]
+    assert second["moved"] is False
+    # the click count can start again at 1 on the new page: a press where 返回 was clicked is the second click too
+    assert harness["dblRestartedCount"] == [SWALLOWED, False]
+    assert harness["dblSlow"] == SWALLOWED          # a slow double-click setting (up to 900 ms)
+    assert harness["dblOrphanRelease"] == [False, False, False]  # pressed on the old page, released here
+    assert harness["dblFromCache"] == [SWALLOWED, False]
+
+
+def test_only_that_one_press_is_swallowed(harness):
+    assert harness["dblOnce"] == [[True, True, True, True], SEEN]
+    assert harness["dblSingleElsewhere"] == [SEEN, True]  # a real click elsewhere works and counts as moving
+    assert harness["dblKeyboard"] == [True, True]         # keyboard activation (detail 0) is never swallowed
+    assert harness["dblAfterWindow"] == [SEEN, SEEN]
+    assert harness["dblKeyboardReturn"] == [SEEN, SWALLOWED]  # 返回 by keyboard: no position, only detail 2 counts
+    assert harness["dblLate"] == SEEN                     # the page appeared after the double click was over
+    assert harness["noteBackClickWrites"] == [True, 1100, 650, None, None]
+
+
+def test_reader_pages_are_not_returned_to_by_pixel(harness):
+    assert harness["readerReturnNotByPixel"] == [[0, False], [0, False], [0, False]]  # used up, not applied
+
+
+def test_whether_the_user_moved_is_shared_and_restarts_after_the_page_cache(harness):
+    assert harness["userMovedFlag"] == [False, False, True, True, False]
+
+
+def test_quick_nav_return_through_the_back_forward_cache(harness):
+    assert harness["bfcacheReturn"] == 640
+    assert harness["bfcacheReturnBeatsListMemory"] == 300
+    assert harness["bfcacheSearchLeftForSearchJs"] == [0, True]
+
+
 # ── wiring ──
 
 def test_nav_links_carry_the_memory_marker(client):
@@ -336,7 +585,7 @@ def test_nav_memory_loads_before_the_page_script(client, url, script):
 
 @pytest.mark.parametrize("url, marker", [
     ("/search", '<div id="search-results" data-nav-memory-list>'),
-    ("/library", '<div id="library-grid" class="library-grid" data-nav-memory-list>'),
+    ("/library", '<div id="library-grid" class="library-grid" data-nav-memory-list'),
     ("/wishlist", 'id="wishlist-table" data-nav-memory-list>'),
 ])
 def test_list_pages_mark_the_list_used_for_restoring(client, url, marker):

@@ -94,6 +94,9 @@
 
 {% endblock %}
 
+{# 单页预览有自己的翻页与缩略图工具，不放右下角快捷导航 #}
+{% block quick_nav %}{% endblock %}
+
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
 <script src="{{ asset_url('js/reading-nav.js') }}"></script>

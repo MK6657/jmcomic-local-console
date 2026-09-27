@@ -122,9 +122,10 @@ def wishlist_page():
 
 @page_bp.get("/library")
 def library_page():
-    """资源库页"""
+    """资源库页；card_click：卡片正文空白处点一下是否打开详情（设置 library_card_click，默认关）"""
     log.info("页面访问 资源库页")
-    return render_template("library.html", title="资源库")
+    card_click = get_settings().get("library_card_click") == "true"
+    return render_template("library.html", title="资源库", card_click=card_click)
 
 
 @page_bp.get("/settings")

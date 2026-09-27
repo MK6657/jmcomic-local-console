@@ -86,6 +86,47 @@
     </div>
 </footer>
 
+<!-- ===== 快捷导航（右下角，static/js/quick-nav.js）：阅读页、单页预览有自己的底部工具，覆盖这个块不显示 ===== -->
+{% block quick_nav %}
+{% set qn_items = [
+    ('/', 'bi-house-door', '首页', false),
+    ('/search', 'bi-search', '搜索', true),
+    ('/downloads', 'bi-list-ul', '下载管理', false),
+    ('/wishlist', 'bi-bookmark-heart', '收藏', true),
+    ('/library', 'bi-collection', '资源库', true),
+    ('/settings', 'bi-gear', '设置', false),
+] %}
+<div class="quick-nav" id="quick-nav">
+    <button type="button" class="quick-nav-toggle" aria-expanded="false" aria-controls="quick-nav-panel"
+            title="快捷导航" aria-label="快捷导航">
+        <i class="bi bi-compass" aria-hidden="true"></i>
+    </button>
+    <div class="quick-nav-panel" id="quick-nav-panel">
+        <div class="quick-nav-grid quick-nav-actions" role="group" aria-label="返回与定位">
+            <button type="button" class="quick-nav-item" data-quick-action="back" aria-disabled="true"
+                    title="返回" aria-label="返回">
+                <i class="bi bi-arrow-return-left" aria-hidden="true"></i><span>返回</span>
+            </button>
+            <button type="button" class="quick-nav-item" data-quick-action="top" title="到顶">
+                <i class="bi bi-chevron-bar-up" aria-hidden="true"></i><span>到顶</span>
+            </button>
+            <button type="button" class="quick-nav-item" data-quick-action="bottom" title="到底">
+                <i class="bi bi-chevron-bar-down" aria-hidden="true"></i><span>到底</span>
+            </button>
+        </div>
+        <nav class="quick-nav-grid" aria-label="快捷导航">
+            {% for path, icon, label, remembered in qn_items %}
+            <a class="quick-nav-item{% if request.path == path %} is-current{% endif %}" href="{{ path }}"
+               data-quick-dest="{{ path }}"{% if remembered %} data-nav-memory="{{ path }}"{% endif %}
+               title="{{ label }}"{% if request.path == path %} aria-current="page"{% endif %}>
+                <i class="bi {{ icon }}" aria-hidden="true"></i><span>{{ label }}</span>
+            </a>
+            {% endfor %}
+        </nav>
+    </div>
+</div>
+{% endblock %}
+
 <!-- ===== Toast 通知容器 ===== -->
 <div class="toast-container position-fixed bottom-0 end-0 p-3"
      id="toast-container" style="z-index: 1080;"
@@ -96,6 +137,8 @@
 <script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
 <!-- 导航回到上次离开时的搜索结果 / 收藏 / 资源库（本标签页），须在各页面脚本之前 -->
 <script src="{{ asset_url('js/nav-memory.js') }}"></script>
+<!-- 右下角快捷导航（依赖 nav-memory.js；没有 #quick-nav 的页面只做记录读取，不画界面） -->
+<script src="{{ asset_url('js/quick-nav.js') }}"></script>
 
 <!-- 全局 Toast 通知函数 -->
 <script>

@@ -211,6 +211,27 @@
         </div>
     </div>
 
+    <!-- ===== 界面操作 ===== -->
+    <div class="settings-section">
+        <h5><i class="bi bi-hand-index"></i> 界面操作</h5>
+        <div class="row g-3">
+            <div class="col-12" data-setting-key="library_card_click">
+                <div class="form-check form-switch">
+                    <input type="checkbox" id="library_card_click" name="library_card_click"
+                           class="form-check-input" role="switch" value="true"
+                           aria-describedby="library_card_click_help"
+                           {% if settings.library_card_click == 'true' %}checked{% endif %}>
+                    <label class="form-check-label" for="library_card_click">点击资源库卡片空白处打开详情</label>
+                </div>
+                <div class="form-text" id="library_card_click_help">
+                    开启后，点资源库卡片正文的空白处会在新标签页打开详情。关闭时空白处点了没有反应；
+                    封面、标题和“详情”按钮始终可以打开详情，作者、标签、收藏、阅读等按钮只做自己的事。
+                    保存后，已经打开的资源库页面在刷新或切回该页时生效。
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ===== 操作按钮 ===== -->
     <div class="d-grid gap-2 d-md-flex justify-content-md-end mb-4">
         <button type="button" id="export-settings-btn" class="btn btn-outline-secondary btn-lg px-4">

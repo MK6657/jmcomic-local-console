@@ -1584,3 +1584,118 @@ code {
   }
   .wishlist-table .wishlist-actions { min-width: 100px; }
 }
+
+/* ════════════════════════════════════════════════════════════════
+   右下角快捷导航（templates/base.html #quick-nav，static/js/quick-nav.js）
+   只追加、不改动上方规则。颜色只用 eye-care token；圆角 --radius-lg / --radius-xl，按钮是圆形；
+   间距 4/8/16；字号不小于 12px；只有 150ms 的淡入淡出，没有位移动画。
+   44px 是触屏可点的最小尺寸，56×52px 的格子正好放下“下载管理”四个字（均属布局尺寸）。
+   ════════════════════════════════════════════════════════════════ */
+.quick-nav {
+  position: fixed;
+  right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  /* 在页面内容之上，在 Bootstrap 弹窗（1050 起）与 Toast（1080）之下 */
+  z-index: 1035;
+}
+.quick-nav-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  box-shadow: var(--shadow-md);
+  transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease;
+}
+.quick-nav-toggle:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+.quick-nav.is-open .quick-nav-toggle { color: var(--primary); border-color: var(--primary); }
+.quick-nav-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  padding: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  /* 很矮的窗口（横屏手机、放大很多倍）：面板不超出屏幕顶部，放不下时在面板里滚动 */
+  max-height: calc(100vh - 16px - 44px - 8px - 8px - env(safe-area-inset-bottom, 0px));
+  max-height: calc(100dvh - 16px - 44px - 8px - 8px - env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 150ms ease, visibility 0s linear 150ms;
+}
+.quick-nav.is-open .quick-nav-panel {
+  visibility: visible;
+  opacity: 1;
+  transition: opacity 150ms ease;
+}
+.quick-nav-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 56px);
+  gap: 4px;
+}
+/* 返回 / 到顶 / 到底 与六个页面之间一条分隔线 */
+.quick-nav-actions {
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border-light);
+}
+.quick-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 52px;
+  padding: 4px;
+  font-size: 12px;
+  line-height: 1.25;
+  white-space: nowrap;
+  color: var(--text-primary);
+  text-decoration: none;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-lg);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.quick-nav-item i { font-size: 18px; line-height: 1; }
+.quick-nav-item:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+.quick-nav-item.is-current { color: var(--primary); background: var(--primary-bg); }
+.quick-nav-item[aria-disabled="true"],
+.quick-nav-item[aria-disabled="true"]:hover {
+  color: var(--text-tertiary);
+  background: transparent;
+  cursor: default;
+}
+.quick-nav-toggle:focus-visible,
+.quick-nav-item:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+/* Toast 让出右下角：从快捷导航按钮上方开始往上叠（16px 边距 + 44px 按钮）；
+   面板展开时再让到面板上方（面板实际高度由 quick-nav.js 写进 --quick-nav-panel-h），不挡住面板里的去处。
+   但至少留出一条 Toast 在屏幕内（96px ≈ 一条 Toast + 容器上下内边距）：很矮的窗口里放不下时，Toast 盖在面板上（层级更高），
+   仍然看得见、点得到关闭；第二行是支持 dvh 的浏览器（手机地址栏收起/展开时更准） */
+body:has(.quick-nav) #toast-container { bottom: calc(16px + 44px) !important; }
+body:has(.quick-nav.is-open) #toast-container {
+  bottom: max(calc(16px + 44px), min(calc(16px + 44px + 8px + var(--quick-nav-panel-h, 195px)), calc(100vh - 96px))) !important;
+  bottom: max(calc(16px + 44px), min(calc(16px + 44px + 8px + var(--quick-nav-panel-h, 195px)), calc(100dvh - 96px))) !important;
+}
+/* 滚到最底时页脚文字不被按钮压住：页脚下方留出按钮的位置 */
+body:has(.quick-nav) .footer { padding-bottom: calc(16px + 44px + 16px); }
+/* 资源库：设置里开启“点击卡片空白处打开详情”时，正文空白处显示可点击的指针 */
+.library-grid--card-click .library-card .card-body { cursor: pointer; }
+@media print {
+  .quick-nav { display: none !important; }
+}

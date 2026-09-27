@@ -37,6 +37,8 @@ DEFAULT_SETTINGS = {
     # 图片/章节并发数设置
     "image_threads": "20",
     "photo_threads": "1",
+    # 界面：资源库卡片正文空白处点一下是否在新标签页打开详情（默认关，封面/标题/“详情”始终可以打开）
+    "library_card_click": "false",
 }
 
 
@@ -78,7 +80,7 @@ def update_settings(settings: dict):
         "image_threads": (1, 50), "photo_threads": (1, 10),
         "schedule_start": (0, 23), "schedule_end": (0, 23),
     }
-    bool_keys = {"schedule_enabled", "auto_pack", "delete_originals", "skip_existing"}
+    bool_keys = {"schedule_enabled", "auto_pack", "delete_originals", "skip_existing", "library_card_click"}
     normalized = {}
     for key, value in settings.items():
         if key not in DEFAULT_SETTINGS:

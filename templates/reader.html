@@ -49,6 +49,8 @@
     <p class="text-center text-muted my-3 d-none" id="reader-end">已到末页</p>
 </main>
 {% endblock %}
+{# 阅读页有自己的底部阅读工具，不放右下角快捷导航（会压在正在读的图片上） #}
+{% block quick_nav %}{% endblock %}
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
 <script src="{{ asset_url('js/reading-nav.js') }}"></script>

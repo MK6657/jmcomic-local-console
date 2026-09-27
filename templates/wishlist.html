@@ -30,13 +30,14 @@
                aria-label="搜索收藏" autocomplete="off">
     </div>
     <div class="col-md-5 col-xl-3">
+        <!-- 选项顺序与资源库、与“排序：下载状态”相同：可读 → 进行中 → 失败 → 文件已删除 → 未下载 -->
         <select id="wishlist-status" class="form-select" aria-label="按下载状态筛选" autocomplete="off">
             <option value="">状态：全部</option>
-            <option value="none">未下载</option>
-            <option value="missing">下载过 · 文件已删除</option>
-            <option value="active">排队中 / 下载中</option>
             <option value="readable">已下载 · 可离线阅读</option>
+            <option value="active">排队中 / 下载中</option>
             <option value="failed">失败</option>
+            <option value="missing">下载过 · 文件已删除</option>
+            <option value="none">未下载</option>
         </select>
     </div>
     <div class="col-md-5 col-xl-3">
