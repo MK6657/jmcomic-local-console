@@ -2,11 +2,12 @@
 from pathlib import Path
 from urllib.parse import quote
 
-from flask import Blueprint, jsonify, send_file
+from flask import Blueprint, jsonify, request, send_file
 
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.database import get_completed_job_by_album_id
 from core.file_tree import safe_files
+from core.local_availability import MAX_IDS, is_page_image, readable_album_ids
 from core.logger import log
 # P1-8 补充 album_id 校验；图片类型与 MIME 统一取自 core.validation
 from core.validation import validate_numeric, is_allowed_image, get_image_mime
@@ -14,14 +15,48 @@ from core.validation import validate_numeric, is_allowed_image, get_image_mime
 api_preview_bp = Blueprint("api_preview", __name__)
 
 
+@api_preview_bp.post("/api/preview/available")
+def preview_available():
+    """批量判断哪些漫画本地可读（可离线阅读）。
+
+    Body: {"album_ids": ["123", ...]}（纯数字，最多 MAX_IDS 个）
+    → {"status": "ok", "readable": [按请求顺序的可读 id]}
+    判定规则统一在 core.local_availability，搜索/详情/下载管理/收藏/资源库共用，结果不会互相矛盾。
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"status": "error", "message": "请求体需为 JSON 对象"}), 400
+    album_ids = body.get("album_ids")
+    if not isinstance(album_ids, list):
+        return jsonify({"status": "error", "message": "缺少 album_ids 列表"}), 400
+    if len(album_ids) > MAX_IDS:
+        return jsonify({"status": "error", "message": f"album_ids 数量过多，最大 {MAX_IDS}"}), 400
+    ids = []
+    for aid in album_ids:
+        # bool 是 int 的子类，必须单独排除；负数/小数转成字符串后不是纯数字，会被拒绝
+        text = str(aid) if isinstance(aid, int) and not isinstance(aid, bool) else aid
+        if not validate_numeric(text):
+            return jsonify({"status": "error", "message": "album_ids 只能包含纯数字"}), 400
+        ids.append(text)
+    try:
+        readable = readable_album_ids(ids)
+    except Exception as e:
+        log.error(f"本地可读判断失败 count={len(ids)} error={e}")
+        return jsonify({"status": "error", "message": "无法判断本地下载状态"}), 500
+    ordered = [aid for aid in dict.fromkeys(ids) if aid in readable]
+    return jsonify({"status": "ok", "readable": ordered})
+
+
 def _find_album_dir(album_id: str) -> tuple[Path | None, str | None]:
     """查找 album_id 对应的本地目录
 
     优先从 jobs 表获取 output_path；
     若没有匹配任务或目录已被删除，返回 None（用户应通过下载管理页进入预览）。
+    最近一次完成的任务已被取代（目录被删除后又被重新下载建出，见 core.local_availability）同样返回 None：
+    里面是还没完成（或失败 / 已取消）的那次下载写的残缺内容，与“本地可读”的判断一致。
     """
     job = get_completed_job_by_album_id(album_id)
-    if job and job.get("output_path"):
+    if job and job.get("output_path") and not job.get("superseded_at"):
         p = Path(job["output_path"])
         if p.is_dir() and is_safe_path(p):
             return p, job.get("title") or p.name
@@ -32,7 +67,7 @@ def _scan_pages(album_dir: Path) -> list[dict]:
     """Include root images and nested chapters, with natural order and URL escaping."""
     pages = []
     for img in safe_files(album_dir):
-        if not is_allowed_image(img.suffix) or not is_safe_path(img):
+        if not is_page_image(img):  # 与“本地可读”判定（core.local_availability）同一条规则
             continue
         rel_path = img.relative_to(DOWNLOAD_ROOT).as_posix()
         pages.append({

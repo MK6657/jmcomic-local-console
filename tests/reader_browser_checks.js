@@ -96,9 +96,12 @@ async (page) => {
   check(page.url() === queryUrl, 'Reader back did not return to original results');
   check(await metrics() === requestsBeforeBack, 'Reader back refetched search results');
 
+  // 未下载的漫画：阅读按钮是在线样式，点击后 /read 转到在线阅读（fixture 的在线接口是离线桩，只回错误）
+  await page.locator('a.reader-link[href="/read/900002"][data-read-state="online"]').waitFor();
   await page.locator('a.reader-link[href="/read/900002"]').click();
+  await page.waitForURL('**/online/900002');
   await page.locator('#reader-empty:not(.d-none)').waitFor();
-  check((await page.locator('#reader-message').innerText()).includes('不会自动下载'), 'Missing local-only empty explanation');
+  check(await page.locator('[data-source="online"]').count() > 0, 'Undownloaded album did not open online reading');
   await page.goBack();
   await page.locator('.reader-link').first().waitFor();
   await page.setViewportSize({ width: 390, height: 844 });

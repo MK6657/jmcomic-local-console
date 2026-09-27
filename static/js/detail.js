@@ -1,11 +1,17 @@
 /**
  * 漫画详情页 JS
  * 依赖: utils.js (window.escapeHtml, window.escapeHtmlAttr, window.apiFetch)
+ * 依赖: reading-nav.js (window.readingNav.bindBack：从站内页面进入时“返回”走浏览器后退)
  * 依赖: base.html 内联 showToast
  * 变量: albumId 在模板中通过 <script>var albumId = ...</script> 定义
  *
  * 请求统一走 window.apiFetch（自带 AbortController/超时/pagehide 清理），
  * 解决多次页面跳转后残留请求占满浏览器连接池的问题
+ *
+ * 不使用内联事件处理器：标签名来自 18comic / 用户输入，拼进内联 onclick 的 JS 字符串时，
+ * escapeHtmlAttr 的转义会在处理器执行前被浏览器解码回原字符，形成脚本注入。
+ * 交互元素只带 data-action / data-tag，由 #album-content 上的一个委托监听器处理；
+ * 含远程数据的标签区用 textContent / dataset 构建。
  */
 (function (albumId) {
     'use strict';
@@ -13,6 +19,7 @@
     var container = document.getElementById('album-content');
     var spinner = document.getElementById('loading-spinner');
     var errorDiv = document.getElementById('error-message');
+    var rendered = false;
 
     // ── 异常 → Toast 文案（服务端错误/超时显示具体消息，网络错误显示通用文案） ──
     function toastErr(err, fallback) {
@@ -21,39 +28,44 @@
     }
 
     // 获取详情（30s 超时）
-    window.apiFetch('/api/album/' + albumId, { timeoutMs: 30000 })
-        .then(function (data) {
-            if (data.status !== 'ok') {
-                throw new Error(data.message || '获取失败');
-            }
-            renderAlbum(data.data);
-            // 收藏状态检查 + 收藏按钮绑定（按钮由 renderAlbum 动态生成，必须在渲染后执行）
-            initWishlist(data.data);
-            // 加载本地标签管理
-            loadAlbumTags(albumId);
-            // 异步触发标签同步（不阻塞用户交互，15s 超时）
-            window.apiFetch('/api/library/' + encodeURIComponent(albumId) + '/tags/sync', {
-                method: 'POST',
-                timeoutMs: 15000
-            })
-            .then(function (syncData) {
-                if (syncData.status === 'ok' && syncData.synced > 0) {
-                    // 有新的标签同步成功，刷新显示
-                    loadAlbumTags(albumId);
+    function loadAlbum() {
+        window.apiFetch('/api/album/' + albumId, { timeoutMs: 30000 })
+            .then(function (data) {
+                if (data.status !== 'ok') {
+                    throw new Error(data.message || '获取失败');
                 }
+                renderAlbum(data.data);
+                rendered = true;
+                // 本地是否已下载、可离线阅读（与搜索/下载管理/收藏/资源库同一判定）
+                refreshOfflineStatus();
+                // 收藏状态检查 + 收藏按钮绑定（按钮由 renderAlbum 动态生成，必须在渲染后执行）
+                initWishlist(data.data);
+                // 加载本地标签管理
+                loadAlbumTags(albumId);
+                // 异步触发标签同步（不阻塞用户交互，15s 超时）
+                window.apiFetch('/api/library/' + encodeURIComponent(albumId) + '/tags/sync', {
+                    method: 'POST',
+                    timeoutMs: 15000
+                })
+                .then(function (syncData) {
+                    if (syncData.status === 'ok' && syncData.synced > 0) {
+                        // 有新的标签同步成功，刷新显示
+                        loadAlbumTags(albumId);
+                    }
+                })
+                .catch(function () { /* 静默失败 */ });
             })
-            .catch(function () { /* 静默失败 */ });
-        })
-        .catch(function (err) {
-            if (err && err.name === 'AbortError') return; // pagehide 中止，静默
-            spinner.classList.add('d-none');
-            errorDiv.classList.remove('d-none');
-            if (err && err.isTimeout) {
-                errorDiv.textContent = '加载超时（30秒），18comic 服务器响应较慢，请稍后重试或检查网络连接';
-            } else {
-                errorDiv.textContent = '加载失败: ' + (err.message || '未知错误');
-            }
-        });
+            .catch(function (err) {
+                if (err && err.name === 'AbortError') return; // pagehide 中止，静默
+                spinner.classList.add('d-none');
+                errorDiv.classList.remove('d-none');
+                if (err && err.isTimeout) {
+                    errorDiv.textContent = '加载超时（30秒），18comic 服务器响应较慢，请稍后重试或检查网络连接';
+                } else {
+                    errorDiv.textContent = '加载失败: ' + (err.message || '未知错误');
+                }
+            });
+    }
 
     // 无封面或封面加载失败（CDN 不可达）时显示的占位，尺寸与封面一致
     var COVER_PLACEHOLDER = '<div class="detail-cover detail-cover-placeholder" role="img" aria-label="暂无封面"><i class="bi bi-image" aria-hidden="true"></i></div>';
@@ -63,6 +75,7 @@
         container.classList.remove('d-none');
 
         var onlineUrl = '/online/' + encodeURIComponent(album.album_id);
+        var localReadUrl = '/read/' + encodeURIComponent(album.album_id);
         var html = '';
 
         // 封面 + 信息：同一个 .row 内的两列，垂直居中对齐——封面比信息卡片矮时封面居中，高时信息卡片居中
@@ -80,7 +93,9 @@
         // 右侧信息
         html += '<div class="col-12 col-md-8 col-lg-9">';
         html += '<div class="card"><div class="card-body">';
-        html += '<h3 class="card-title">' + window.escapeHtml(album.title) + ' <button type="button" id="wishlist-toggle-btn" class="btn btn-sm btn-outline-warning ms-2" title="收藏"><i class="bi bi-star"></i></button></h3>';
+        html += '<h3 class="card-title">' + window.escapeHtml(album.title) + ' <button type="button" id="wishlist-toggle-btn" class="btn btn-sm wishlist-btn btn-outline-warning ms-2" title="收藏" aria-label="收藏" aria-pressed="false"><i class="bi bi-star" aria-hidden="true"></i></button></h3>';
+        // 已下载标记：本地可读时由 refreshOfflineStatus 显示（放在标题外，收藏时取的标题文字不受影响）
+        html += '<div id="album-offline-status" hidden><span class="offline-badge"><i class="bi bi-check-circle-fill" aria-hidden="true"></i> 已下载 · 可离线阅读</span></div>';
         html += '<div class="row mt-3">';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-person"></i> 作者：</strong> ' + window.escapeHtml(album.author || '-') + '</div>';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-hash"></i> 车号：</strong> <code>' + window.escapeHtml(album.album_id) + '</code></div>';
@@ -154,12 +169,14 @@
         }
         html += '</div>';
 
-        // 底部按钮（窄屏自动换行）
+        // 底部按钮（窄屏自动换行）；“阅读”只在本地可读时显示（refreshOfflineStatus）
         html += '<div class="card-footer"><div class="d-flex flex-wrap gap-2">';
         html += '<button type="button" id="download-selected-btn" class="btn btn-primary"><i class="bi bi-download"></i> 下载选中章节</button>';
         html += '<button type="button" id="download-all-btn" class="btn btn-success"><i class="bi bi-download"></i> 下载全部</button>';
+        html += '<a href="' + localReadUrl + '" id="local-read-btn" class="btn btn-primary" title="已下载：打开本地文件连续阅读，无需联网" hidden><i class="bi bi-book" aria-hidden="true"></i> 阅读</a>';
         html += '<a href="' + onlineUrl + '" id="online-read-btn" class="btn btn-outline-primary" title="页面实时从网络加载，不下载、不保存"><i class="bi bi-globe2"></i> 在线观看</a>';
-        html += '<a href="/search" class="btn btn-outline-secondary ms-auto"><i class="bi bi-arrow-left"></i> 返回搜索</a>';
+        // 从搜索/资源库/收藏等站内页面进入时后退（保留原页面的结果与滚动位置），否则跟随 href
+        html += '<a href="/search" id="detail-back" class="btn btn-outline-secondary ms-auto"><i class="bi bi-arrow-left" aria-hidden="true"></i> 返回</a>';
         html += '</div></div>';
 
         html += '</div>'; // 章节卡片结束
@@ -169,8 +186,63 @@
         var cover = container.querySelector('img.detail-cover');
         if (cover) cover.addEventListener('error', function () { cover.outerHTML = COVER_PLACEHOLDER; }, { once: true });
 
+        bindBackLink(document.getElementById('detail-back'));
+
         // 绑定事件
         bindEvents(album);
+    }
+
+    // ── 返回 ──
+    // 同一标签页里从站内页面进入（后面还有历史）→ 浏览器后退，回到原来的搜索结果/资源库/收藏页；
+    // 否则跟随 href：
+    //   1. 从资源库/收藏（在新标签页打开详情）或某次搜索进来 → 回到那一页（地址栏里带着筛选/搜索条件）
+    //   2. 本标签页最近一次搜索（与顶部导航“搜索”同一来源：nav-memory.js）
+    //   3. /search
+    function referrerListPage() {
+        try {
+            var ref = new URL(document.referrer);
+            if (ref.origin !== location.origin) return '';
+            if (ref.pathname === '/library' || ref.pathname === '/wishlist') return ref.pathname + ref.search;
+            if (ref.pathname === '/search' && new URLSearchParams(ref.search).get('keyword')) return ref.pathname + ref.search;
+        } catch (_) { /* 没有 referrer */ }
+        return '';
+    }
+
+    function bindBackLink(link) {
+        if (!link) return;
+        var from = referrerListPage();
+        if (from) {
+            link.setAttribute('href', from);
+        } else {
+            var lastSearch = window.navMemory && window.navMemory.lastUrl('/search');
+            if (lastSearch) link.setAttribute('href', lastSearch); // 没有记住的搜索：保持 /search
+        }
+        if (window.readingNav && typeof window.readingNav.bindBack === 'function') {
+            window.readingNav.bindBack(link);
+        }
+    }
+
+    // ── 本地可读（已下载）状态 ──
+    function setOfflineStatus(readable) {
+        var marker = document.getElementById('album-offline-status');
+        var readBtn = document.getElementById('local-read-btn');
+        if (marker) marker.hidden = !readable;
+        if (readBtn) readBtn.hidden = !readable;
+    }
+
+    function refreshOfflineStatus() {
+        window.apiFetch('/api/preview/available', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ album_ids: [String(albumId)] }),
+            timeoutMs: 15000,
+            abortKey: 'detail-offline-status'
+        })
+        .then(function (data) {
+            if (data.status !== 'ok') return;
+            setOfflineStatus((data.readable || []).map(String).indexOf(String(albumId)) >= 0);
+        })
+        .catch(function () { /* 静默：保持当前显示，不影响详情页其他功能 */ });
     }
 
     function bindEvents(album) {
@@ -239,18 +311,26 @@
     // 注意：收藏按钮由 renderAlbum() 动态生成，状态检查与事件绑定必须在渲染完成后执行。
     //（原实现在脚本加载时立即执行，此时按钮尚不存在，查询/绑定均不生效，属于已修复的死代码；
     //  原实现的添加收藏分支还引用了作用域内不存在的 album 变量，会抛 ReferenceError）
+    // 收藏按钮的两种状态只在这里切换：页面加载时查到“已收藏”与点击收藏后得到完全相同的按钮
+    //（原来加载时只加了 btn-warning、没去掉 btn-outline-warning，实心星与底色同为 --warning，星形看不见）
+    function setWishlistButton(btn, starred) {
+        var icon = btn.querySelector('i');
+        if (icon) icon.className = starred ? 'bi bi-star-fill' : 'bi bi-star';
+        btn.classList.toggle('btn-warning', starred);
+        btn.classList.toggle('btn-outline-warning', !starred);
+        // 切换按钮：名称固定为“收藏”，状态只由 aria-pressed 表达（名称跟着变会读成“取消收藏，已按下”）；title 说明点击效果
+        btn.title = starred ? '取消收藏' : '收藏';
+        btn.setAttribute('aria-label', '收藏');
+        btn.setAttribute('aria-pressed', starred ? 'true' : 'false');
+    }
+
     function initWishlist(album) {
         // 检查当前条目是否已收藏（15s 超时）
         window.apiFetch('/api/wishlist/' + albumId, { timeoutMs: 15000 })
             .then(function (data) {
                 if (data.status === 'ok' && data.item) {
                     var b = document.getElementById('wishlist-toggle-btn');
-                    if (b) {
-                        var icon = b.querySelector('i');
-                        icon.className = 'bi bi-star-fill';
-                        b.classList.add('btn-warning');
-                        b.title = '取消收藏';
-                    }
+                    if (b) setWishlistButton(b, true);
                 }
             })
             .catch(function () { /* 静默 */ });
@@ -259,16 +339,12 @@
         var btn = document.getElementById('wishlist-toggle-btn');
         if (!btn) return;
         btn.addEventListener('click', function () {
-            var icon = btn.querySelector('i');
-            var isStarred = icon.classList.contains('bi-star-fill');
+            var isStarred = btn.classList.contains('btn-warning');
             if (isStarred) {
                 window.apiFetch('/api/wishlist/' + albumId, { method: 'DELETE', timeoutMs: 15000 })
                     .then(function (data) {
                         if (data.status === 'ok') {
-                            icon.className = 'bi bi-star';
-                            btn.classList.remove('btn-warning');
-                            btn.classList.add('btn-outline-warning');
-                            btn.title = '收藏';
+                            setWishlistButton(btn, false);
                             if (typeof showToast === 'function') showToast('已取消收藏', 'info');
                         } else {
                             if (typeof showToast === 'function') showToast(data.message || '取消收藏失败', 'danger');
@@ -280,7 +356,7 @@
                     });
             } else {
                 var titleEl = document.querySelector('.card-title');
-                var title = titleEl ? titleEl.textContent.trim() : albumId;
+                var title = (album && album.title) || (titleEl ? titleEl.textContent.trim() : albumId);
                 var author = (album && album.author) || '';
                 var coverUrl = (album && album.cover) || '';
                 window.apiFetch('/api/wishlist', {
@@ -296,10 +372,7 @@
                 })
                 .then(function (data) {
                     if (data.status === 'ok') {
-                        icon.className = 'bi bi-star-fill';
-                        btn.classList.remove('btn-outline-warning');
-                        btn.classList.add('btn-warning');
-                        btn.title = '取消收藏';
+                        setWishlistButton(btn, true);
                         if (typeof showToast === 'function') showToast('已添加收藏', 'success');
                     } else {
                         if (typeof showToast === 'function') showToast(data.message || '收藏失败', 'danger');
@@ -317,60 +390,115 @@
     //  标签管理功能
     // ══════════════════════════════════════════════════════════
 
+    // 标签区的按钮与输入框：#album-content 常驻于模板，委托监听器只绑定一次
+    container.addEventListener('click', function (event) {
+        var target = event.target.closest('#album-tags-manager [data-action]');
+        if (!target || target.disabled) return;
+        var action = target.getAttribute('data-action');
+        if (action === 'remove-tag') {
+            removeAlbumTag(albumId, target.dataset.tag);
+        } else if (action === 'add-tag') {
+            addCustomTag(albumId);
+        } else if (action === 'sync-tags') {
+            syncAlbumTags(albumId);
+        }
+    });
+    container.addEventListener('keydown', function (event) {
+        // 输入法组字中的回车只是确认候选词，不提交
+        if (event.key !== 'Enter' || event.isComposing || event.target.id !== 'tag-add-input') return;
+        event.preventDefault();
+        addCustomTag(albumId);
+    });
+
     // 加载专辑标签（含来源信息，15s 超时）
     function loadAlbumTags(albumId) {
-        var container = document.getElementById('album-tags-manager');
-        if (!container) return;
-        container.innerHTML = '<div class="text-muted small"><i class="bi bi-arrow-repeat"></i> 加载标签中...</div>';
+        var box = document.getElementById('album-tags-manager');
+        if (!box) return;
+        box.innerHTML = '<div class="text-muted small"><i class="bi bi-arrow-repeat"></i> 加载标签中...</div>';
 
         window.apiFetch('/api/library/' + encodeURIComponent(albumId) + '/tags', { timeoutMs: 15000 })
             .then(function (data) {
                 if (data.status !== 'ok') {
-                    container.innerHTML = '<div class="text-muted small">标签服务暂不可用</div>';
+                    box.innerHTML = '<div class="text-muted small">标签服务暂不可用</div>';
                     return;
                 }
-                renderTagManager(albumId, data.tags || []);
+                renderTagManager(data.tags || []);
             })
             .catch(function (err) {
                 if (err && err.name === 'AbortError') return; // pagehide 中止，静默
-                container.innerHTML = '<div class="text-muted small">标签服务暂不可用</div>';
+                box.innerHTML = '<div class="text-muted small">标签服务暂不可用</div>';
             });
     }
 
-    function renderTagManager(albumId, tags) {
-        var container = document.getElementById('album-tags-manager');
-        if (!container) return;
+    function createEl(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    }
 
-        var html = '<div class="tag-edit-area">';
-        html += '<div class="mb-1"><strong><i class="bi bi-tags"></i> 本地标签</strong> <span class="text-muted small">（点击 ❌ 删除）</span></div>';
+    function actionButton(className, action, iconClass, label, title) {
+        var button = createEl('button', className);
+        button.type = 'button';
+        button.setAttribute('data-action', action);
+        if (title) button.title = title;
+        button.appendChild(createEl('i', 'bi ' + iconClass)).setAttribute('aria-hidden', 'true');
+        button.appendChild(document.createTextNode(' ' + label));
+        return button;
+    }
+
+    // 标签名是远程/用户数据：只经 textContent / dataset / setAttribute 进入 DOM
+    function renderTagManager(tags) {
+        var box = document.getElementById('album-tags-manager');
+        if (!box) return;
+
+        var area = createEl('div', 'tag-edit-area');
+
+        var heading = createEl('div', 'mb-1');
+        var strong = createEl('strong');
+        strong.appendChild(createEl('i', 'bi bi-tags')).setAttribute('aria-hidden', 'true');
+        strong.appendChild(document.createTextNode(' 本地标签'));
+        heading.appendChild(strong);
+        heading.appendChild(document.createTextNode(' '));
+        heading.appendChild(createEl('span', 'text-muted small', '（点击 × 删除）'));
+        area.appendChild(heading);
 
         // 标签列表
-        html += '<div class="d-flex flex-wrap gap-1 mb-2" id="local-tags-list">';
+        var list = createEl('div', 'd-flex flex-wrap gap-1 mb-2');
+        list.id = 'local-tags-list';
         if (tags.length === 0) {
-            html += '<span class="text-muted small">暂无标签</span>';
+            list.appendChild(createEl('span', 'text-muted small', '暂无标签'));
         } else {
-            for (var i = 0; i < tags.length; i++) {
-                var tag = tags[i];
-                var sourceClass = tag.source === 'user' ? 'tag-source-user badge' : 'tag-source-auto badge';
-                html += '<span class="' + sourceClass + ' me-1" style="font-size:0.75rem;padding:0.2rem 0.5rem;border-radius:10px;">'
-                    + window.escapeHtml(tag.tag)
-                    + ' <span class="tag-edit-btn" onclick="removeAlbumTag(\'' + encodeURIComponent(albumId) + '\',\'' + window.escapeHtmlAttr(tag.tag) + '\')" title="删除标签">&times;</span>'
-                    + '</span>';
-            }
+            tags.forEach(function (tag) {
+                var name = String(tag.tag);
+                var chip = createEl('span', (tag.source === 'user' ? 'tag-source-user' : 'tag-source-auto') + ' badge tag-chip me-1', name);
+                var remove = createEl('button', 'tag-edit-btn');
+                remove.type = 'button';
+                remove.setAttribute('data-action', 'remove-tag');
+                remove.dataset.tag = name;
+                remove.title = '删除标签';
+                remove.setAttribute('aria-label', '删除标签 ' + name);
+                remove.appendChild(createEl('span', '', '×')).setAttribute('aria-hidden', 'true');
+                chip.appendChild(remove);
+                list.appendChild(chip);
+            });
         }
-        html += '</div>';
+        area.appendChild(list);
 
         // 添加标签
-        html += '<div class="tag-edit-row">';
-        html += '<input type="text" id="tag-add-input" class="form-control form-control-sm" placeholder="输入标签名称..."'
-            + ' onkeydown="if(event.key===\'Enter\') addCustomTag(\'' + encodeURIComponent(albumId) + '\')"'
-            + ' maxlength="50">';
-        html += '<button class="btn btn-outline-success btn-sm" onclick="addCustomTag(\'' + encodeURIComponent(albumId) + '\')"><i class="bi bi-plus-lg"></i> 添加</button>';
-        html += '<button class="btn btn-outline-info btn-sm" onclick="syncAlbumTags(\'' + encodeURIComponent(albumId) + '\')" title="从 18comic 同步最新标签"><i class="bi bi-arrow-repeat"></i> 同步</button>';
-        html += '</div>';
+        var row = createEl('div', 'tag-edit-row');
+        var input = createEl('input', 'form-control form-control-sm');
+        input.type = 'text';
+        input.id = 'tag-add-input';
+        input.placeholder = '输入标签名称...';
+        input.maxLength = 50;
+        input.setAttribute('aria-label', '新标签名称');
+        row.appendChild(input);
+        row.appendChild(actionButton('btn btn-outline-success btn-sm', 'add-tag', 'bi-plus-lg', '添加'));
+        row.appendChild(actionButton('btn btn-outline-info btn-sm', 'sync-tags', 'bi-arrow-repeat', '同步', '从 18comic 同步最新标签'));
+        area.appendChild(row);
 
-        html += '</div>'; // tag-edit-area
-        container.innerHTML = html;
+        box.replaceChildren(area);
     }
 
     // 添加自定义标签
@@ -387,7 +515,7 @@
             return;
         }
 
-        var btn = input.nextElementSibling;
+        var btn = document.querySelector('#album-tags-manager [data-action="add-tag"]');
         if (btn) btn.disabled = true;
 
         window.apiFetch('/api/library/' + encodeURIComponent(albumId) + '/tags', {
@@ -416,6 +544,7 @@
 
     // 删除标签
     function removeAlbumTag(albumId, tag) {
+        if (!tag) return;
         if (!confirm('确定要删除标签 "' + tag + '" 吗？')) return;
         window.apiFetch('/api/library/' + encodeURIComponent(albumId) + '/tags', {
             method: 'DELETE',
@@ -439,7 +568,7 @@
 
     // 同步标签（从 18comic）
     function syncAlbumTags(albumId) {
-        var btn = document.querySelector('#album-tags-manager .btn-outline-info');
+        var btn = document.querySelector('#album-tags-manager [data-action="sync-tags"]');
         if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 同步中...'; }
 
         window.apiFetch('/api/library/' + encodeURIComponent(albumId) + '/tags/sync', {
@@ -459,13 +588,20 @@
             if (typeof showToast === 'function') showToast(toastErr(err, '同步失败'), 'danger');
         })
         .finally(function () {
-            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-arrow-repeat"></i> 同步'; }
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-arrow-repeat" aria-hidden="true"></i> 同步'; }
         });
     }
 
-    // 暴露给 onclick
-    window.addCustomTag = addCustomTag;
-    window.removeAlbumTag = removeAlbumTag;
-    window.syncAlbumTags = syncAlbumTags;
-    window.loadAlbumTags = loadAlbumTags;
+    loadAlbum();
+
+    // 从 bfcache 返回（如 详情 → 下载管理 → 后退）：重新判断是否已下载；
+    // 离开时详情请求被 pagehide 中止、页面仍停在加载中的，重新加载
+    window.addEventListener('pageshow', function (event) {
+        if (!event.persisted) return;
+        if (rendered) {
+            refreshOfflineStatus();
+        } else if (errorDiv.classList.contains('d-none')) {
+            loadAlbum();
+        }
+    });
 })(albumId);

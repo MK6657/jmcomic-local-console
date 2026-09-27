@@ -110,6 +110,11 @@ code {
 /* ── Tables ── */
 .table {
   color: var(--text-primary);
+  /* 单元格的文字颜色取自这些变量（Bootstrap 默认 #000），不跟随上面的 color */
+  --bs-table-color: var(--text-primary);
+  --bs-table-hover-color: var(--text-primary);
+  --bs-table-striped-color: var(--text-primary);
+  --bs-table-active-color: var(--text-primary);
   --bs-table-bg: transparent;
   --bs-table-border-color: var(--border-light);
   --bs-table-hover-bg: var(--bg-hover);
@@ -407,6 +412,52 @@ code {
   --bs-btn-active-border-color: var(--border);
   --bs-btn-disabled-color: var(--text-secondary);
   --bs-btn-disabled-border-color: var(--border);
+  --bs-btn-focus-shadow-rgb: 59, 130, 246;
+}
+/* 其余描边按钮（收藏表格的 下载 / 详情 / 移除、收藏星形、暂停、重试等）：聚焦/按下时与上方 :hover 一样
+   填充对应的状态色、白字，光晕统一主色蓝。原来露出 Bootstrap 的 #198754 / #0dcaf0（黑字）/ #dc3545 / #ffc107（黑星） */
+.btn-outline-success {
+  --bs-btn-hover-color: var(--text-on-accent);
+  --bs-btn-hover-bg: var(--success);
+  --bs-btn-hover-border-color: var(--success);
+  --bs-btn-active-color: var(--text-on-accent);
+  --bs-btn-active-bg: var(--success);
+  --bs-btn-active-border-color: var(--success);
+  --bs-btn-disabled-color: var(--success);
+  --bs-btn-disabled-border-color: var(--success);
+  --bs-btn-focus-shadow-rgb: 59, 130, 246;
+}
+.btn-outline-info {
+  --bs-btn-hover-color: var(--text-on-accent);
+  --bs-btn-hover-bg: var(--info);
+  --bs-btn-hover-border-color: var(--info);
+  --bs-btn-active-color: var(--text-on-accent);
+  --bs-btn-active-bg: var(--info);
+  --bs-btn-active-border-color: var(--info);
+  --bs-btn-disabled-color: var(--info);
+  --bs-btn-disabled-border-color: var(--info);
+  --bs-btn-focus-shadow-rgb: 59, 130, 246;
+}
+.btn-outline-danger {
+  --bs-btn-hover-color: var(--text-on-accent);
+  --bs-btn-hover-bg: var(--error);
+  --bs-btn-hover-border-color: var(--error);
+  --bs-btn-active-color: var(--text-on-accent);
+  --bs-btn-active-bg: var(--error);
+  --bs-btn-active-border-color: var(--error);
+  --bs-btn-disabled-color: var(--error);
+  --bs-btn-disabled-border-color: var(--error);
+  --bs-btn-focus-shadow-rgb: 59, 130, 246;
+}
+.btn-outline-warning {
+  --bs-btn-hover-color: var(--text-on-accent);
+  --bs-btn-hover-bg: var(--warning);
+  --bs-btn-hover-border-color: var(--warning);
+  --bs-btn-active-color: var(--text-on-accent);
+  --bs-btn-active-bg: var(--warning);
+  --bs-btn-active-border-color: var(--warning);
+  --bs-btn-disabled-color: var(--warning);
+  --bs-btn-disabled-border-color: var(--warning);
   --bs-btn-focus-shadow-rgb: 59, 130, 246;
 }
 
@@ -1292,4 +1343,244 @@ code {
 }
 @media (max-width: 576px) {
   .log-entry { padding: 8px; }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   已下载 / 可离线阅读标记（搜索 / 详情 / 下载管理，2026-09-26 新增）
+   + 详情页标签的 × 删除按钮。只追加、不改动上方规则。
+   颜色只用 --success / --success-bg / --text-on-accent（× 沿用上方 .tag-edit-btn 的 --error）；
+   间距 4/8；字号 12px；圆角 --radius-sm / --radius-xl；无动画。
+   ════════════════════════════════════════════════════════════════ */
+.offline-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.75;
+  color: var(--success);
+  background: var(--success-bg);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+/* 搜索结果卡片：盖在封面左上角，实心底色在任何封面上都看得清 */
+.album-card .offline-badge--cover {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  color: var(--text-on-accent);
+  background: var(--success);
+  box-shadow: var(--shadow-sm);
+}
+/* 详情页本地标签：× 删除为真实按钮（原为 span + 内联 onclick） */
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: var(--radius-xl);
+}
+.tag-chip .tag-edit-btn {
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+/* 下载管理 · 已完成任务：标题/路径与按钮组同排，放不下时按钮组整体换到下一行并自行换行，
+   按钮文字不被长路径挤成竖排（16rem 为信息列的最小舒适宽度，属布局尺寸） */
+.job-card .job-card-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+.job-card .job-card-info {
+  flex: 1 1 16rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.job-card .job-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.job-card .job-card-actions .btn { white-space: nowrap; }
+/* 已完成任务的状态徽章（CBZ / 已完成 / 可离线阅读 或 文件已删除）跟着标题，不随右侧按钮多少左右移动 */
+.job-card .job-card-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   资源库 / 收藏清单：可离线阅读标记、阅读按钮、作者筛选、标签 × 按钮（2026-09-26 新增）
+   只追加、不改动上方规则。颜色只用 eye-care token；“已下载”标记复用上方 .offline-badge，
+   作者筛选提示复用 .tag-cloud-item.active；间距 4/8/16；字号不小于 12px；无动画。
+   ════════════════════════════════════════════════════════════════ */
+/* 卡片操作行：状态徽章 + 按钮组（详情 / 收藏 / 阅读），放不下时按钮组整体换到下一行 */
+.library-card .card-actions {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.library-card .card-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.library-card .card-actions .btn { font-size: 12px; }
+/* 极窄的卡片里允许标记内换行，不撑破卡片 */
+.library-card .card-actions .offline-badge { white-space: normal; }
+/* “文件已删除”：下载过但本地文件已不在。弱化但仍清楚可读：
+   --text-secondary 在 --bg-tertiary 上约 4.7:1（原为白字灰底再 0.7 透明度，约 2.2:1） */
+.badge.status-badge-muted {
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+/* 卡片标签：文字与 × 不小于 12px；× 是真正的按钮（原为 span + 内联 onclick） */
+.library-card .card-tags .tag-badge { font-size: 12px; }
+.library-card .card-tags .tag-badge .tag-remove {
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+.library-card .card-tags .tag-badge .tag-remove:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+/* 卡片作者行：图标与名字同一行起排，长名字在图标右侧换行（不把图标单独留在上一行） */
+.library-card .card-author {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+/* 卡片作者名：点击只看该作者的作品 */
+.library-author-link {
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.library-author-link:hover {
+  color: var(--primary);
+  text-decoration: underline;
+}
+.library-author-link:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* 当前作者筛选（筛选栏下方），带 ✕ 一键清除 */
+.library-active-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.library-active-filters[hidden] { display: none; }
+.library-active-filters .tag-cloud-item { font-size: 14px; }
+
+/* 收藏清单：状态徽章、操作按钮（阅读 / 下载 / 详情 / 移除）之间留 4px，换行时同样 */
+.wishlist-status,
+.wishlist-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+/* 窄屏表格：按钮整个换行，不把“阅读”拆成一字一行 */
+.wishlist-actions .btn { white-space: nowrap; }
+/* 表格列窄时“已下载 · 可离线阅读”只在“·”后换行（两段各自不断行），不把状态列撑到一行宽 */
+.wishlist-status .offline-badge { white-space: normal; }
+
+/* ════════════════════════════════════════════════════════════════
+   收藏星形按钮 + 收藏清单表格布局（2026-09-26 追加）。只追加、不改动上方规则。
+   颜色只用 eye-care token；间距 4/8；字号不小于 12px；无动画。
+   ════════════════════════════════════════════════════════════════ */
+/* 星形图标跟随按钮文字颜色：上方把描边状态的星形固定成 --warning，
+   悬停时按钮底色也变成 --warning，星形就看不见了；实心状态本来就是白色 */
+.wishlist-btn.btn-outline-warning i,
+.wishlist-btn.btn-warning i { color: inherit; }
+/* 已收藏（实心）悬停/按下时保持 --warning 底色：上方 .btn-warning 没有悬停规则，
+   会落到 Bootstrap 的亮黄色，白色星形几乎看不清 */
+.wishlist-btn.btn-warning:hover,
+.wishlist-btn.btn-warning:focus-visible,
+.wishlist-btn.btn-warning:active {
+  color: var(--text-on-accent);
+  background: var(--warning);
+  border-color: var(--warning);
+}
+/* 同上，给 Bootstrap 的 :focus-visible / :active 读的变量：聚焦光晕是主色蓝，不是 Bootstrap 的黄 (217,164,6)；
+   描边状态（未收藏）见上方 .btn-outline-warning */
+.wishlist-btn.btn-warning {
+  --bs-btn-hover-color: var(--text-on-accent);
+  --bs-btn-hover-bg: var(--warning);
+  --bs-btn-hover-border-color: var(--warning);
+  --bs-btn-active-color: var(--text-on-accent);
+  --bs-btn-active-bg: var(--warning);
+  --bs-btn-active-border-color: var(--warning);
+  --bs-btn-focus-shadow-rgb: 59, 130, 246;
+}
+
+/* 收藏清单表格：表头不断行；车号不在数字中间断开 */
+.wishlist-table > thead > tr > th { white-space: nowrap; }
+.wishlist-table .wishlist-col-check { width: 40px; }
+.wishlist-table .wishlist-col-id { white-space: nowrap; }
+/* 作者列占一个固定比例，其余宽度留给标题 */
+.wishlist-table .wishlist-col-author { width: 15%; }
+/* 标题/作者：不带空格的长串也能在任意位置换行（anywhere 会计入列的最小宽度，break-word 不会），
+   同时各保留一个最小宽度，窄屏时表格宁可在 .table-responsive 里横向滚动，也不把它们挤成一字一行
+   （160px / 96px 为列的最小可读宽度，属布局尺寸） */
+.wishlist-table .wishlist-title,
+.wishlist-table .wishlist-author { overflow-wrap: anywhere; }
+.wishlist-table .wishlist-title { min-width: 160px; }
+.wishlist-table .wishlist-author { min-width: 96px; }
+/* 状态徽章：徽章之间可以换行，徽章里的文字不断行（表格里用短标签“可离线阅读”） */
+.wishlist-status .badge,
+.wishlist-status .offline-badge { white-space: nowrap; }
+/* 徽章里给读屏的“已下载 · ”是绝对定位的 .visually-hidden：让它相对徽章定位，
+   否则它按页面定位，窄屏时会越过 .table-responsive 把整页撑出横向滚动 */
+.wishlist-status .offline-badge { position: relative; }
+/* 宽屏：操作按钮（下载 / 详情 / 移除 / 阅读）保持一行；更窄时整个按钮换行（见上方 .wishlist-actions） */
+@media (min-width: 992px) {
+  .wishlist-table .wishlist-col-actions { width: 200px; }
+  .wishlist-table .wishlist-actions { flex-wrap: nowrap; }
+}
+/* 更窄（768–991px 半屏窗口、平板）：Bootstrap 容器只有 696px，表格却至少要 775px，整列“操作”落在滚动框外，
+   按钮还一个一行地竖着排。这一档不显示“添加时间”列（仍可按添加时间排序），单元格左右内边距取 8px（sm），
+   操作区留出一行两个按钮的宽度（移除 + 阅读 ≈ 100px，属布局尺寸）：四个按钮最多两行，表格正好放进容器。
+   手机宽度下表格仍在 .table-responsive 里横向滚动，只是更窄 */
+@media (max-width: 991.98px) {
+  .wishlist-table .wishlist-col-added { display: none; }
+  .wishlist-table > thead > tr > th,
+  .wishlist-table > tbody > tr > td {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .wishlist-table .wishlist-actions { min-width: 100px; }
 }

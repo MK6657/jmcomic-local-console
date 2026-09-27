@@ -40,7 +40,7 @@
                     </a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/search' %}active{% endif %}" href="/search">
+                    <a class="nav-link {% if request.path == '/search' %}active{% endif %}" href="/search" data-nav-memory="/search">
                         <i class="bi bi-search"></i> 搜索
                     </a>
                 </li>
@@ -50,12 +50,12 @@
                     </a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/wishlist' %}active{% endif %}" href="/wishlist">
+                    <a class="nav-link {% if request.path == '/wishlist' %}active{% endif %}" href="/wishlist" data-nav-memory="/wishlist">
                         <i class="bi bi-bookmark-heart"></i> 收藏
                     </a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/library' %}active{% endif %}" href="/library">
+                    <a class="nav-link {% if request.path == '/library' %}active{% endif %}" href="/library" data-nav-memory="/library">
                         <i class="bi bi-collection"></i> 资源库
                     </a>
                 </li>
@@ -94,6 +94,8 @@
 
 <!-- Bootstrap 5 JS (本地) -->
 <script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+<!-- 导航回到上次离开时的搜索结果 / 收藏 / 资源库（本标签页），须在各页面脚本之前 -->
+<script src="{{ asset_url('js/nav-memory.js') }}"></script>
 
 <!-- 全局 Toast 通知函数 -->
 <script>

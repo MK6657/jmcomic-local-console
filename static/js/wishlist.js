@@ -1,92 +1,294 @@
 // ── wishlist.js — 收藏清单页面逻辑 ──
-// 使用 window.escapeHtml / window.apiFetch (来自 utils.js)
+// 使用 window.apiFetch (来自 utils.js)，showToast 来自 base.html
 // 请求统一走 apiFetch（自带 AbortController/超时/pagehide 清理）
+// 表格行用 DOM API 构建：标题/作者来自 18comic 或导入文件，只走 textContent / dataset；
+// 按钮事件全部委托（data-action），不拼接内联 onclick。
+// 搜索词、下载状态筛选、排序与页码同步到地址栏：刷新、从阅读页返回后保持不变。
 (function () {
   'use strict';
 
+  var DEFAULT_SORT = 'added_at';
   var currentPage = 1;
   var pageSize = 50;
   var allItems = [];
   var currentQuery = '';
-  var currentSort = 'added_at';
+  var currentStatus = '';
+  var currentSort = DEFAULT_SORT;
   var _refreshTimer = null;
 
+  var tbody = document.getElementById('wishlist-body');
+  var searchInput = document.getElementById('wishlist-search');
+  var statusSelect = document.getElementById('wishlist-status');
+  var sortSelect = document.getElementById('wishlist-sort');
+  var selectAll = document.getElementById('select-all');
+
+  // 下拉框文字（后面附上各状态的数量）
+  var STATUS_LABELS = {
+    '': '状态：全部',
+    'none': '未下载',
+    'missing': '下载过 · 文件已删除',
+    'active': '排队中 / 下载中',
+    'readable': '已下载 · 可离线阅读',
+    'failed': '失败'
+  };
+
+  function toast(message, type) {
+    if (typeof showToast === 'function') showToast(message, type);
+  }
+
+  // ── DOM 小工具：文本一律走 textContent ──
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+
+  function icon(name) {
+    var i = el('i', 'bi ' + name);
+    i.setAttribute('aria-hidden', 'true');
+    return i;
+  }
+
+  function badge(className, text, title) {
+    var b = el('span', 'badge ' + className, text);
+    if (title) b.title = title;
+    return b;
+  }
+
+  // className：列的类名（style.css .wishlist-table 按列设置宽度与换行方式）
+  function cell(child, text, className) {
+    var td = el('td', className, text);
+    if (child) td.appendChild(child);
+    return td;
+  }
+
+  function showTableMessage(text, className) {
+    var td = el('td', 'text-center py-4 ' + (className || 'text-muted'), text);
+    td.colSpan = 7;
+    var tr = el('tr');
+    tr.appendChild(td);
+    tbody.textContent = '';
+    tbody.appendChild(tr);
+  }
+
+  // ── 地址栏状态 ──
+  function setSelect(select, value, fallback) {
+    select.value = value;
+    if (select.value !== value) select.value = fallback; // 地址栏里的值不在选项中 → 默认
+  }
+
+  function readUrlState() {
+    var params;
+    try { params = new URLSearchParams(window.location.search); } catch (e) { return; }
+    searchInput.value = (params.get('q') || '').trim();
+    setSelect(statusSelect, params.get('status') || '', '');
+    setSelect(sortSelect, params.get('sort') || DEFAULT_SORT, DEFAULT_SORT);
+    currentQuery = searchInput.value;
+    currentStatus = statusSelect.value;
+    currentSort = sortSelect.value;
+    var page = parseInt(params.get('page'), 10);
+    currentPage = page > 0 ? page : 1;
+  }
+
+  function writeUrlState() {
+    var params = new URLSearchParams();
+    if (currentQuery) params.set('q', currentQuery);
+    if (currentStatus) params.set('status', currentStatus);
+    if (currentSort && currentSort !== DEFAULT_SORT) params.set('sort', currentSort);
+    if (currentPage > 1) params.set('page', String(currentPage));
+    var qs = params.toString();
+    var url = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+    if (url === window.location.pathname + window.location.search + window.location.hash) return;
+    try { window.history.replaceState(window.history.state, '', url); } catch (e) { /* 忽略 */ }
+  }
+
+  function updateStatusCounts(counts) {
+    if (!counts) return;
+    var all = 0;
+    Object.keys(counts).forEach(function (k) { all += counts[k] || 0; });
+    for (var i = 0; i < statusSelect.options.length; i++) {
+      var option = statusSelect.options[i];
+      var label = STATUS_LABELS[option.value];
+      if (label === undefined) continue;
+      var n = option.value ? (counts[option.value] || 0) : all;
+      option.textContent = label + '（' + n + '）';
+    }
+  }
+
   // ── 加载收藏列表 ──
-  async function loadWishlist(page) {
+  async function loadWishlist(page, opts) {
+    opts = opts || {};
     page = page || currentPage;
-    var q = currentQuery;
-    var sort = currentSort;
-    var tbody;
+    currentPage = page;
+    writeUrlState();
     try {
       var url = '/api/wishlist?page=' + page + '&page_size=' + pageSize;
-      if (q) url += '&q=' + encodeURIComponent(q);
-      if (sort) url += '&sort=' + encodeURIComponent(sort);
+      if (currentQuery) url += '&q=' + encodeURIComponent(currentQuery);
+      if (currentStatus) url += '&status=' + encodeURIComponent(currentStatus);
+      if (currentSort) url += '&sort=' + encodeURIComponent(currentSort);
       // abortKey：翻页/自动刷新时自动中止上一次未完成的列表请求
       var data = await window.apiFetch(url, { timeoutMs: 15000, abortKey: 'wishlist-list' });
-      tbody = document.getElementById('wishlist-body');
       if (data.status !== 'ok') {
-        // 显示错误状态在表格中
-        if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">加载失败: ' + window.escapeHtml(data.message || '未知错误') + '</td></tr>';
+        showTableMessage('加载失败: ' + (data.message || '未知错误'));
         return;
       }
 
       allItems = data.items || [];
       var total = data.total || 0;
-      currentPage = data.page || 1;
+      updateStatusCounts(data.group_counts);
+
+      if (allItems.length === 0 && total > 0 && page > 1 && !opts.clamped) {
+        // 移除/筛选后当前页超出末页（或地址栏里是旧页码）→ 回到最后一页
+        return loadWishlist(Math.ceil(total / pageSize), { clamped: true });
+      }
+      currentPage = data.page || page;
+      writeUrlState();
 
       if (allItems.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">收藏列表为空' + (currentQuery ? '（搜索无结果）' : '') + '</td></tr>';
+        showTableMessage((currentQuery || currentStatus) ? '没有符合当前搜索或筛选条件的收藏' : '收藏列表为空');
         document.getElementById('wishlist-pagination').classList.add('d-none');
+        updateBatchActions();
         return;
       }
 
-      var statusMap = {
-        'none': '<span class="badge bg-secondary">未下载</span>',
-        'queued': '<span class="badge bg-info text-dark">排队中</span>',
-        'downloading': '<span class="badge bg-primary">下载中</span>',
-        'completed': '<span class="badge bg-success">已完成</span>',
-        'failed': '<span class="badge bg-danger">失败</span>',
-      };
-
-      var html = '';
-      for (var i = 0; i < allItems.length; i++) {
-        var item = allItems[i];
-        html += '<tr>'
-          + '<td><input type="checkbox" class="item-checkbox" value="' + window.escapeHtml(item.album_id) + '"></td>'
-          + '<td><a href="/album/' + encodeURIComponent(item.album_id) + '" target="_blank" rel="noopener noreferrer">' + window.escapeHtml(item.album_id) + '</a></td>'
-          + '<td>' + window.escapeHtml(item.title || '-') + '</td>'
-          + '<td>' + window.escapeHtml(item.author || '-') + '</td>'
-          + '<td>' + (statusMap[item.download_status] || window.escapeHtml(item.download_status) || '<span class="badge bg-secondary">未下载</span>') + '</td>'
-          + '<td>' + (item.added_at ? new Date(item.added_at).toLocaleString() : '-') + '</td>'
-          + '<td>'
-          + '<button class="btn btn-sm btn-outline-success" onclick="downloadSingle(\'' + encodeURIComponent(item.album_id) + '\')" title="下载">'
-          + '<i class="bi bi-download"></i>'
-          + '</button>'
-          + '<a href="/album/' + encodeURIComponent(item.album_id) + '" class="btn btn-sm btn-outline-info" target="_blank" rel="noopener noreferrer" title="详情">'
-          + '<i class="bi bi-info-circle"></i>'
-          + '</a>'
-          + '<button class="btn btn-sm btn-outline-danger" onclick="removeSingle(\'' + encodeURIComponent(item.album_id) + '\')" title="移除">'
-          + '<i class="bi bi-trash"></i>'
-          + '</button>'
-          + '</td>'
-          + '</tr>';
-      }
-      tbody.innerHTML = html;
-
-      // 分页
-      renderPagination(total, page);
+      renderRows(allItems);
+      renderPagination(total, currentPage);
       updateBatchActions();
+      // 从导航回到收藏：地址与离开时相同就回到原来的滚动位置（只在第一次画出列表时）
+      if (window.navMemory) window.navMemory.restoreScroll();
     } catch (e) {
       if (e && e.name === 'AbortError') return; // pagehide/新请求中止，静默
-      tbody = document.getElementById('wishlist-body');
-      if (!tbody) return;
       if (e && e.status) {
         // HTTP 错误：保持原有「加载失败: 服务端消息」文案
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">加载失败: ' + window.escapeHtml(e.message || '未知错误') + '</td></tr>';
+        showTableMessage('加载失败: ' + (e.message || '未知错误'));
       } else {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-danger py-4">网络错误: ' + window.escapeHtml(e.message) + '</td></tr>';
+        showTableMessage('网络错误: ' + ((e && e.message) || ''), 'text-danger');
       }
     }
+  }
+
+  function renderRows(items) {
+    // 自动刷新会重建表格：保留已勾选的行
+    var keep = {};
+    getSelectedIds().forEach(function (id) { keep[id] = true; });
+    var focus = rememberKeyboardFocus();
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < items.length; i++) {
+      frag.appendChild(buildRow(items[i], !!keep[String(items[i].album_id)]));
+    }
+    tbody.textContent = '';
+    tbody.appendChild(frag);
+    restoreKeyboardFocus(focus);
+  }
+
+  // 重建表格前记住键盘焦点（哪一行的第几个控件），重建后还回去。
+  // 例如用键盘点“阅读”、再返回时列表会立即重新加载，焦点不会被甩回页面开头；鼠标点出来的焦点不管
+  var FOCUSABLE = 'a[href], button, input';
+
+  function rememberKeyboardFocus() {
+    var active = document.activeElement;
+    if (!active || !tbody.contains(active)) return null;
+    try { if (!active.matches(':focus-visible')) return null; } catch (e) { return null; }
+    var row = active.closest('tr[data-album-id]');
+    if (!row) return null;
+    return { id: row.dataset.albumId, index: Array.prototype.indexOf.call(row.querySelectorAll(FOCUSABLE), active) };
+  }
+
+  function restoreKeyboardFocus(saved) {
+    if (!saved || saved.index < 0) return;
+    var rows = tbody.querySelectorAll('tr[data-album-id]');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].dataset.albumId !== saved.id) continue;
+      var target = rows[i].querySelectorAll(FOCUSABLE)[saved.index];
+      if (target) target.focus();
+      return;
+    }
+  }
+
+  function buildRow(item, checked) {
+    var albumId = String(item.album_id);
+    var detailUrl = '/album/' + encodeURIComponent(albumId);
+    var tr = el('tr');
+    tr.dataset.albumId = albumId;
+
+    var cb = el('input', 'item-checkbox');
+    cb.type = 'checkbox';
+    cb.value = albumId;
+    cb.checked = checked;
+    cb.setAttribute('aria-label', '选择 ' + (item.title || albumId));
+    tr.appendChild(cell(cb, null, 'wishlist-col-check'));
+
+    var idLink = el('a', null, albumId);
+    idLink.href = detailUrl;
+    idLink.target = '_blank';
+    idLink.rel = 'noopener'; // 保留同源 referrer：详情页“返回”据此回到收藏页（带筛选条件）
+    tr.appendChild(cell(idLink, null, 'wishlist-col-id'));
+
+    // 标题/作者放进带最小宽度的块里：不带空格的长串在格内任意位置换行，窄屏也不会被挤成一字一行
+    tr.appendChild(cell(el('div', 'wishlist-title', item.title || '-'), null, 'wishlist-col-title'));
+    tr.appendChild(cell(el('div', 'wishlist-author', item.author || '-'), null, 'wishlist-col-author'));
+    tr.appendChild(cell(statusBadges(item), null, 'wishlist-col-status'));
+    tr.appendChild(cell(null, item.added_at ? new Date(item.added_at).toLocaleString() : '-', 'wishlist-col-added'));
+
+    // 下载 / 详情 / 移除 / 阅读 每行都有，位置固定；“阅读”已下载时打开本地文件，否则在线阅读（utils.js readLink）
+    var actions = el('div', 'wishlist-actions');
+    actions.appendChild(actionButton('btn-outline-success', 'bi-download', '下载', 'download'));
+    var info = el('a', 'btn btn-sm btn-outline-info');
+    info.href = detailUrl;
+    info.target = '_blank';
+    info.rel = 'noopener';
+    info.title = '详情';
+    info.setAttribute('aria-label', '详情');
+    info.appendChild(icon('bi-info-circle'));
+    actions.appendChild(info);
+    actions.appendChild(actionButton('btn-outline-danger', 'bi-trash', '移除', 'remove'));
+    var read = window.readLink.create(albumId, item.readable === true, 'btn-sm');
+    if (read) actions.appendChild(read);
+    tr.appendChild(cell(actions, null, 'wishlist-col-actions'));
+    return tr;
+  }
+
+  function actionButton(variant, iconName, label, action) {
+    var btn = el('button', 'btn btn-sm ' + variant);
+    btn.type = 'button';
+    btn.dataset.action = action;
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.appendChild(icon(iconName));
+    return btn;
+  }
+
+  // 分组由服务端算好（status_group）：可读判定与资源库、详情等页面共用同一规则
+  function statusBadges(item) {
+    var box = el('div', 'wishlist-status');
+    var group = item.status_group;
+    if (group === 'readable') {
+      // 与详情页、搜索页、资源库同一个“已下载”标记（style.css .offline-badge）。
+      // 表格里只显示“可离线阅读”，徽章不断行也不把状态列撑宽；完整的“已下载 · 可离线阅读”在读屏文本和 title 里
+      var offline = el('span', 'offline-badge');
+      offline.title = '已下载 · 可离线阅读：本地文件完整，无需联网';
+      offline.appendChild(icon('bi-check-circle-fill'));
+      offline.appendChild(el('span', 'visually-hidden', '已下载 · '));
+      offline.appendChild(el('span', null, '可离线阅读'));
+      box.appendChild(offline);
+      if (item.activity) box.appendChild(activityBadge(item.activity)); // 可读，同时又在下载（更新/补章节）
+    } else if (group === 'active') {
+      box.appendChild(activityBadge(item.activity));
+    } else if (group === 'failed') {
+      box.appendChild(badge('bg-danger', '失败', '最近一次下载失败，可以重新下载'));
+    } else if (item.files_missing) {
+      box.appendChild(badge('status-badge-muted', '文件已删除', '下载过，但本地文件已不在，需要重新下载'));
+    } else {
+      box.appendChild(badge('bg-secondary', '未下载'));
+    }
+    return box;
+  }
+
+  function activityBadge(activity) {
+    if (activity === 'downloading') return badge('bg-primary', '下载中');
+    if (activity === 'paused') return badge('bg-warning', '已暂停');
+    return badge('bg-info text-dark', '排队中');
   }
 
   function renderPagination(total, page) {
@@ -94,16 +296,26 @@
     nav.classList.remove('d-none');
     var totalPages = Math.max(1, Math.ceil(total / pageSize));
     var ul = nav.querySelector('ul');
-    var html = '';
-    if (page > 1) html += '<li class="page-item"><a class="page-link" href="#" onclick="loadWishlist(' + (page - 1) + ');return false;">上一页</a></li>';
+    ul.textContent = '';
+
+    function pageItem(p, label, active) {
+      var li = el('li', 'page-item' + (active ? ' active' : ''));
+      var btn = el('button', 'page-link', label);
+      btn.type = 'button';
+      btn.dataset.page = String(p);
+      if (active) btn.setAttribute('aria-current', 'page');
+      li.appendChild(btn);
+      ul.appendChild(li);
+    }
+
+    if (page > 1) pageItem(page - 1, '上一页', false);
     var start = Math.max(1, page - 2);
     var end = Math.min(totalPages, start + 4);
     start = Math.max(1, end - 4);
     for (var p = start; p <= end; p++) {
-      html += '<li class="page-item' + (p === page ? ' active' : '') + '"><a class="page-link" href="#" onclick="loadWishlist(' + p + ');return false;">' + p + '</a></li>';
+      pageItem(p, String(p), p === page);
     }
-    if (page < totalPages) html += '<li class="page-item"><a class="page-link" href="#" onclick="loadWishlist(' + (page + 1) + ');return false;">下一页</a></li>';
-    ul.innerHTML = html;
+    if (page < totalPages) pageItem(page + 1, '下一页', false);
   }
 
   // ── 单个操作 ──
@@ -116,16 +328,14 @@
         timeoutMs: 60000,
       });
       if (data.status === 'ok') {
-        if (typeof showToast === 'function') showToast('已创建下载任务', 'success');
+        toast('已创建下载任务', 'success');
         loadWishlist(currentPage);
       } else {
-        if (typeof showToast === 'function') showToast(data.message || '下载失败', 'danger');
+        toast(data.message || '下载失败', 'danger');
       }
     } catch (e) {
       if (e && e.name === 'AbortError') return; // pagehide 中止，静默
-      if (typeof showToast === 'function') {
-        showToast((e && e.status) ? (e.message || '下载失败') : ('网络错误: ' + e.message), 'danger');
-      }
+      toast((e && e.status) ? (e.message || '下载失败') : ('网络错误: ' + e.message), 'danger');
     }
   }
 
@@ -134,22 +344,20 @@
     try {
       var data = await window.apiFetch('/api/wishlist/' + encodeURIComponent(albumId), { method: 'DELETE', timeoutMs: 15000 });
       if (data.status === 'ok') {
-        if (typeof showToast === 'function') showToast('已移除收藏', 'success');
+        toast('已移除收藏', 'success');
         loadWishlist(currentPage);
       } else {
-        if (typeof showToast === 'function') showToast(data.message || '移除失败', 'danger');
+        toast(data.message || '移除失败', 'danger');
       }
     } catch (e) {
       if (e && e.name === 'AbortError') return; // pagehide 中止，静默
-      if (typeof showToast === 'function') {
-        showToast((e && e.status) ? (e.message || '移除失败') : ('网络错误: ' + e.message), 'danger');
-      }
+      toast((e && e.status) ? (e.message || '移除失败') : ('网络错误: ' + e.message), 'danger');
     }
   }
 
   // ── 批量操作 ──
   function toggleSelectAll() {
-    var checked = document.getElementById('select-all').checked;
+    var checked = selectAll.checked;
     var cbs = document.querySelectorAll('.item-checkbox');
     for (var i = 0; i < cbs.length; i++) {
       cbs[i].checked = checked;
@@ -168,6 +376,7 @@
 
   function updateBatchActions() {
     var ids = getSelectedIds();
+    var boxes = document.querySelectorAll('.item-checkbox').length;
     var div = document.getElementById('batch-actions');
     if (ids.length > 0) {
       div.classList.remove('d-none');
@@ -175,6 +384,8 @@
     } else {
       div.classList.add('d-none');
     }
+    selectAll.checked = boxes > 0 && ids.length === boxes;
+    selectAll.indeterminate = ids.length > 0 && ids.length < boxes;
   }
 
   async function batchDownload() {
@@ -188,16 +399,14 @@
         timeoutMs: 120000,
       });
       if (data.status === 'ok') {
-        if (typeof showToast === 'function') showToast('已创建 ' + data.job_ids.length + ' 个下载任务', 'success');
+        toast('已创建 ' + data.job_ids.length + ' 个下载任务', 'success');
         loadWishlist(currentPage);
       } else {
-        if (typeof showToast === 'function') showToast(data.message || '批量下载失败', 'danger');
+        toast(data.message || '批量下载失败', 'danger');
       }
     } catch (e) {
       if (e && e.name === 'AbortError') return; // pagehide 中止，静默
-      if (typeof showToast === 'function') {
-        showToast((e && e.status) ? (e.message || '批量下载失败') : ('网络错误: ' + e.message), 'danger');
-      }
+      toast((e && e.status) ? (e.message || '批量下载失败') : ('网络错误: ' + e.message), 'danger');
     }
   }
 
@@ -220,11 +429,14 @@
       for (var i = 0; i < results.length; i++) {
         if (results[i]) ok++; else fail++;
       }
-      if (typeof showToast === 'function') showToast('移除完成：成功 ' + ok + '，失败 ' + fail, fail > 0 ? 'warning' : 'success');
+      toast('移除完成：成功 ' + ok + '，失败 ' + fail, fail > 0 ? 'warning' : 'success');
+      // 已移除的行不再保留勾选
+      var cbs = document.querySelectorAll('.item-checkbox:checked');
+      for (var j = 0; j < cbs.length; j++) cbs[j].checked = false;
       loadWishlist(currentPage);
     } catch (e) {
       if (e && e.name === 'AbortError') return; // pagehide 中止，静默
-      if (typeof showToast === 'function') showToast('网络错误: ' + e.message, 'danger');
+      toast('网络错误: ' + e.message, 'danger');
     }
   }
 
@@ -235,11 +447,20 @@
     new bootstrap.Modal(document.getElementById('importModal')).show();
   }
 
+  function importAlert(kind) {
+    var resultDiv = document.getElementById('import-result');
+    resultDiv.classList.remove('d-none');
+    resultDiv.textContent = '';
+    var alert = el('div', 'alert alert-' + kind + ' mb-0');
+    resultDiv.appendChild(alert);
+    return alert;
+  }
+
   async function doImport() {
     var raw = document.getElementById('import-raw').value.trim();
-    if (!raw) { if (typeof showToast === 'function') showToast('请输入车号', 'warning'); return; }
+    if (!raw) { toast('请输入车号', 'warning'); return; }
 
-    var btn = document.querySelector('#importModal .btn-primary');
+    var btn = document.getElementById('import-submit-btn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 导入中...';
 
@@ -250,31 +471,37 @@
         body: JSON.stringify({raw: raw}),
         timeoutMs: 60000,
       });
-      var resultDiv = document.getElementById('import-result');
-      resultDiv.classList.remove('d-none');
       if (data.status === 'ok') {
-        var resultHtml = '<div class="alert alert-success mb-0">'
-          + '成功添加 <strong>' + window.escapeHtml(data.added) + '</strong> 个，跳过已存在 <strong>' + window.escapeHtml(data.skipped_existing) + '</strong> 个。'
-          + (data.failed_validation.length > 0 ? '<br>非数字格式（已忽略）: ' + window.escapeHtml(data.failed_validation.join(', ')) : '')
-          + (data.errors.length > 0 ? '<br>导入错误: ' + data.errors.map(function(e) { return window.escapeHtml(e.album_id) + ': ' + window.escapeHtml(e.error); }).join('; ') : '')
-          + '</div>';
-        resultDiv.innerHTML = resultHtml;
+        var ok = importAlert('success');
+        ok.appendChild(document.createTextNode('成功添加 '));
+        ok.appendChild(el('strong', null, String(data.added)));
+        ok.appendChild(document.createTextNode(' 个，跳过已存在 '));
+        ok.appendChild(el('strong', null, String(data.skipped_existing)));
+        ok.appendChild(document.createTextNode(' 个。'));
+        var invalid = data.failed_validation || [];
+        if (invalid.length > 0) {
+          ok.appendChild(el('br'));
+          ok.appendChild(document.createTextNode('非数字格式（已忽略）: ' + invalid.join(', ')));
+        }
+        var errors = data.errors || [];
+        if (errors.length > 0) {
+          ok.appendChild(el('br'));
+          ok.appendChild(document.createTextNode('导入错误: ' + errors.map(function (e) {
+            return e.album_id + ': ' + (e.message || e.error || '导入失败');
+          }).join('; ')));
+        }
         loadWishlist(1);
       } else {
-        resultDiv.innerHTML = '<div class="alert alert-danger mb-0">导入失败: ' + window.escapeHtml(data.message) + '</div>';
+        importAlert('danger').textContent = '导入失败: ' + (data.message || '未知错误');
       }
     } catch (e) {
       if (e && e.name === 'AbortError') {
         // pagehide 中止，静默（finally 仍会恢复按钮状态）
       } else if (e && e.status) {
         // HTTP 错误：保持原有「导入失败: 服务端消息」展示
-        var errDiv = document.getElementById('import-result');
-        if (errDiv) {
-          errDiv.classList.remove('d-none');
-          errDiv.innerHTML = '<div class="alert alert-danger mb-0">导入失败: ' + window.escapeHtml(e.message) + '</div>';
-        }
+        importAlert('danger').textContent = '导入失败: ' + e.message;
       } else {
-        if (typeof showToast === 'function') showToast('导入请求失败: ' + e.message, 'danger');
+        toast('导入请求失败: ' + e.message, 'danger');
       }
     } finally {
       btn.disabled = false;
@@ -282,12 +509,11 @@
     }
   }
 
-  // ── 搜索/排序 ──
+  // ── 搜索/筛选/排序 ──
   function searchWishlist() {
-    var q = document.getElementById('wishlist-search').value.trim();
-    var sort = document.getElementById('wishlist-sort').value;
-    currentQuery = q;
-    currentSort = sort;
+    currentQuery = searchInput.value.trim();
+    currentStatus = statusSelect.value;
+    currentSort = sortSelect.value;
     loadWishlist(1);
   }
 
@@ -304,19 +530,15 @@
     formData.append('file', file);
     try {
       var data = await window.apiFetch('/api/wishlist/import-file', { method: 'POST', body: formData, timeoutMs: 60000 });
-      if (typeof showToast === 'function') {
-        if (data.status === 'ok') {
-          showToast('导入成功: 新增 ' + data.added + ', 跳过 ' + data.skipped_existing, 'success');
-          loadWishlist(1);
-        } else {
-          showToast(data.message || '导入失败', 'danger');
-        }
+      if (data.status === 'ok') {
+        toast('导入成功: 新增 ' + data.added + ', 跳过 ' + data.skipped_existing, 'success');
+        loadWishlist(1);
+      } else {
+        toast(data.message || '导入失败', 'danger');
       }
     } catch(e) {
       if (e && e.name === 'AbortError') { input.value = ''; return; } // pagehide 中止，静默
-      if (typeof showToast === 'function') {
-        showToast((e && e.status) ? (e.message || '导入失败') : ('导入失败: ' + e.message), 'danger');
-      }
+      toast((e && e.status) ? (e.message || '导入失败') : ('导入失败: ' + e.message), 'danger');
     }
     input.value = '';
   }
@@ -326,30 +548,85 @@
   }
 
   // ── 自动刷新定时器（每 10 秒检查一次下载状态变化） ──
+  // 页面隐藏或正用键盘操作表格按钮时跳过，免得重建表格把焦点弄丢
+  function canRefreshNow() {
+    return !document.hidden && !tbody.contains(document.activeElement);
+  }
+
   function startAutoRefresh() {
     if (_refreshTimer) clearInterval(_refreshTimer);
     _refreshTimer = setInterval(function () {
-      if (!document.hidden) {
-        loadWishlist(currentPage);
-      }
+      if (canRefreshNow()) loadWishlist(currentPage);
     }, 10000);
   }
+
+  function stopAutoRefresh() {
+    if (_refreshTimer) clearInterval(_refreshTimer);
+    _refreshTimer = null;
+  }
+
+  // ── 事件绑定（取代内联 onclick；行内参数只从 data-* 读取） ──
+  tbody.addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-action]');
+    if (!btn || !tbody.contains(btn)) return;
+    var row = btn.closest('tr');
+    var albumId = row ? row.dataset.albumId : '';
+    if (!albumId) return;
+    if (btn.dataset.action === 'download') downloadSingle(albumId);
+    else if (btn.dataset.action === 'remove') removeSingle(albumId);
+  });
+
+  document.getElementById('wishlist-pagination').addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-page]');
+    if (!btn) return;
+    var page = parseInt(btn.dataset.page, 10);
+    if (page > 0) loadWishlist(page);
+  });
 
   // 监听复选框变化
   document.addEventListener('change', function(e) {
     if (e.target.classList.contains('item-checkbox')) updateBatchActions();
   });
 
+  selectAll.addEventListener('change', toggleSelectAll);
+  searchInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') searchWishlist();
+  });
+  document.getElementById('wishlist-search-btn').addEventListener('click', searchWishlist);
+  statusSelect.addEventListener('change', searchWishlist);
+  sortSelect.addEventListener('change', searchWishlist);
+  document.getElementById('wishlist-export-btn').addEventListener('click', exportWishlist);
+  document.getElementById('wishlist-import-file-btn').addEventListener('click', function () {
+    document.getElementById('import-file-input').click();
+  });
+  document.getElementById('import-file-input').addEventListener('change', function () {
+    importWishlistFile(this);
+  });
+  document.getElementById('wishlist-batch-import-btn').addEventListener('click', showImportModal);
+  document.getElementById('wishlist-refresh-btn').addEventListener('click', refreshList);
+  document.getElementById('batch-download-btn').addEventListener('click', batchDownload);
+  document.getElementById('batch-remove-btn').addEventListener('click', batchRemove);
+  document.getElementById('import-submit-btn').addEventListener('click', doImport);
+
   // ── 初始化 ──
-  loadWishlist(1);
+  readUrlState();
+  loadWishlist(currentPage);
   startAutoRefresh();
 
-  // 页面关闭时清理定时器
-  window.addEventListener('beforeunload', function () {
-    if (_refreshTimer) clearInterval(_refreshTimer);
+  // 离开页面（含进入 bfcache，例如点“阅读”后）停止定时器；
+  // 从阅读页等处返回、页面从 bfcache 恢复时：立即重新加载（下载状态/可离线阅读可能已变），并恢复定时器
+  window.addEventListener('pagehide', stopAutoRefresh);
+  window.addEventListener('pageshow', function (event) {
+    if (!event.persisted) return;
+    loadWishlist(currentPage);
+    startAutoRefresh();
+  });
+  // 切回本标签页时立即刷新（例如在别的标签页下载完成，或本地文件被移走）
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && _refreshTimer && canRefreshNow()) loadWishlist(currentPage);
   });
 
-  // ── 将函数暴露到 window 供 onclick 调用 ──
+  // ── 供控制台/其他脚本调用（页面本身不再依赖这些全局函数） ──
   window.loadWishlist = loadWishlist;
   window.downloadSingle = downloadSingle;
   window.removeSingle = removeSingle;
@@ -363,12 +640,5 @@
   window.exportWishlist = exportWishlist;
   window.importWishlistFile = importWishlistFile;
   window.refreshList = refreshList;
-
-  // ── 导出清单日志 ──
-  console.log('[wishlist.js] IIFE 已执行，window 导出的函数:', Object.keys(window).filter(function (k) {
-    return ['loadWishlist','downloadSingle','removeSingle','toggleSelectAll','updateBatchActions',
-            'batchDownload','batchRemove','showImportModal','doImport','searchWishlist',
-            'exportWishlist','importWishlistFile','refreshList'].indexOf(k) >= 0;
-  }).join(', '));
 
 })();

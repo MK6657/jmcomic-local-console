@@ -2,6 +2,7 @@
 下载任务队列管理器
 """
 import json
+import os
 import threading
 import uuid
 from datetime import datetime
@@ -11,6 +12,9 @@ from . import database as db
 from .logger import log, set_request_id, clear_request_id
 from .progress import progress_manager
 from .jm_service import download_album_job
+
+# 可以“重新下载”（retry_job）的任务状态：已结束的任务。已完成的也可以——本地文件被删了，下载管理页会提示重新下载
+RETRYABLE_STATUSES = ("failed", "canceled", "completed")
 
 
 class JobManager:
@@ -247,29 +251,37 @@ class JobManager:
         log.info(f"恢复任务 job_id={job_id}")
         return True, "已恢复"
 
-    def retry_job(self, job_id: str) -> Optional[str]:
-        """重试失败/已取消的任务，创建新 job"""
+    def retry_job(self, job_id: str) -> tuple[Optional[str], Optional[str]]:
+        """重新下载已结束的任务（失败 / 已取消 / 已完成）：用同一部漫画、同样的章节创建新 job，原记录保留。
+
+        返回 (新 job_id, None)；不能重试时返回 (None, 原因)：
+        "not_found" 原任务不存在；"status" 任务还没结束（排队中 / 下载中 / 已暂停）。
+        """
         job = db.get_job(job_id)
         if not job:
-            return None
+            return None, "not_found"
 
-        if job["status"] not in ("failed", "canceled"):
+        if job["status"] not in RETRYABLE_STATUSES:
             log.warning(f"重试任务状态非法 job_id={job_id} status={job['status']}")
-            return None
+            return None, "status"
 
         photo_ids = json.loads(job["selected_photo_ids"] or "[]")
         new_job_id = self.create_job(job["album_id"], job["title"] or "", photo_ids)
-        log.info(f"重试任务 old_job_id={job_id} new_job_id={new_job_id}")
+        log.info(f"重试任务 old_job_id={job_id} new_job_id={new_job_id} status={job['status']}")
 
-        if job.get("output_path"):
-            db.update_job(new_job_id, output_path=job["output_path"])
+        # 沿用旧的输出目录：新任务排队时“打开文件夹”也能打开（下载马上会写进去）。
+        # 已完成的任务只在目录还在时沿用——它的目录被删了（下载管理页正是这样提示“可以重新下载”的），
+        # 带着旧路径的话，排队时“打开文件夹”会把它重建成一个空目录
+        output_path = job.get("output_path")
+        if output_path and (job["status"] != "completed" or os.path.isdir(output_path)):
+            db.update_job(new_job_id, output_path=output_path)
 
         # 同步更新 wishlist 状态
         album_id = job.get("album_id")
         if album_id:
             db.update_wishlist_download_status(album_id, "queued")
 
-        return new_job_id
+        return new_job_id, None
 
     def schedule_next(self):
         """公共接口：尝试调度下一个 queued 任务"""

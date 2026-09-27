@@ -2,9 +2,9 @@
 SQLite 数据库操作模块
 """
 import json
+import os
 import sqlite3
 from datetime import datetime
-from pathlib import Path
 
 from .path_utils import get_app_root
 
@@ -47,7 +47,8 @@ def init_db():
                 error_message TEXT,
                 created_at TEXT,
                 updated_at TEXT,
-                completed_at TEXT
+                completed_at TEXT,
+                superseded_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS settings (
@@ -134,6 +135,10 @@ def _run_migrations(conn):
         """)
         conn.execute("PRAGMA user_version = 2")
         conn.commit()
+    # superseded_at（mark_completed_jobs_superseded）：按列是否存在补，不依赖 user_version
+    if "superseded_at" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
+        conn.execute("ALTER TABLE jobs ADD COLUMN superseded_at TEXT")
+        conn.commit()
 
 
 # ─── Jobs 操作 ───
@@ -200,14 +205,40 @@ def get_all_jobs(limit: int = 5000) -> list[dict]:
 
 
 def get_completed_job_by_album_id(album_id: str) -> dict | None:
-    """获取指定 album_id 的已完成任务（取最新的一个），避免全表扫描。"""
+    """获取指定 album_id 的已完成任务（取最新的一个，顺序与 core.local_availability 相同），避免全表扫描。"""
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT * FROM jobs WHERE album_id=? AND status='completed' ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM jobs WHERE album_id=? AND status='completed' ORDER BY created_at DESC, id DESC LIMIT 1",
             (album_id,),
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def mark_completed_jobs_superseded(album_id: str, output_path: str, by_job_id: str) -> int:
+    """任务 by_job_id 重新建出了 output_path（原目录已被删除，或只剩没有图片的空壳）：同一部漫画更早完成、
+    写到这个目录的任务，它们下载的文件已经不在了。记下 superseded_at，之后目录里的内容只在写入它的任务完成后
+    才算“本地可读”——重新下载失败或被取消时，残缺的几页不会让旧任务重新显示成完整、可离线阅读。
+    返回标记的任务数。"""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT job_id, output_path FROM jobs WHERE album_id=? AND status='completed' "
+            "AND superseded_at IS NULL AND job_id != ? AND output_path IS NOT NULL AND output_path != ''",
+            (album_id, by_job_id),
+        ).fetchall()
+        job_ids = [row["job_id"] for row in rows if _same_path(row["output_path"], output_path)]
+        if job_ids:
+            now = datetime.now().isoformat()
+            conn.executemany("UPDATE jobs SET superseded_at=? WHERE job_id=?", [(now, j) for j in job_ids])
+            conn.commit()
+        return len(job_ids)
     finally:
         conn.close()
 
@@ -417,46 +448,192 @@ def get_wishlist(album_id: str) -> dict | None:
         conn.close()
 
 
+# ── 收藏清单：下载状态分组 + 排序白名单（api_wishlist 与测试共用） ──
+# 每条收藏恰好落在一个分组里（优先级自上而下）：
+#   readable 本地可离线阅读 —— core.local_availability 的共用规则，由调用方算好 readable_ids 传入；
+#            能读就算 readable，哪怕之后又排了新任务或新任务失败了
+#   active   有排队 / 下载中 / 已暂停的任务
+#   failed   最近一次任务失败
+#   none     其余：从未下载、已取消，或下载过但本地文件已不在（files_missing）
+# 收藏筛选将 none 再拆成 missing / none；返回条目的 status_group 仍与资源库一致。
+# 任务表是事实来源；某部漫画一条任务都没有时（任务被清理 / 旧数据），才退回看 wishlist.download_status。
+WISHLIST_STATUS_GROUPS = ("readable", "active", "failed", "missing", "none")
+WISHLIST_SORTS = {
+    "added_at": "added_at IS NULL, added_at DESC, id DESC",  # 最新添加（默认）
+    "added_asc": "added_at IS NULL, added_at ASC, id ASC",  # 最早添加
+    "title": "title = '', LOWER(title), id DESC",  # 没有标题的排最后
+    "author": "author = '', LOWER(author), title = '', LOWER(title), id DESC",  # 没有作者的排最后
+    "status": ("CASE filter_group WHEN 'readable' THEN 0 WHEN 'active' THEN 1 WHEN 'failed' THEN 2 "
+               "WHEN 'missing' THEN 3 ELSE 4 END, added_at IS NULL, added_at DESC, id DESC"),
+}
+_WISHLIST_ACTIVITY = {"running": "downloading", "paused": "paused", "queued": "queued"}
+_LEGACY_ACTIVE = ("queued", "downloading", "running", "paused")
+
+
+def _job_facts_sql(album_id_expr: str) -> str:
+    """某部漫画的任务事实（收藏与资源库共用）：进行中的任务、最近一次任务、是否完成过。
+    album_id_expr 只接受代码里的列名常量（如 w.album_id），不接受外部输入。"""
+    return f"""
+               (SELECT j.status FROM jobs j
+                 WHERE j.album_id = {album_id_expr} AND j.status IN ('running', 'paused', 'queued')
+                 ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END
+                 LIMIT 1) AS active_job,
+               (SELECT j.status FROM jobs j WHERE j.album_id = {album_id_expr}
+                 ORDER BY j.created_at DESC, j.id DESC LIMIT 1) AS latest_job,
+               EXISTS (SELECT 1 FROM jobs j
+                        WHERE j.album_id = {album_id_expr} AND j.status = 'completed') AS has_completed"""
+
+
+def download_state(readable, active_job, latest_job, has_completed, legacy_status) -> dict:
+    """收藏与资源库共用的下载状态 → {status_group, activity, files_missing}。
+
+    status_group 的规则与下面 _WISHLIST_ITEMS_CTE 里的 CASE 相同（收藏的筛选/排序/计数在 SQL 里做；
+    tests/test_lists.py 保证两边一致，资源库与收藏对同一部漫画显示同一个状态）。
+    activity：进行中任务的状态（queued / downloading / paused），可读时也可能有（在更新/补章节）。
+    files_missing：下载过（有完成的任务，或旧数据标着已完成）但现在读不到本地文件，且没有更新的任务。
+    legacy_status 是 wishlist.download_status（不在收藏里时为空），只在一条任务都没有时才参考。
+    """
+    legacy = (legacy_status or "").strip().lower() or "none"
+    if readable:
+        group = "readable"
+    elif active_job or (latest_job is None and legacy in _LEGACY_ACTIVE):
+        group = "active"
+    elif latest_job == "failed" or (latest_job is None and legacy == "failed"):
+        group = "failed"
+    else:
+        group = "none"
+    if active_job:
+        activity = _WISHLIST_ACTIVITY[active_job]
+    elif group == "active":  # 没有任务记录，按旧的状态列
+        activity = "downloading" if legacy in ("downloading", "running") else (
+            "paused" if legacy == "paused" else "queued")
+    else:
+        activity = None
+    files_missing = group == "none" and bool(
+        has_completed or (latest_job is None and legacy in ("completed", "downloaded")))
+    return {"status_group": group, "activity": activity, "files_missing": files_missing}
+
+
+def _status_group_sql(legacy: str) -> str:
+    """download_state 的 status_group 规则的 SQL 版（收藏与资源库的筛选/计数共用）。
+    需要 readable / active_job / latest_job 三列（_job_facts_sql）；legacy 是已 LOWER(TRIM()) 的旧状态列名，
+    只接受代码里的列名常量。"""
+    return f"""CASE
+            WHEN readable THEN 'readable'
+            WHEN active_job IS NOT NULL THEN 'active'
+            WHEN latest_job IS NULL AND {legacy} IN ('queued', 'downloading', 'running', 'paused')
+                THEN 'active'
+            WHEN latest_job = 'failed' THEN 'failed'
+            WHEN latest_job IS NULL AND {legacy} = 'failed' THEN 'failed'
+            ELSE 'none' END"""
+
+
+def _files_missing_sql(legacy: str) -> str:
+    """download_state 的 files_missing 规则的 SQL 版（仅在 status_group = 'none' 时有意义）。"""
+    return f"(has_completed OR (latest_job IS NULL AND {legacy} IN ('completed', 'downloaded')))"
+
+
+# 标题/作者/封面为空（如批量导入的车号）时用 album_meta 缓存补上，搜索和排序都按补齐后的值
+_WISHLIST_ITEMS_CTE = f"""
+    WITH readable_ids(album_id) AS (SELECT value FROM json_each(?)),
+    facts AS (
+        SELECT w.id, w.album_id,
+               COALESCE(NULLIF(TRIM(w.title), ''), NULLIF(TRIM(m.title), ''), '') AS title,
+               COALESCE(NULLIF(TRIM(w.author), ''), NULLIF(TRIM(m.author), ''), '') AS author,
+               COALESCE(NULLIF(w.cover_url, ''), NULLIF(m.cover_url, ''), '') AS cover_url,
+               w.added_at,
+               COALESCE(NULLIF(LOWER(TRIM(w.download_status)), ''), 'none') AS download_status,
+               w.album_id IN (SELECT album_id FROM readable_ids) AS readable,{_job_facts_sql('w.album_id')}
+        FROM wishlist w
+        LEFT JOIN album_meta m ON m.album_id = w.album_id
+    ),
+    classified AS (
+        SELECT facts.*, {_status_group_sql('download_status')} AS status_group,
+               {_files_missing_sql('download_status')} AS had_download
+        FROM facts
+    ),
+    items AS (
+        SELECT classified.*,
+               CASE WHEN status_group = 'none' AND had_download THEN 'missing'
+                    ELSE status_group END AS filter_group
+        FROM classified
+    )
+"""
+
+
+def _wishlist_item(row) -> dict:
+    """SQL 行 → API 条目：readable 转 bool，附上 status_group / activity / files_missing（download_state）。"""
+    item = dict(row)
+    item["readable"] = bool(item["readable"])
+    item.pop("filter_group")
+    item.pop("had_download")
+    item.update(download_state(
+        item["readable"], item.pop("active_job"), item.pop("latest_job"),
+        item.pop("has_completed"), item["download_status"],
+    ))
+    return item
+
+
 def get_all_wishlist(
     page: int = 1, page_size: int = 50,
     keyword: str = "", sort: str = "added_at",
+    status: str | None = None, readable_ids=None,
 ) -> dict:
-    """获取收藏列表（分页），支持搜索关键词和排序，返回 {items, total, page, page_size}"""
+    """获取收藏列表（分页）：关键词搜索 + 下载状态筛选 + 排序，全部在 SQL 里完成。
+
+    status 取 WISHLIST_STATUS_GROUPS 之一（其他值 = 不筛选）；missing 是 status_group=none 且 files_missing。
+    sort 取 WISHLIST_SORTS 的键（其他值 = 最新添加）。
+    readable_ids 是本地可读的 album_id 集合（core.local_availability），决定 readable 分组。
+    返回 {items, total, page, page_size, group_counts}；total 与 group_counts 都已按关键词过滤，
+    total 另按 status 过滤。每项含 status_group / readable / activity / files_missing。
+    """
+    page = max(1, page)
+    page_size = max(1, min(200, page_size))
+    order = WISHLIST_SORTS.get(sort, WISHLIST_SORTS["added_at"])
+    if status not in WISHLIST_STATUS_GROUPS:
+        status = None
+
+    params: list = [json.dumps(sorted({str(a) for a in (readable_ids or ())}))]
+    where = ""
+    kw = (keyword or "").strip()
+    if kw:
+        like = f"%{_escape_like(kw)}%"
+        where += " AND (title LIKE ? ESCAPE ? OR author LIKE ? ESCAPE ? OR album_id LIKE ? ESCAPE ?)"
+        params.extend([like, chr(92)] * 3)
+
     conn = get_db()
     try:
-        # 排序映射（白名单防注入）
-        sort_map = {
-            "title": "ORDER BY title",
-            "author": "ORDER BY author",
-            "added_at": "ORDER BY added_at DESC",
-        }
-        order_clause = sort_map.get(sort, "ORDER BY added_at DESC")
+        counts = {group: 0 for group in WISHLIST_STATUS_GROUPS}
+        for row in conn.execute(
+            f"{_WISHLIST_ITEMS_CTE} SELECT filter_group, COUNT(*) FROM items WHERE 1=1{where} "
+            "GROUP BY filter_group", params,
+        ):
+            counts[row[0]] = row[1]
+        total = counts[status] if status else sum(counts.values())
+        if status:
+            where += " AND filter_group = ?"
+            params.append(status)
+        rows = conn.execute(
+            f"{_WISHLIST_ITEMS_CTE} SELECT * FROM items WHERE 1=1{where} ORDER BY {order} LIMIT ? OFFSET ?",
+            params + [page_size, (page - 1) * page_size],
+        ).fetchall() if total else []
+    finally:
+        conn.close()
+    return {
+        "items": [_wishlist_item(r) for r in rows],
+        "total": total, "page": page, "page_size": page_size,
+        "group_counts": counts,
+    }
 
-        if keyword:
-            # 转义 LIKE 通配符 _ 和 %，防止匹配过多
-            safe_kw = keyword.replace("_", "\\_").replace("%", "\\%")
-            like = f"%{safe_kw}%"
-            where_clause = "WHERE title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR album_id LIKE ? ESCAPE '\\'"
-            count_row = conn.execute(
-                f"SELECT COUNT(*) FROM wishlist {where_clause}",
-                (like, like, like),
-            ).fetchone()
-            total = count_row[0]
-            offset = (page - 1) * page_size
-            rows = conn.execute(
-                f"SELECT * FROM wishlist {where_clause} {order_clause} LIMIT ? OFFSET ?",
-                (like, like, like, page_size, offset),
-            ).fetchall()
-        else:
-            total = conn.execute("SELECT COUNT(*) FROM wishlist").fetchone()[0]
-            offset = (page - 1) * page_size
-            rows = conn.execute(
-                f"SELECT * FROM wishlist {order_clause} LIMIT ? OFFSET ?",
-                (page_size, offset),
-            ).fetchall()
 
-        items = [dict(r) for r in rows]
-        return {"items": items, "total": total, "page": page, "page_size": page_size}
+def get_completed_album_ids(wishlist_only: bool = False) -> list[str]:
+    """有已完成下载任务的 album_id —— 本地可读判定的候选（是否真能读由 core.local_availability 决定）。"""
+    sql = "SELECT DISTINCT album_id FROM jobs WHERE status='completed'"
+    if wishlist_only:
+        sql += " AND album_id IN (SELECT album_id FROM wishlist)"
+    conn = get_db()
+    try:
+        return [row[0] for row in conn.execute(sql + " ORDER BY album_id")]
     finally:
         conn.close()
 
@@ -833,15 +1010,28 @@ def _make_kw_combined_sql(kw: str) -> str:
     """
 
 
-def _make_status_sql(status: str | None) -> str:
-    """生成状态过滤的 WHERE 子句"""
-    if status == "completed" or status == "downloaded":
-        return "AND ai.download_status = ?"
-    elif status == "queued":
-        return "AND ai.download_status = ?"
-    elif status == "none" or status == "undownloaded":
-        return "AND ai.download_status IN (?, ?)"
-    return ""
+# 资源库“下载状态”筛选：与收藏清单同一套分组（download_state / _status_group_sql：任务表说了算，
+# 一条任务都没有时才看收藏里的旧状态列），收藏的“未下载”在这里按 files_missing 再分成两档。
+# 五档互不重叠，合起来正好是全部，每档也正是卡片上显示的徽章：
+#   readable     可离线阅读          —— status_group readable
+#   active       排队中 / 下载中      —— status_group active（含已暂停；含旧状态列写着排队/下载中、但没有任务记录的收藏）
+#   failed       失败                —— status_group failed（含旧状态列写着失败、但没有任务记录的收藏）
+#   missing      下载过 · 文件已删除  —— status_group none 且 files_missing
+#   undownloaded 未下载              —— status_group none 且不是 files_missing（从未下载 / 已取消）
+LIBRARY_STATUS_FILTERS = ("readable", "active", "failed", "missing", "undownloaded")
+
+
+def _library_status_where(status: str) -> str:
+    """资源库状态筛选的 WHERE 子句（作用于 _grouped；status 已按白名单校验，分组值走 ? 参数）。"""
+    if status == "missing":
+        return "WHERE status_group = ? AND files_missing"
+    if status == "undownloaded":
+        return "WHERE status_group = ? AND NOT files_missing"
+    return "WHERE status_group = ?"
+
+
+def _library_status_group_param(status: str) -> str:
+    return "none" if status in ("missing", "undownloaded") else status
 
 
 def get_library(
@@ -852,13 +1042,20 @@ def get_library(
     status: str | None = None,
     sort: str = "updated_at",
     album_id: str | None = None,
+    author: str | None = None,
+    readable_ids=None,
 ) -> dict:
     """获取资源库列表 — SQL 分页下沉版。
 
     数据源 = wishlist（收藏）UNION completed jobs（已下载但未收藏）。
-    SQL 做合并+过滤+排序+分页，Python 只做标签绑定和文件检查。
+    SQL 做合并+过滤+排序+分页，Python 只做标签绑定（本地文件检查在 routes/api_library，与其他页面同一规则）。
     album_id 传入时按精确匹配过滤（供 /api/library/<album_id> 单条查询使用，
     避免 keyword LIKE 模糊匹配命中其他条目）。
+    author 传入时只看该作者（去首尾空格、ASCII 不分大小写的精确匹配）；
+    status 取 LIBRARY_STATUS_FILTERS 之一时只看这一档（其他值 = 不筛选），分组规则与收藏清单相同；
+    readable_ids 是本地可读的 album_id 集合（由调用方按 core.local_availability 算好），决定“可离线阅读”，
+    按状态筛选时必须传入整个资源库的可读集合（能读的漫画不会落进 失败 / 排队中 这些档）。
+    sort="author" 按作者升序、同作者按标题，没有作者的排最后。
 
     返回 {items, total, page, page_size}
     每项包含: {album_id, title, author, cover_url, download_status,
@@ -872,6 +1069,9 @@ def get_library(
     # 标签统一小写存储（add_album_tag 会 lower()），查询侧同样归一化，否则大写输入永远查不到
     wanted_tags = list(dict.fromkeys(t.strip().lower() for t in tag.split(",") if t.strip())) if tag else []
     tag_count = len(wanted_tags)
+    author = author.strip() if author else ""
+    if status not in LIBRARY_STATUS_FILTERS:
+        status = None
 
     conn = get_db()
     try:
@@ -897,19 +1097,25 @@ def get_library(
             order_clause = "ORDER BY _base.added_at DESC, _base.album_id ASC"
         elif sort_lower == "album_id":
             order_clause = "ORDER BY _base.album_id ASC"
+        elif sort_lower == "author":
+            order_clause = (
+                "ORDER BY TRIM(_base.author) = '' ASC, LOWER(TRIM(_base.author)) ASC, "
+                "TRIM(_base.title) = '' ASC, LOWER(_base.title) ASC, _base.album_id ASC"
+            )
         else:  # updated_at (default)
             order_clause = (
                 "ORDER BY COALESCE(NULLIF(_base.updated_at, ''), _base.added_at, '') DESC, _base.album_id ASC"
             )
 
-        # ── 完整查询 SQL ──
-        query_sql = f"""
+        # ── 完整查询 SQL（公共 CTE + _base；列表与计数共用） ──
+        cte_sql = f"""
             WITH wishlist_ext AS (
                 SELECT
                     w.album_id,
-                    w.title,
-                    w.author,
-                    w.cover_url,
+                    -- 收藏里没填的标题/作者/封面（如批量导入的车号）用 album_meta 缓存补上，作者排序/筛选才有意义
+                    COALESCE(NULLIF(w.title, ''), NULLIF(wm.title, ''), '') AS title,
+                    COALESCE(NULLIF(w.author, ''), NULLIF(wm.author, ''), '') AS author,
+                    COALESCE(NULLIF(w.cover_url, ''), NULLIF(wm.cover_url, ''), '') AS cover_url,
                     CASE WHEN jc.album_id IS NOT NULL THEN 'completed' ELSE w.download_status END AS download_status,
                     w.added_at,
                     '' AS updated_at,
@@ -918,6 +1124,7 @@ def get_library(
                 LEFT JOIN (
                     SELECT DISTINCT album_id FROM jobs WHERE status='completed'
                 ) jc ON w.album_id = jc.album_id
+                LEFT JOIN album_meta wm ON wm.album_id = w.album_id
             ),
             completed_ext AS (
                 SELECT
@@ -938,18 +1145,43 @@ def get_library(
                 UNION
                 SELECT ce.* FROM completed_ext ce
             ),
-            _base AS (
+            _matched AS (
                 SELECT ai.* FROM all_items ai
                 WHERE 1=1
                   {_make_kw_combined_sql(kw)}
-                  {_make_status_sql(status)}
                   {tag_having_sql}
+                  {"AND LOWER(TRIM(ai.author)) = LOWER(?)" if author else ""}
                   {"AND ai.album_id = ?" if album_id else ""}
-            )
-            SELECT _base.* FROM _base
-            {order_clause}
-            LIMIT ? OFFSET ?
+            ),
         """
+        if status:
+            # 按状态筛选：先按其他条件缩小范围，再给每条算出与收藏相同的分组（_status_group_sql）
+            cte_sql += f"""
+            _facts AS (
+                SELECT m.*,
+                       m.album_id IN (SELECT value FROM json_each(?)) AS readable,
+                       COALESCE(NULLIF(LOWER(TRIM(w.download_status)), ''), 'none') AS legacy_status,{_job_facts_sql('m.album_id')}
+                FROM _matched m
+                LEFT JOIN wishlist w ON w.album_id = m.album_id
+            ),
+            _grouped AS (
+                SELECT f.*, {_status_group_sql('legacy_status')} AS status_group,
+                       {_files_missing_sql('legacy_status')} AS files_missing
+                FROM _facts f
+            ),
+            _base AS (
+                SELECT album_id, title, author, cover_url, download_status, added_at, updated_at, is_wishlisted
+                FROM _grouped
+                {_library_status_where(status)}
+            )
+            """
+        else:
+            cte_sql += """
+            _base AS (SELECT * FROM _matched)
+            """
+        query_sql = f"{cte_sql} SELECT _base.* FROM _base {order_clause} LIMIT ? OFFSET ?"
+        # COUNT 查询复用同一组 CTE（不 ORDER / LIMIT）；任务事实子查询里本身带 ORDER BY，不能再按它切字符串
+        count_sql = f"{cte_sql} SELECT COUNT(*) FROM _base"
 
         # ── 参数列表（必须与 SQL 中 ? 顺序一致）──
         params = []
@@ -960,41 +1192,32 @@ def get_library(
             # 8 个 ?: title LIKE, ESCAPE, author LIKE, ESCAPE, album_id LIKE, ESCAPE, tag LIKE, ESCAPE
             params.extend([like_val, esc, like_val, esc, like_val, esc, like_val, esc])
 
-        if status == "completed" or status == "downloaded":
-            params.append("completed")
-        elif status == "queued":
-            params.append("queued")
-        elif status == "none" or status == "undownloaded":
-            params.extend(["none", "none"])
-
         if wanted_tags:
             params.extend(wanted_tags)
             params.append(tag_count)
 
+        if author:
+            params.append(author)
+
         if album_id:
             params.append(album_id)
 
-        params.append(page_size)
-        params.append(offset)
+        if status:
+            params.append(json.dumps(sorted({str(a) for a in (readable_ids or ())})))
+            params.append(_library_status_group_param(status))
 
-        # ── COUNT 查询（复用 WHERE/HAVING, 不 ORDER/LIMIT）──
-        count_sql = (
-            query_sql
-            .replace("SELECT _base.* FROM _base", "SELECT COUNT(*) FROM _base")
-            .split("ORDER BY")[0]
-        )
-        total_row = conn.execute(count_sql, params[:-2]).fetchone()
+        total_row = conn.execute(count_sql, params).fetchone()
         total = total_row[0] if total_row else 0
 
         # ── 分页查询 ──
-        page_rows = conn.execute(query_sql, params).fetchall() if total > 0 else []
+        page_rows = conn.execute(query_sql, params + [page_size, offset]).fetchall() if total > 0 else []
 
         if not page_rows:
             return {"items": [], "total": total, "page": page, "page_size": page_size}
 
         items_list = [dict(r) for r in page_rows]
 
-        # ── Phase 2: 标签绑定 + 文件存在性检查 ──
+        # ── Phase 2: 标签绑定 + 任务事实（本地文件由调用方按 core.local_availability 判断） ──
         album_ids = [it["album_id"] for it in items_list]
         tags_by_album: dict[str, list] = {}
         if album_ids:
@@ -1009,27 +1232,29 @@ def get_library(
                     tags_by_album[aid] = []
                 tags_by_album[aid].append({"tag": tr["tag"], "source": tr["source"]})
 
-        # One query for the current page instead of one connection/SELECT per album.
-        completed_ids = [item["album_id"] for item in items_list if item["download_status"] == "completed"]
-        paths = {}
-        if completed_ids:
-            ph = ",".join("?" for _ in completed_ids)
-            rows = conn.execute(
-                f"""SELECT j.album_id, j.output_path FROM jobs j
-                    WHERE j.album_id IN ({ph}) AND j.status='completed'
-                    AND j.id = (SELECT latest.id FROM jobs latest
-                        WHERE latest.album_id=j.album_id AND latest.status='completed'
-                        ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)""",
-                completed_ids,
-            ).fetchall()
-            paths = {row["album_id"]: row["output_path"] for row in rows}
+        # One query for the current page instead of one connection/SELECT per album:
+        # 与收藏同一套任务事实（进行中 / 最近一次 / 是否完成过）+ 收藏里的旧状态列
+        fact_rows = conn.execute(
+            f"""SELECT p.value AS album_id,
+                       w.download_status AS legacy_status,{_job_facts_sql('p.value')}
+                FROM json_each(?) p
+                LEFT JOIN wishlist w ON w.album_id = p.value""",
+            (json.dumps(album_ids),),
+        ).fetchall()
+        facts = {row["album_id"]: dict(row) for row in fact_rows}
         result_items = []
         for it in items_list:
             aid = it["album_id"]
             it["tags"] = tags_by_album.get(aid, [])
-            if it["download_status"] == "completed":
-                path = paths.get(aid)
-                it["file_exists"] = bool(path and Path(path).is_dir())
+            fact = facts.get(aid, {})
+            # 调用方（routes/api_library）判断本地可读后，交给 download_state 算出显示用的状态，
+            # 已完成条目的 file_exists 也取同一个结果（原来只看目录在不在：空目录会同时报 file_exists 与 files_missing）
+            it["_facts"] = {
+                "active_job": fact.get("active_job"),
+                "latest_job": fact.get("latest_job"),
+                "has_completed": bool(fact.get("has_completed")),
+                "legacy_status": fact.get("legacy_status"),
+            }
             result_items.append(it)
 
         return {

@@ -93,9 +93,12 @@ def test_library_queued_filter_and_duplicate_tags(client):
 
 
 def test_library_page_uses_one_connection_and_four_queries(client, monkeypatch, tmp_path):
-    from core import database as db
+    import shutil
+    from core import database as db, path_guard
+    monkeypatch.setattr(path_guard, "DOWNLOAD_ROOT", tmp_path)
     output = tmp_path / "images"
-    output.mkdir()
+    (output / "ch1").mkdir(parents=True)
+    (output / "ch1" / "001.jpg").write_bytes(b"page")
     for n in range(25):
         db.insert_job(f"job_{n}", str(n + 1), "test", [])
         db.update_job(f"job_{n}", status="completed", output_path=str(output))
@@ -109,12 +112,15 @@ def test_library_page_uses_one_connection_and_four_queries(client, monkeypatch, 
     monkeypatch.setattr(db, "get_db", counted)
     result = db.get_library(page_size=25)
     assert len(result["items"]) == 25
-    assert all(item["file_exists"] for item in result["items"])
     assert counted.call_count == 1
     assert len(statements) == 4
-    # No five-minute stale file-existence cache after external directory changes.
-    output.rmdir()
-    assert not any(item["file_exists"] for item in db.get_library(page_size=25)["items"])
+    # file_exists follows the shared readable rule (it said "exists" for an empty folder); still no stale answer
+    # after external directory changes
+    items = client.get("/api/library?page_size=25").get_json()["items"]
+    assert all(item["file_exists"] and item["readable"] for item in items)
+    shutil.rmtree(output)
+    items = client.get("/api/library?page_size=25").get_json()["items"]
+    assert not any(item["file_exists"] or item["readable"] for item in items)
 
 
 def test_tag_autocomplete_finds_rare_tags_and_escapes_wildcards(client):

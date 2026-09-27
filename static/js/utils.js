@@ -19,7 +19,9 @@ window.escapeHtml = function (str) {
 
 /**
  * HTML 属性值转义（转义双引号和单引号，防止属性注入）
- * 用于 src="..."  /  value="..."  /  onclick='...' 等属性上下文
+ * 只用于普通属性值：src="..." / value="..." / title="..." / data-*="..."。
+ * 不能用于内联事件属性（on* 事件处理属性）：HTML 解析器会先把实体解码回原字符再执行其中的 JS，
+ * 转义形同虚设。数据放进 data-* 属性，由 addEventListener 委托读取。
  * @param {string|null|undefined} str
  * @returns {string}
  */
@@ -204,3 +206,64 @@ window.openFolder = function (jobId) {
 window.encodeJobId = function (id) {
   return encodeURIComponent(id);
 };
+
+/**
+ * “阅读”按钮（搜索 / 资源库 / 收藏 / 下载管理共用），每部漫画都有。
+ * 链接始终是 /read/<id>，由服务端在点击时决定：本地可读（core.local_availability）→ 打开本地文件，
+ * 否则转到在线阅读 /online/<id>。readable 只决定按钮外观：
+ *   true  → 实心 + 书本图标，“已下载：打开本地文件阅读”
+ *   false → 描边 + 地球图标，“未下载：在线阅读”，读屏名称“阅读（在线）”（aria-label，以可见文字开头；
+ *           不用 visually-hidden 文本：它绝对定位，会撑出收藏表格的横向滚动容器，整页可以左右滚动）
+ *   其他（还没判断）→ 描边 + 书本图标
+ * album_id 不是纯数字（/read 会拒绝）时不生成按钮：create 返回 null，html 返回 ''。
+ */
+(function () {
+  var STATES = {
+    local: { variant: 'btn-primary', icon: 'bi-book', title: '已下载：打开本地文件阅读，无需联网', label: '' },
+    online: { variant: 'btn-outline-primary', icon: 'bi-globe2', title: '未下载：在线阅读（从网络加载，不下载、不保存）', label: '阅读（在线）' },
+    unknown: { variant: 'btn-outline-primary', icon: 'bi-book', title: '已下载则打开本地文件，否则在线阅读', label: '' }
+  };
+
+  function stateName(readable) {
+    return readable === true ? 'local' : (readable === false ? 'online' : 'unknown');
+  }
+
+  function apply(link, readable) {
+    var name = stateName(readable);
+    var state = STATES[name];
+    link.classList.remove('btn-primary', 'btn-outline-primary');
+    link.classList.add(state.variant);
+    link.title = state.title;
+    link.setAttribute('data-read-state', name);
+    link.textContent = '';
+    var icon = document.createElement('i');
+    icon.className = 'bi ' + state.icon;
+    icon.setAttribute('aria-hidden', 'true');
+    link.appendChild(icon);
+    link.appendChild(document.createTextNode(' 阅读'));
+    if (state.label) link.setAttribute('aria-label', state.label);
+    else link.removeAttribute('aria-label');
+    return link;
+  }
+
+  function create(albumId, readable, extraClass) {
+    var id = String(albumId == null ? '' : albumId);
+    if (!/^[0-9]{1,20}$/.test(id)) return null;
+    var link = document.createElement('a');
+    link.className = 'btn' + (extraClass ? ' ' + extraClass : '');
+    link.href = '/read/' + encodeURIComponent(id);
+    return apply(link, readable);
+  }
+
+  window.readLink = {
+    /** 新建按钮；extraClass 是页面自己的尺寸/布局类（如 'btn-sm flex-fill'） */
+    create: create,
+    /** 同 create，返回 HTML 字符串（用字符串拼卡片的页面） */
+    html: function (albumId, readable, extraClass) {
+      var link = create(albumId, readable, extraClass);
+      return link ? link.outerHTML : '';
+    },
+    /** 可读判断结果回来后更新已有按钮的外观（去向不变） */
+    apply: apply
+  };
+})();

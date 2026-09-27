@@ -27,6 +27,7 @@ from .validation import safe_dirname as _safe_dirname
 from .path_guard import DOWNLOAD_ROOT, is_safe_path
 from .packer import CbzPacker
 from .file_tree import safe_files
+from .local_availability import has_page_image
 from .validation import EXPORT_IMAGE_EXTENSIONS
 
 
@@ -849,10 +850,19 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
         album_dir = Path(dl_root) / f"{_safe_dirname(album.name)}_{album_id}"
         if not is_safe_path(album_dir):
             raise ValueError("专辑输出路径越权")
+        # 目录不在（被删除了）或只剩没有图片的空壳（例如“打开文件夹”替排队中的重试建出的）：更早完成、写到这里的
+        # 任务，它们的文件已经不在了。这次下载会把目录重新建出来——标记那些任务被取代，这次若失败或被取消，
+        # 残缺的几页不能让它们重新显示成完整、可离线阅读（core.local_availability）
+        recreated = not has_page_image(album_dir)
         album_dir.mkdir(parents=True, exist_ok=True)
         output_path = str(album_dir)
 
         db.update_job(job_id, total_pages=total_pages, output_path=output_path)
+        if recreated:
+            superseded = db.mark_completed_jobs_superseded(album_id, output_path, job_id)
+            if superseded:
+                log.info(f"下载目录已重新建出，更早完成的任务不再算本地可读 job_id={job_id} album_id={album_id} "
+                         f"count={superseded}")
         tracker.push("progress", {
             "job_id": job_id, "status": "running",
             "done_pages": 0, "total_pages": total_pages, "progress": 0,

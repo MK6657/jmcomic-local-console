@@ -1,9 +1,15 @@
 /**
  * 下载管理页 — 全量渲染 + 操作按钮 + 轮询
  *
- * 依赖: apiFetch, escapeHtml, confirmAction, encodeJobId (utils.js)
+ * 依赖: apiFetch, escapeHtml, escapeHtmlAttr, confirmAction, encodeJobId, openFolder (utils.js)
  *        connectSSE, disconnectAllSSE, setSSECallbacks, _jobTitleMap (sse-client.js)
  *         showToast (base.html)
+ *
+ * 不使用内联 onclick：按钮只带 data-action + data-job-id / data-status，
+ * 由 #downloadTabsContent 上的一个委托监听器分派（拼进内联 JS 的数据会被 HTML 解码后执行）。
+ * 已完成任务按与其他页面相同的规则标记：本地可读 →“已下载 · 可离线阅读”+“预览”（/preview，单页翻页）；
+ * 判断过但读不到 →“文件已删除”，不给“预览”（它只读本地文件）。
+ * 已完成和失败的任务都有“阅读”（utils.js readLink）：已下载打开本地文件，否则在线阅读。
  */
 (function () {
   'use strict';
@@ -16,7 +22,7 @@
 
   // ── 操作函数 ──
 
-  window.cancelJob = function (jobId) {
+  function cancelJob(jobId) {
     if (!confirmAction('确定取消此任务？\n排队中任务立即取消，下载中任务会尽快停止。')) return;
     apiFetch('/api/jobs/' + encodeJobId(jobId) + '/cancel', { method: 'POST' })
       .then(function () { refreshJobs(); })
@@ -24,9 +30,9 @@
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         showToast('取消失败: ' + err.message, 'danger');
       });
-  };
+  }
 
-  window.pauseJob = function (jobId) {
+  function pauseJob(jobId) {
     apiFetch('/api/jobs/' + encodeJobId(jobId) + '/pause', { method: 'POST' })
       .then(function () {
         showToast('⏸ 已暂停', 'info');
@@ -36,9 +42,9 @@
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         showToast('暂停失败: ' + err.message, 'danger');
       });
-  };
+  }
 
-  window.resumeJob = function (jobId) {
+  function resumeJob(jobId) {
     apiFetch('/api/jobs/' + encodeJobId(jobId) + '/resume', { method: 'POST' })
       .then(function () {
         showToast('▶ 已恢复', 'success');
@@ -48,9 +54,9 @@
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         showToast('恢复失败: ' + err.message, 'danger');
       });
-  };
+  }
 
-  window.retryJob = function (jobId) {
+  function retryJob(jobId) {
     apiFetch('/api/jobs/' + encodeJobId(jobId) + '/retry', { method: 'POST' })
       .then(function (data) {
         showToast('已创建新任务 (新ID: ' + data.job_id + ')', 'success');
@@ -60,9 +66,9 @@
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         showToast('重试失败: ' + err.message, 'danger');
       });
-  };
+  }
 
-  window.deleteJob = function (jobId) {
+  function deleteJob(jobId) {
     if (!confirmAction('确定删除此记录？不会删除已下载的文件。')) return;
     apiFetch('/api/jobs/' + encodeJobId(jobId), { method: 'DELETE' })
       .then(function () { refreshJobs(); })
@@ -70,19 +76,19 @@
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         showToast('删除失败: ' + err.message, 'danger');
       });
-  };
+  }
 
-  // openFolder 由 utils.js 提供（此前此处有一份完全相同的重复定义，已移除）
+  // openFolder 由 utils.js 提供（window.openFolder，首页也在用）
 
   // ── 导出 ZIP / PDF ──
 
-  window.exportZip = function (jobId) {
+  function exportZip(jobId) {
     downloadExport('/api/export/' + encodeJobId(jobId) + '/zip', 'ZIP');
-  };
+  }
 
-  window.exportPdf = function (jobId) {
+  function exportPdf(jobId) {
     downloadExport('/api/export/' + encodeJobId(jobId) + '/pdf', 'PDF');
-  };
+  }
 
   /**
    * 导出通用处理：调用 API 获取 blob 并下载
@@ -126,9 +132,10 @@
 
   // ── 批量清理 ──
 
-  window.clearJobs = function (status) {
+  function clearJobs(status) {
     var labels = { completed: '已完成', failed: '失败', canceled: '已取消' };
-    var label = labels[status] || status;
+    if (!labels.hasOwnProperty(status)) return;
+    var label = labels[status];
     var msg = '确定清空所有「' + label + '」任务记录？\n\n此操作只删除数据库记录，不会删除已下载的文件。';
     if (!confirmAction(msg)) return;
 
@@ -141,9 +148,9 @@
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         showToast('操作失败: ' + err.message, 'danger');
       });
-  };
+  }
 
-  window.clearFinished = function () {
+  function clearFinished() {
     var msg = '确定清空所有「已完成 / 失败 / 已取消」任务记录？\n\n此操作只删除数据库记录，不会删除已下载的文件。\n排队中和进行中的任务不受影响。';
     if (!confirmAction(msg)) return;
 
@@ -156,12 +163,12 @@
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         showToast('操作失败: ' + err.message, 'danger');
       });
-  };
+  }
 
   /**
    * 批量重试所有失败任务（串行，避免触发风控）
    */
-  window.batchRetryFailed = function () {
+  function batchRetryFailed() {
     var msg = '确定批量重试所有「失败」任务？\n\n将逐个创建新任务并开始下载。\n注意：原有失败记录会被保留。';
     if (!confirmAction(msg)) return;
 
@@ -204,7 +211,92 @@
     }
 
     retryNext(0);
+  }
+
+  // ── 按钮事件：一个委托监听器（静态工具栏 + 动态任务卡片） ──
+
+  var ACTIONS = {
+    pause: function (el) { pauseJob(el.getAttribute('data-job-id')); },
+    resume: function (el) { resumeJob(el.getAttribute('data-job-id')); },
+    cancel: function (el) { cancelJob(el.getAttribute('data-job-id')); },
+    retry: function (el) { retryJob(el.getAttribute('data-job-id')); },
+    'delete': function (el) { deleteJob(el.getAttribute('data-job-id')); },
+    'open-folder': function (el) { window.openFolder(el.getAttribute('data-job-id')); },
+    'export-zip': function (el) { exportZip(el.getAttribute('data-job-id')); },
+    'export-pdf': function (el) { exportPdf(el.getAttribute('data-job-id')); },
+    'batch-retry': function () { batchRetryFailed(); },
+    clear: function (el) { clearJobs(el.getAttribute('data-status')); },
+    'clear-finished': function () { clearFinished(); }
   };
+
+  var tabsContent = document.getElementById('downloadTabsContent');
+  if (tabsContent) {
+    tabsContent.addEventListener('click', function (event) {
+      var el = event.target.closest('button[data-action]');
+      if (!el || !tabsContent.contains(el) || el.disabled) return;
+      var action = el.getAttribute('data-action');
+      if (Object.prototype.hasOwnProperty.call(ACTIONS, action)) ACTIONS[action](el);
+    });
+  }
+
+  /** 任务操作按钮：job_id 只放进 data-* 属性（escapeHtmlAttr 对属性值安全）；title 为固定文案 */
+  function jobButton(action, job, className, title, inner, iconOnly) {
+    return '<button type="button" class="btn btn-sm ' + className + '" data-action="' + action + '"'
+      + ' data-job-id="' + escapeHtmlAttr(job.job_id) + '" title="' + title + '"'
+      + (iconOnly ? ' aria-label="' + title + '"' : '') + '>' + inner + '</button>';
+  }
+
+  // ── 本地可读（已下载）判断：与搜索/详情/收藏/资源库同一规则（/api/preview/available） ──
+
+  var readableAlbums = {};   // album_id → true（可读）/ false（判断过，不可读）；没有键 = 还没判断
+  var readableKey = null;    // 上次判断时的已完成 + 失败 album_id 集合
+  var readableCheckedAt = 0;
+  var readableSerial = 0;
+  var lastCompleted = [];
+  var lastFailed = [];
+  var READABLE_RECHECK_MS = 60000; // 文件可能在页面打开期间被移走：至少每分钟复查一次
+
+  function refreshReadable(finishedJobs) {
+    var ids = [];
+    finishedJobs.forEach(function (job) {
+      var id = String(job.album_id || '');
+      if (/^[0-9]{1,20}$/.test(id) && ids.indexOf(id) < 0) ids.push(id);
+    });
+    var key = ids.slice().sort().join(',');
+    if (key === readableKey && Date.now() - readableCheckedAt < READABLE_RECHECK_MS) return;
+    readableKey = key;
+    readableCheckedAt = Date.now();
+    var serial = ++readableSerial;
+    if (ids.length === 0) { readableAlbums = {}; return; }
+
+    var chunks = [];
+    for (var i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200)); // 接口单次最多 200 个
+    Promise.all(chunks.map(function (chunk, n) {
+      return apiFetch('/api/preview/available', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ album_ids: chunk }),
+        timeoutMs: 15000,
+        abortKey: 'downloads-readable-' + n
+      });
+    }))
+      .then(function (results) {
+        if (serial !== readableSerial) return;
+        var next = {};
+        ids.forEach(function (id) { next[id] = false; });
+        results.forEach(function (data) {
+          if (data.status !== 'ok') throw new Error(data.message || '判断失败');
+          (data.readable || []).forEach(function (id) { next[String(id)] = true; });
+        });
+        readableAlbums = next;
+        renderSection('completed', lastCompleted, renderCompletedCard);
+        renderSection('failed', lastFailed, renderFailedCard);
+      })
+      .catch(function () {
+        // 失败时保留上次结果，下次轮询重试（中止/超时/网络错误都静默，不打扰用户）
+        if (serial === readableSerial) readableKey = null;
+      });
+  }
 
   // ── 刷新任务列表 ──
 
@@ -251,11 +343,14 @@
     // paused 任务也算在"进行中"区域一并显示
     var runningItems = groups.running.concat(groups.paused);
 
-    // 渲染每个区域
+    // 渲染每个区域（已完成/失败区先用缓存的可读结果渲染，“阅读”按钮不会随轮询闪烁）
+    lastCompleted = groups.completed;
+    lastFailed = groups.failed;
     renderSection('running', runningItems, renderRunningCard);
     renderSection('queued', groups.queued, renderQueuedCard);
     renderSection('completed', groups.completed, renderCompletedCard);
     renderSection('failed', groups.failed, renderFailedCard);
+    refreshReadable(groups.completed.concat(groups.failed));
 
     // 更新计数徽章 — running 计数包含 paused
     var runningCount = groups.running.length + groups.paused.length;
@@ -265,6 +360,12 @@
       var el = document.getElementById(s + '-count');
       if (el) el.textContent = groups[s].length;
     });
+  }
+
+  /** readableAlbums 里的判断结果：true / false；还没判断 → undefined */
+  function readableState(albumId) {
+    var key = String(albumId);
+    return Object.prototype.hasOwnProperty.call(readableAlbums, key) ? readableAlbums[key] === true : undefined;
   }
 
   function renderSection(status, items, renderFn) {
@@ -286,30 +387,31 @@
     var badgeClass = isPaused ? 'bg-warning text-dark' : 'bg-primary';
     var badgeIcon = isPaused ? 'bi-pause-circle' : 'bi-arrow-repeat';
     var badgeText = isPaused ? '已暂停' : job._pct + '%';
+    var jobIdAttr = escapeHtmlAttr(job.job_id);
 
     var actionButtons = '';
     if (isPaused) {
       actionButtons = ''
-        + '<button class="btn btn-sm btn-outline-success me-1" onclick="resumeJob(\'' + encodeJobId(job.job_id) + '\')" title="恢复下载"><i class="bi bi-play-fill"></i> 恢复</button>'
-        + '<button class="btn btn-sm btn-outline-danger" onclick="cancelJob(\'' + encodeJobId(job.job_id) + '\')" title="取消"><i class="bi bi-x-circle"></i> 取消</button>';
+        + jobButton('resume', job, 'btn-outline-success me-1', '恢复下载', '<i class="bi bi-play-fill"></i> 恢复')
+        + jobButton('cancel', job, 'btn-outline-danger', '取消', '<i class="bi bi-x-circle"></i> 取消');
     } else {
       actionButtons = ''
-        + '<button class="btn btn-sm btn-outline-warning me-1" onclick="pauseJob(\'' + encodeJobId(job.job_id) + '\')" title="暂停下载"><i class="bi bi-pause-fill"></i> 暂停</button>'
-        + '<button class="btn btn-sm btn-outline-danger" onclick="cancelJob(\'' + encodeJobId(job.job_id) + '\')" title="取消"><i class="bi bi-x-circle"></i> 取消</button>';
+        + jobButton('pause', job, 'btn-outline-warning me-1', '暂停下载', '<i class="bi bi-pause-fill"></i> 暂停')
+        + jobButton('cancel', job, 'btn-outline-danger', '取消', '<i class="bi bi-x-circle"></i> 取消');
     }
 
     // paused 状态时进度条停止动画
     var progressClass = isPaused ? 'progress-bar' : 'progress-bar progress-bar-striped progress-bar-animated';
 
-    return '<div class="card job-card shadow-sm mb-3" data-job-id="' + job.job_id + '" data-status="' + job.status + '">'
+    return '<div class="card job-card shadow-sm mb-3" data-job-id="' + jobIdAttr + '" data-status="' + escapeHtmlAttr(job.status) + '">'
       + '<div class="card-body">'
       + '<div class="d-flex justify-content-between align-items-start mb-2">'
       + '<div><h6 class="mb-1">' + escapeHtml(job.title) + '</h6>'
-      + '<small class="text-muted" id="info-' + job.job_id + '">' + (job.done_pages || 0) + ' / ' + (job.total_pages || 0) + ' 页</small></div>'
-      + '<span class="badge ' + badgeClass + '" id="pct-' + job.job_id + '"><i class="' + badgeIcon + '"></i> ' + badgeText + '</span>'
+      + '<small class="text-muted" id="info-' + jobIdAttr + '">' + (job.done_pages || 0) + ' / ' + (job.total_pages || 0) + ' 页</small></div>'
+      + '<span class="badge ' + badgeClass + '" id="pct-' + jobIdAttr + '"><i class="' + badgeIcon + '"></i> ' + badgeText + '</span>'
       + '</div>'
       + '<div class="progress mb-2">'
-      + '<div id="progress-' + job.job_id + '" class="' + progressClass + '" role="progressbar" style="width:' + job._pct + '%"></div>'
+      + '<div id="progress-' + jobIdAttr + '" class="' + progressClass + '" role="progressbar" style="width:' + job._pct + '%"></div>'
       + '</div>'
       + '<div class="d-flex justify-content-end">'
       + actionButtons
@@ -317,41 +419,54 @@
   }
 
   function renderQueuedCard(job) {
-    return '<div class="card job-card shadow-sm mb-3" data-job-id="' + job.job_id + '" data-status="queued">'
+    return '<div class="card job-card shadow-sm mb-3" data-job-id="' + escapeHtmlAttr(job.job_id) + '" data-status="queued">'
       + '<div class="card-body d-flex justify-content-between align-items-center">'
       + '<div><h6 class="mb-1">' + escapeHtml(job.title) + '</h6><small class="text-muted">等待中...</small></div>'
-      + '<button class="btn btn-sm btn-outline-danger" onclick="cancelJob(\'' + encodeJobId(job.job_id) + '\')"><i class="bi bi-x-circle"></i> 取消</button>'
+      + jobButton('cancel', job, 'btn-outline-danger', '取消', '<i class="bi bi-x-circle"></i> 取消')
       + '</div></div>';
   }
 
   function renderCompletedCard(job) {
-    var cbzBadge = job.has_cbz ? '<span class="badge bg-info me-1"><i class="bi bi-archive"></i> 📦 CBZ</span> ' : '';
-    return '<div class="card job-card shadow-sm mb-3" data-job-id="' + job.job_id + '" data-status="completed">'
-      + '<div class="card-body d-flex justify-content-between align-items-center">'
-      + '<div><h6 class="mb-1">' + escapeHtml(job.title) + '</h6>'
+    var cbzBadge = job.has_cbz ? '<span class="badge bg-info"><i class="bi bi-archive"></i> 📦 CBZ</span>' : '';
+    var albumPath = encodeURIComponent(job.album_id);
+    // 本地可读：与其他页面同一规则、同一标记。判断结果回来之前（known=false）两种标记都不显示
+    var albumKey = String(job.album_id);
+    var known = Object.prototype.hasOwnProperty.call(readableAlbums, albumKey);
+    var readable = known && readableAlbums[albumKey] === true;
+    var marker = readable
+      ? '<span class="offline-badge" title="本地文件完整，可以离线阅读"><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载 · 可离线阅读</span>'
+      : (known ? '<span class="badge status-badge-muted" title="下载过，但本地文件已不在，需要重新下载">文件已删除</span>' : '');
+    // 阅读（连续滚动）每张卡片都有：已下载打开本地文件，否则在线阅读；
+    // 预览（/preview，单页翻页）只读本地文件，只在本地可读时出现
+    var readBtn = window.readLink.html(job.album_id, readableState(job.album_id), 'btn-sm');
+    // 标题/状态/路径在左，按钮组在右；状态徽章跟着标题，不随按钮多少左右移动。
+    // 放不下时按钮组整体换行（长路径不再把按钮文字挤成竖排）
+    return '<div class="card job-card shadow-sm mb-3" data-job-id="' + escapeHtmlAttr(job.job_id) + '" data-status="completed">'
+      + '<div class="card-body job-card-row">'
+      + '<div class="job-card-info"><h6 class="mb-1">' + escapeHtml(job.title) + '</h6>'
+      + '<div class="job-card-status">' + cbzBadge + '<span class="badge bg-success">已完成</span>' + marker + '</div>'
       + '<small class="text-muted"><i class="bi bi-folder"></i> ' + escapeHtml(job._path) + '</small></div>'
-      + '<div class="d-flex align-items-center gap-2">'
-      + cbzBadge
-      + '<span class="badge bg-success">已完成</span>'
-      + (job._path ? '<a class="btn btn-sm btn-outline-info" href="/preview/' + encodeJobId(job.album_id) + '" title="本地预览"><i class="bi bi-book"></i> 预览</a>' : '')
-      + (job._path ? '<button class="btn btn-sm btn-outline-secondary" onclick="openFolder(\'' + encodeJobId(job.job_id) + '\')" title="打开文件夹"><i class="bi bi-folder-open"></i></button>' : '')
-      + (job._path ? '<button class="btn btn-sm btn-outline-success" onclick="exportZip(\'' + encodeJobId(job.job_id) + '\')" title="导出 ZIP"><i class="bi bi-file-zip"></i> 📦</button>' : '')
-      + (job._path ? '<button class="btn btn-sm btn-outline-danger" onclick="exportPdf(\'' + encodeJobId(job.job_id) + '\')" title="导出 PDF"><i class="bi bi-file-pdf"></i> 📄</button>' : '')
-      + '<button class="btn btn-sm btn-outline-primary" onclick="retryJob(\'' + encodeJobId(job.job_id) + '\')" title="重新下载"><i class="bi bi-arrow-counterclockwise"></i></button>'
-      + '<button class="btn btn-sm btn-outline-danger" onclick="deleteJob(\'' + encodeJobId(job.job_id) + '\')" title="删除记录"><i class="bi bi-trash"></i></button>'
+      + '<div class="job-card-actions">'
+      + readBtn
+      + (readable && job._path ? '<a class="btn btn-sm btn-outline-info" href="/preview/' + albumPath + '" title="单页翻页预览本地文件"><i class="bi bi-images" aria-hidden="true"></i> 预览</a>' : '')
+      + (job._path ? jobButton('open-folder', job, 'btn-outline-secondary', '打开文件夹', '<i class="bi bi-folder2-open"></i>', true) : '')
+      + (job._path ? jobButton('export-zip', job, 'btn-outline-success', '导出 ZIP', '<i class="bi bi-file-zip"></i> 📦', true) : '')
+      + (job._path ? jobButton('export-pdf', job, 'btn-outline-danger', '导出 PDF', '<i class="bi bi-file-pdf"></i> 📄', true) : '')
+      + jobButton('retry', job, 'btn-outline-primary', '重新下载', '<i class="bi bi-arrow-counterclockwise"></i>', true)
+      + jobButton('delete', job, 'btn-outline-danger', '删除记录', '<i class="bi bi-trash"></i>', true)
       + '</div></div></div>';
   }
 
   function renderFailedCard(job) {
     var errorHtml = '';
     if (job._error) {
-      errorHtml = '<div class="alert alert-danger py-2 px-3 mt-2 mb-0" role="alert" style="font-size:0.85rem;border-left:4px solid #dc3545;">'
+      errorHtml = '<div class="alert alert-danger py-2 px-3 mt-2 mb-0" role="alert" style="font-size:0.85rem;border-left:4px solid var(--error);">'
         + '<i class="bi bi-exclamation-circle me-1"></i>'
         + '<strong>错误信息：</strong> ' + escapeHtml(job._error)
         + '</div>';
     }
 
-    return '<div class="card job-card shadow-sm mb-3 border-danger" data-job-id="' + job.job_id + '" data-status="failed">'
+    return '<div class="card job-card shadow-sm mb-3 border-danger" data-job-id="' + escapeHtmlAttr(job.job_id) + '" data-status="failed">'
       + '<div class="card-body">'
       + '<div class="d-flex justify-content-between align-items-start">'
       + '<div><h6 class="mb-1">' + escapeHtml(job.title) + '</h6></div>'
@@ -359,8 +474,9 @@
       + '</div>'
       + errorHtml
       + '<div class="d-flex justify-content-end gap-2 mt-2">'
-      + '<button class="btn btn-sm btn-outline-warning" onclick="retryJob(\'' + encodeJobId(job.job_id) + '\')" title="重试"><i class="bi bi-arrow-counterclockwise"></i> 重试</button>'
-      + '<button class="btn btn-sm btn-outline-danger" onclick="deleteJob(\'' + encodeJobId(job.job_id) + '\')" title="删除记录"><i class="bi bi-trash"></i></button>'
+      + window.readLink.html(job.album_id, readableState(job.album_id), 'btn-sm')
+      + jobButton('retry', job, 'btn-outline-warning', '重试', '<i class="bi bi-arrow-counterclockwise"></i> 重试')
+      + jobButton('delete', job, 'btn-outline-danger', '删除记录', '<i class="bi bi-trash"></i>', true)
       + '</div></div></div>';
   }
 
@@ -370,14 +486,32 @@
     onFailed: function () { refreshJobs(); },
   });
 
+  // ── 轮询：离开页面（含进入 bfcache）时停止，返回时立即刷新并恢复 ──
+  function startPolling() {
+    if (!pollTimer) pollTimer = setInterval(refreshJobs, 5000);
+  }
+  function stopPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
   // ── 初始化 ──
   document.addEventListener('DOMContentLoaded', function () {
     refreshJobs();
-    pollTimer = setInterval(refreshJobs, 5000);
+    startPolling();
   });
 
-  // ── 页面关闭时停止轮询 ──
-  window.addEventListener('beforeunload', function () {
-    if (pollTimer) clearInterval(pollTimer);
+  window.addEventListener('pagehide', stopPolling);
+  window.addEventListener('pageshow', function (event) {
+    if (!event.persisted) return;
+    readableKey = null; // 回到本页：重新判断哪些可以离线阅读
+    refreshJobs();
+    startPolling();
+  });
+  // 切回本标签页时重新判断（文件可能在别处被移动/删除）
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible' || !pollTimer) return;
+    readableKey = null;
+    refreshJobs();
   });
 })();

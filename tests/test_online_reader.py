@@ -138,7 +138,9 @@ def online(client, tmp_path, monkeypatch):
     online_reader.clear_cache()
 
 
-def test_online_page_uses_reader_in_online_mode(client):
+def test_online_page_uses_reader_in_online_mode(client, monkeypatch):
+    from core import local_availability
+    monkeypatch.setattr(local_availability, "is_readable", lambda album_id: True)  # /read: album counts as downloaded
     online_html = client.get("/online/123").get_data(as_text=True)
     assert 'data-source="online"' in online_html and "js/reader.js" in online_html
     assert 'id="reader-paged"' not in online_html  # the paged view only reads local files

@@ -66,22 +66,22 @@
 
     <!-- 已完成 -->
     <div class="tab-pane fade" id="completed" role="tabpanel" aria-labelledby="completed-tab">
-        <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
             <span class="fw-semibold text-success"><i class="bi bi-check-circle"></i> 已完成</span>
-            <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-outline-warning" onclick="batchRetryFailed()"
+            <div class="d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-sm btn-outline-warning" data-action="batch-retry"
                         title="重试所有失败任务">
                     <i class="bi bi-arrow-counterclockwise"></i> 批量重试
                 </button>
-                <button class="btn btn-sm btn-outline-warning" onclick="clearJobs('canceled')"
+                <button type="button" class="btn btn-sm btn-outline-warning" data-action="clear" data-status="canceled"
                         title="只删除记录，不删除文件">
                     <i class="bi bi-trash"></i> 清空已取消
                 </button>
-                <button class="btn btn-sm btn-outline-success" onclick="clearJobs('completed')"
+                <button type="button" class="btn btn-sm btn-outline-success" data-action="clear" data-status="completed"
                         title="只删除记录，不删除文件">
                     <i class="bi bi-trash"></i> 清空已完成
                 </button>
-                <button class="btn btn-sm btn-outline-secondary" onclick="clearFinished()"
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-action="clear-finished"
                         title="只删除记录，不删除文件">
                     <i class="bi bi-trash-fill"></i> 清空全部已完成记录
                 </button>
@@ -97,14 +97,14 @@
 
     <!-- 失败 -->
     <div class="tab-pane fade" id="failed" role="tabpanel" aria-labelledby="failed-tab">
-        <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
             <span class="fw-semibold text-danger"><i class="bi bi-exclamation-triangle"></i> 失败</span>
-            <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-outline-warning" onclick="batchRetryFailed()"
+            <div class="d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-sm btn-outline-warning" data-action="batch-retry"
                         title="重试所有失败任务">
                     <i class="bi bi-arrow-counterclockwise"></i> 批量重试
                 </button>
-                <button class="btn btn-sm btn-outline-danger" onclick="clearJobs('failed')"
+                <button type="button" class="btn btn-sm btn-outline-danger" data-action="clear" data-status="failed"
                         title="只删除记录，不删除文件">
                     <i class="bi bi-trash"></i> 清空失败
                 </button>

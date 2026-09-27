@@ -54,7 +54,7 @@
                 <label for="timeout" class="form-label">超时（秒）</label>
                 <input type="number" id="timeout" name="timeout" class="form-control"
                        min="5" max="120" value="{{ settings.timeout or 30 }}">
-                <div class="form-text">建议范围：<strong>10-60</strong> 秒。网络较差时可适当调高</div>
+                <div class="form-text">建议范围：<strong>10-60</strong> 秒。网络较差时可适当调高。同时限制在线阅读每一页的加载时间（至少 15 秒）</div>
                 <div class="invalid-feedback"></div>
             </div>
             <div class="col-6 col-md-3" data-setting-key="retry_times">

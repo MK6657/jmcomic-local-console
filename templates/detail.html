@@ -3,7 +3,8 @@
 
 {% block content %}
 
-<!-- 封面与信息卡片在 JS 渲染的 .row 内并排、顶端对齐；章节列表在下方占满整行 -->
+<!-- 封面与信息卡片在 JS 渲染的 .row 内并排、垂直居中；章节列表在下方占满整行；
+     本地可读时显示“已下载 · 可离线阅读”标记与“阅读”按钮（/api/preview/available） -->
 <div class="pt-3" id="album-detail-container">
     <!-- 加载中 -->
     <div class="text-center py-5" id="loading-spinner">
@@ -27,5 +28,6 @@
 {% block scripts_extra %}
 <script>var albumId = {{ album_id|tojson }};</script>
 <script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/reading-nav.js') }}"></script>
 <script src="{{ asset_url('js/detail.js') }}"></script>
 {% endblock %}
