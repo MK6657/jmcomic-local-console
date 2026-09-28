@@ -2,12 +2,13 @@
 jmcomic 服务封装模块
 使用 build_jmcomic_option() 确保设置真实生效。
 """
+import hashlib
 import os
-import shutil
+import re
 import tempfile
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ from . import database as db
 from .logger import log, bind_request_id
 from .progress import progress_manager
 from .settings import get_settings, build_jmcomic_option
-from .validation import safe_dirname as _safe_dirname
+from .validation import is_allowed_image, safe_dirname as _safe_dirname
 from .path_guard import DOWNLOAD_ROOT, is_safe_path
 from .packer import CbzPacker
 from .file_tree import is_link
@@ -227,7 +228,7 @@ def _download_image_single_attempt(
     client, job_id, album_id, album, output_path,
     photo, idx, img, img_url, img_path, scramble_id,
     done_pages, total_pages, failed_pages, pending_images,
-    tracker, photo_dir, pass_num, timeout, lock, refetch_gif=False,
+    tracker, photo_dir, pass_num, timeout, lock, refetch_gif=False, flat_pages=frozenset(),
 ):
     """单张图片单次下载尝试。
     成功 → done_pages +1
@@ -243,8 +244,13 @@ def _download_image_single_attempt(
 
     gif = image_is_gif(img)
     skip = get_settings().get("skip_existing", "true") == "true"
-    # refetch_gif：章节目录是旧版本下载的（GIF 页被切片/只剩第一帧），GIF 页不能按“已存在”跳过
-    if skip and pass_num == 1 and not (gif and refetch_gif) and _valid_image(img_path):
+    # refetch_gif：章节目录是旧版本下载的（GIF 页被切片/只剩第一帧），GIF 页不能按“已存在”跳过。
+    # 已存在：章节目录里的这一页是有效图片，或者章节目录里没有这一页、而它已按本版本起的页名扁平化在漫画目录里
+    # （flat_pages：_FlatPages.numbers，散图或压缩包里）——否则重新下载会把扁平化过的页再下一遍，整理后同一页出现两次。
+    # 章节目录里这一页坏了（打不开）时重新下载：新页整理时替换扁平页，坏页永远不会替换好页
+    if (skip and pass_num == 1 and not (gif and refetch_gif)
+            and (_valid_image(img_path)
+                 or (img_path.stem in flat_pages and not os.path.lexists(img_path)))):
         with lock:
             done_pages[0] += 1
         if tracker:
@@ -621,13 +627,319 @@ def _reusable_album_dir(album_id: str) -> Path | None:
     return path
 
 
-def organize_download(output_path: str, mode: str, album) -> str | None:
+# Windows 上文件 / 目录（或目录里的文件）正被别的程序打开且没允许删除共享时（杀毒软件扫描刚写好的页、资源管理器的
+# 缩略图 / 预览、索引、看图软件、阅读器正在发送的页），改名会失败（PermissionError，WinError 5 / 32）。
+# 这些程序通常很快放手：短暂重试几次，总共最多等约 2.6 秒
+_LOCK_RETRY_DELAYS = (0.1, 0.25, 0.5, 0.75, 1.0)
+
+
+def _looks_locked(error: OSError) -> bool:
+    return isinstance(error, PermissionError) or getattr(error, "winerror", None) in (5, 32)
+
+
+def _retry_on_lock(operation, *args) -> None:
+    """operation(*args)；看起来是被占用（_looks_locked）就按 _LOCK_RETRY_DELAYS 短暂重试。
+    最后仍失败时抛出最后的 OSError（跨磁盘 EXDEV 之类不是占用的错误不重试）"""
+    for delay in (*_LOCK_RETRY_DELAYS, None):
+        try:
+            operation(*args)
+            return
+        except OSError as e:
+            if delay is None or not _looks_locked(e):
+                raise
+            time.sleep(delay)
+
+
+def _rename_with_retry(src, dst, replace: bool = False) -> None:
+    """os.rename（目标已存在时失败）或 replace=True 时 os.replace（原子替换已有文件）；被占用时短暂重试。
+    从不复制再删除"""
+    _retry_on_lock(os.replace if replace else os.rename, src, dst)
+
+
+# 扁平化整理挪到漫画目录下的图片后缀
+_FLAT_IMAGE_SUFFIXES = (".webp", ".jpg", ".jpeg", ".png", ".gif", ".bmp")
+# 章节目录里一页的文件名（不含后缀）就是它的页号 NNNNN（_download_image_single_attempt 写的 00001.webp …）
+_PAGE_NUMBER = re.compile(r"[0-9]{5}")
+# 扁平页名去掉“<前缀>_”之后（不含后缀）：本版本起写的 p<页号>；旧版本写的是 5 位的累加序号
+_FLAT_NEW_REST = re.compile(r"p([0-9]{5})")
+_FLAT_LEGACY_REST = re.compile(r"[0-9]{5}")
+
+
+def _flat_prefix(chapter_dir_name: str) -> str:
+    """扁平化后页名的章节前缀：章节目录名，空格换成 _。整理（organize_download）和 skip_existing 共用这一条规则"""
+    return chapter_dir_name.replace(" ", "_")
+
+
+def _flat_page_name(chapter_dir_name: str, page_name: str) -> str:
+    """章节目录里的一张图扁平化后的名字。页（NNNNN.<后缀>，NNNNN 是页号）→ <前缀>_pNNNNN.<后缀>，
+    如 第1话__71_p00001.webp：同一章的同一页永远是同一个名字。别的图片 → <前缀>_x<原文件名>。
+    旧版本的扁平页名是 <前缀>_NNNNN.<后缀>，NNNNN 是那次整理全程累加的序号、不是页号（第2话__72_00004 可能是
+    第 2 话的第 1 页）：这里起的名字（p / x 开头）永远不会和它们重名，旧文件永远不会被当成别的页、被覆盖"""
+    stem, suffix = os.path.splitext(page_name)
+    tag = "p" if _PAGE_NUMBER.fullmatch(stem) else "x"
+    return f"{_flat_prefix(chapter_dir_name)}_{tag}{stem}{suffix}"
+
+
+class _AlbumRoot:
+    """漫画目录第一层，列一次目录、首趟各章共用（_FlatPages）：不再每一章把整个目录和它的压缩包重新列一遍——
+    扁平化过的长篇漫画第一层有上万个文件，每章都列一遍、逐个算 page_key 要好几分钟。首趟期间第一层不会变
+    （页写进章节目录，扁平化和打包都在首趟之后），所以一个任务用同一份：
+      entries：章节前缀 → 第一层的条目（os.DirEntry），按名字去掉最后一个“_”及其后的部分分组：扁平页名
+               <前缀>_pNNNNN.<后缀> 和旧页名 <前缀>_NNNNN.<后缀> 这样分组正好落在 <前缀> 下
+      keys：第一层每个条目的 page_key（不管是不是有效图片）：压缩包里的同一页被它挡住
+      archives：第一层可用的压缩包（archive_pages.candidates，按优先顺序）
+    压缩包仍是每章按 archive_pages.select 的规则选一次（archive_pages.select_from：没变的压缩包直接用记住的页目录，
+    暂时打不开的后面的章节再试）；选中的压缩包第一层的页按同样的前缀分组，同一个压缩包（签名不变）只分一次"""
+
+    def __init__(self, album_dir):
+        self.album_dir = Path(album_dir)
+        self.entries: dict[str, list] = {}
+        self.keys: set[str] = set()
+        try:
+            with os.scandir(self.album_dir) as found:
+                for entry in found:
+                    self.keys.add(archive_pages.page_key(entry.name))
+                    self.entries.setdefault(entry.name.rsplit("_", 1)[0], []).append(entry)
+        except OSError:
+            pass  # 列不出目录：什么都不算已存在（照常下载，不会少页）
+        try:
+            self.archives = archive_pages.candidates(self.album_dir)
+        except Exception as e:
+            log.warning(f"列出漫画目录里的压缩包失败（按没有压缩包处理）dir={self.album_dir} error={e}")
+            self.archives = []
+        self._grouped: dict = {}
+        self._lock = threading.Lock()
+
+    def archive(self):
+        """该用的压缩包（archive_pages.select 的规则，用列好的候选）"""
+        return archive_pages.select_from(self.archives)
+
+    def archived(self, index, prefix: str):
+        """压缩包 index 第一层里、按 entries 的规则分组落在 prefix 下的阅读器页"""
+        key = (index.path, index.signature)
+        with self._lock:
+            groups = self._grouped.get(key)
+            if groups is None:
+                groups = {}
+                for page in index.reader_pages:
+                    if not page.chapter:  # 按章节目录存的页不算（不整理时的布局，不认）
+                        groups.setdefault(page.name.rsplit("_", 1)[0], []).append(page)
+                self._grouped[key] = groups
+        return groups.get(prefix, ())
+
+
+class _FlatPages:
+    """一章已经扁平化在漫画目录里的页（skip_existing 用；不论现在选的是哪种整理方式——用户可能换过）。
+    散图只算漫画目录第一层的普通文件（不是链接、在下载目录里、有效图片）；压缩包是阅读器用的那个
+    （archive_pages.select 的规则，能读、不是暂时打不开），只算它第一层的页，而且只算漫画目录里没有同一页
+    （page_key 相同）散图的——有这样的散图（哪怕是坏的、空的）时阅读器和自动打包都用散图，这一页只看散图：
+    散图坏了就重新下载、替换它，否则自动打包会拿坏散图覆盖压缩包里的好页（章节目录里的页也是同一规则）。
+    root：首趟各章共用的 _AlbumRoot（不传时自己列一次）；只看这一章前缀下的条目。
+      numbers：本版本起的页名 <前缀>_pNNNNN 认出的页号 NNNNN（散图须是 .webp、有效图片，与章节目录里的页同一规则）
+      new_any：有没有任何一张本版本起的扁平页（压缩包里的，或散图——坏的也算：这一章就不按旧页名整章认，
+               坏散图这一页重新下载、替换它，不会因为整章算已存在而永远留着）
+      legacy：旧版本页名 <前缀>_NNNNN（累加序号）的页，按 page_key 去重——散图和压缩包里的同一页只算一次，
+              与阅读器（archive_pages.merge_pages）一致"""
+
+    def __init__(self, photo_dir, root: _AlbumRoot | None = None):
+        self.numbers: set[str] = set()
+        self.new_any = False
+        self.legacy: set[str] = set()
+        photo_dir = Path(photo_dir)
+        if root is None:
+            root = _AlbumRoot(photo_dir.parent)
+        prefix = _flat_prefix(photo_dir.name)
+        head = prefix + "_"
+        for entry in root.entries.get(prefix, ()):
+            kind, value = self._classify(head, entry.name)
+            if kind is None:
+                continue
+            path = Path(entry.path)
+            try:
+                if not entry.is_file(follow_symlinks=False) or is_link(path) or not is_safe_path(path):
+                    continue
+                if kind == "new":
+                    self.new_any = True
+                if not _valid_image(path):
+                    continue
+            except OSError:
+                continue
+            if kind == "new":
+                if entry.name.lower().endswith(".webp"):
+                    self.numbers.add(value)
+            else:
+                self.legacy.add(value)
+        try:
+            index = root.archive()
+        except Exception as e:
+            log.warning(f"读取漫画目录里的压缩包失败（按没有压缩包处理）dir={root.album_dir} error={e}")
+            index = None
+        if index is not None and index.status == "ok" and not index.transient:
+            for page in root.archived(index, prefix):
+                kind, value = self._classify(head, page.name)
+                if kind == "new":
+                    self.new_any = True
+                    if archive_pages.page_key(page.name) not in root.keys:
+                        self.numbers.add(value)
+                elif kind == "legacy" and value not in root.keys:
+                    self.legacy.add(value)
+
+    @staticmethod
+    def _classify(head: str, name: str):
+        """('new', 页号) / ('legacy', page_key) / (None, None)"""
+        if not name.startswith(head):
+            return None, None
+        rest, suffix = os.path.splitext(name[len(head):])
+        if suffix.lower() not in _FLAT_IMAGE_SUFFIXES:
+            return None, None
+        match = _FLAT_NEW_REST.fullmatch(rest)
+        if match:
+            return "new", match.group(1)
+        if _FLAT_LEGACY_REST.fullmatch(rest):
+            return "legacy", archive_pages.page_key(name)
+        return None, None
+
+
+def _has_own_page(photo_dir) -> bool:
+    """章节目录里有没有这一章自己的页：一张有效图片，或者一个页文件 NNNNN.webp（下载写的名字）——哪怕它坏了、
+    是空的：坏页要逐页重新下载、替换掉，不能因为整章按旧页名算已存在而永远留着（扁平化不挪坏图）。
+    别的坏图片（如中断留下的临时文件 00001.xxxx.webp）不算：重新下载也替换不了它"""
+    try:
+        for path in Path(photo_dir).iterdir():
+            suffix = path.suffix.lower()
+            if suffix not in _FLAT_IMAGE_SUFFIXES or not path.is_file():
+                continue
+            if (suffix == ".webp" and _PAGE_NUMBER.fullmatch(path.stem)) or _valid_image(path):
+                return True
+    except OSError:
+        return True  # 看不清：按有处理（不整章跳过，逐页照常判断）
+    return False
+
+
+def _legacy_flattened_chapter(photo_dir, pages: int, flat: _FlatPages) -> bool:
+    """这一章是否已经由旧版本整章扁平化在漫画目录里（旧页名是那次整理全程累加的序号，不是本章的页号，按页认不出来，
+    也永远不按页用）：没有本版本起的扁平页，章节目录里没有这一章自己的页（_has_own_page），而旧页名的页
+    （散图 ∪ 压缩包第一层，同一页只算一次）正好 pages 张。多一张少一张都不算——逐页照常判断，缺的页重新下载，
+    和旧页逐字节相同的新页整理时丢掉（_LegacyFlatCopies），其余的成为新页名，旧文件原样保留"""
+    if pages <= 0 or flat.new_any or len(flat.legacy) != pages:
+        return False
+    return not _has_own_page(photo_dir)
+
+
+def _sha256_of_file(path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class _LegacyFlatCopies:
+    """扁平化去重用：一章旧版本扁平页（<前缀>_NNNNN，累加序号）内容的 sha256 → 张数（Counter）。每张旧页只顶
+    一张新页（_take_legacy_copy 用掉一次）：同一章里两页内容相同（如两张空白页）、旧页只剩其中一张时，另一页不会被丢掉。
+    散图：漫画目录第一层的普通文件（不是链接、在下载目录里、阅读器显示的后缀），读文件；
+    压缩包：阅读器用的那个（archive_pages.select，能读、不是暂时打不开）第一层的页，用 archive_pages 的安全读取
+    （校验 CRC 与大小，从不解压到磁盘），漫画目录里有同一页（page_key 相同）散图的不算——阅读器和自动打包都用
+    散图、不用它。第一次问到某一章时才列目录、读压缩包；这一章没有旧页名的页就什么都不读。
+    读不出来的页（被占用、坏了）、列不出的目录、打不开的压缩包都不算：新页照常扁平化，可能出现两次，一页不丢"""
+
+    def __init__(self, album_dir):
+        self.album_dir = Path(album_dir)
+        self._root = None           # [(名字, 路径)]；None = 还没列
+        self._index = None
+        self._index_read = False
+        self._digests: dict[str, Counter] = {}
+
+    def digests(self, chapter_dir_name: str) -> Counter:
+        """这一章还没被新页顶掉的旧页：sha256 → 张数（同一个 Counter，_take_legacy_copy 就地减）"""
+        head = _flat_prefix(chapter_dir_name) + "_"
+        if head not in self._digests:
+            self._digests[head] = self._read(head)
+        return self._digests[head]
+
+    def _root_entries(self):
+        if self._root is None:
+            try:
+                with os.scandir(self.album_dir) as entries:
+                    self._root = [(entry.name, Path(entry.path)) for entry in entries]
+            except OSError as e:
+                log.warning(f"扁平化去重：列不出漫画目录（不去重）dir={self.album_dir} error={e}")
+                self._root = False
+        return self._root
+
+    def _archive(self):
+        if not self._index_read:
+            self._index_read = True
+            try:
+                index = archive_pages.select(self.album_dir)
+            except Exception as e:
+                log.warning(f"扁平化去重：读取漫画目录里的压缩包失败（不用它去重）dir={self.album_dir} error={e}")
+                index = None
+            if index is not None and index.status == "ok" and not index.transient:
+                self._index = index
+        return self._index
+
+    def _read(self, head: str) -> Counter:
+        root = self._root_entries()
+        if root is False:
+            return Counter()
+        loose = [(name, path) for name, path in root if _FlatPages._classify(head, name)[0] == "legacy"]
+        index = self._archive()
+        packed = []
+        if index is not None:
+            shadowed = {archive_pages.page_key(name) for name, _ in root}
+            packed = [page for page in index.reader_pages
+                      if not page.chapter and _FlatPages._classify(head, page.name)[0] == "legacy"
+                      and archive_pages.page_key(page.name) not in shadowed]
+        found: Counter = Counter()
+        for name, path in loose:
+            try:
+                if (not is_allowed_image(os.path.splitext(name)[1]) or not path.is_file() or is_link(path)
+                        or not is_safe_path(path)):
+                    continue
+                found[_sha256_of_file(path)] += 1
+            except OSError as e:
+                log.warning(f"扁平化去重：读不出旧扁平页（不用它去重）{path} error={e}")
+        if packed:
+            try:
+                with archive_pages.open_pages(index) as read:
+                    for page in packed:
+                        try:
+                            found[hashlib.sha256(read(page)).hexdigest()] += 1
+                        except archive_pages.ArchiveError as e:
+                            log.warning(f"扁平化去重：读不出压缩包里的旧扁平页（不用它去重）"
+                                        f"{index.path.name}:{page.name} error={e}")
+            except Exception as e:
+                log.warning(f"扁平化去重：打不开压缩包（不用它去重）{index.path} error={e}")
+        return found
+
+
+def _take_legacy_copy(path, remaining: Counter) -> bool:
+    """path 的内容和 remaining 里一张还没被顶掉的旧扁平页逐字节相同：用掉那一张（就地减一）并返回 True。
+    读不出来 → 不算"""
+    if not remaining:
+        return False
+    try:
+        digest = _sha256_of_file(path)
+    except OSError:
+        return False
+    if not remaining.get(digest):
+        return False
+    remaining[digest] -= 1
+    if not remaining[digest]:
+        del remaining[digest]
+    return True
+
+
+def organize_download(output_path: str, mode: str, album, report: dict | None = None) -> str | None:
     """整理下载目录结构。
 
     Args:
         output_path: 当前下载输出路径（漫画目录）
         mode: 整理模式 ("none", "by_author", "flat")
         album: jmcomic album 对象（含 name, author 等属性）
+        report: 传入 dict 时，扁平化做完后写入 report["left"]：移不动（或该删的重复页删不掉）、留在章节目录里的有效图片张数
+                （没做完——目录不在、出错——就不写）
 
     Returns:
         新路径，如果未整理则返回 None
@@ -654,35 +966,84 @@ def organize_download(output_path: str, mode: str, album) -> str | None:
                 return None
             if not is_safe_path(new_output):
                 raise ValueError("整理目标路径越权")
-            new_root.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(output), str(new_output))
+            try:
+                new_root.mkdir(parents=True)
+                created_root = True
+            except FileExistsError:
+                created_root = False
+            # 整个目录一次改名：要么整体搬过去，要么原样留在原处。从不“复制一份再删原目录”（shutil.move 改名失败时
+            # 就这么做）：目录里有文件被别的程序打开时（杀毒软件扫描刚写好的页、资源管理器的缩略图 / 预览、索引、
+            # 看图软件）Windows 拒绝改名，删原目录会停在那个文件上，留下删了一半、任务记录还指着的原目录，
+            # 和一份没有任务指向的完整副本。改名失败：目录完整留在原处，任务的 output_path 照旧有效，
+            # 这部漫画下一次下载（写进同一个目录，_reusable_album_dir）完成后再整理一次
+            try:
+                _rename_with_retry(output, new_output)
+            except OSError as e:
+                log.warning(f"按作者整理失败（目录可能正被别的程序占用），保留在原位置，下次下载这部漫画后再整理: "
+                            f"{output_path} -> {new_output} error={e}")
+                if created_root:
+                    _remove_empty_dir(new_root)  # 只删这次建的、仍是空的作者目录
+                return None
             log.info(f"按作者整理完成: {output_path} -> {new_output}")
             return str(new_output)
 
         elif mode == "flat":
-            # 扁平化：将各章节子目录中的图片移到漫画目录下
+            # 扁平化：将各章节子目录中的有效图片（普通文件，不是链接）移到漫画目录下，改名为 _flat_page_name
+            # （<前缀>_pNNNNN.webp）。同一章的同一页每次都得到同一个名字，而且永远不会和旧版本的累加序号页名重名：
+            # 目标已存在就一定是同一章的同一页（真的重新下载了），原子替换它；skip_existing 也按这个名字认出已经
+            # 扁平化的页。坏的 / 空的图片不挪（更不会替换一张好的扁平页）。只改名（被占用时短暂重试），
+            # 从不复制再删除：移不动的页原样留在章节目录里，一页也不会丢，下次下载这部漫画后再整理；
+            # 这期间它排在这一章扁平页的前面，漫画目录里已经有它的一份（替换不了的扁平页，或它重复的旧页）时出现两次。
+            # 旧版本的扁平页（<前缀>_NNNNN）按页认不出来：这一章又下载了的页和其中某一张旧扁平页（散图，或压缩包
+            # 第一层）逐字节相同时，它就是漫画目录里已有的那一页——删掉刚下载的这一张、不挪（旧的那张刚读过、留着），
+            # 否则同一页出现两次。旧版本的扁平页和其他文件从不改名、覆盖或删除
             chapter_dirs = sorted([
                 d for d in output.iterdir()
                 if d.is_dir()
             ])
-            counter = 0
+            legacy_copies = _LegacyFlatCopies(output)
+            moved = left = dropped = 0
             for ch_dir in chapter_dirs:
-                # 取章节名的最后一部分（如 "Ch-c1"）
-                ch_prefix = ch_dir.name.replace(" ", "_")
-                images = sorted(ch_dir.glob("*.*"))
-                for img_path in images:
-                    if img_path.suffix.lower() not in (".webp", ".jpg", ".jpeg", ".png", ".gif", ".bmp"):
+                for img_path in sorted(ch_dir.iterdir()):
+                    if img_path.suffix.lower() not in _FLAT_IMAGE_SUFFIXES:
                         continue
-                    counter += 1
-                    new_name = f"{ch_prefix}_{counter:05d}{img_path.suffix}"
-                    dest = output / new_name
-                    if dest.exists():
-                        log.warning(f"扁平化目标已存在，保留源图片: {dest}")
+                    try:
+                        if not img_path.is_file() or is_link(img_path):
+                            continue
+                    except OSError:
                         continue
-                    shutil.move(str(img_path), str(dest))
-                # 删除空章节目录
+                    dest = output / _flat_page_name(ch_dir.name, img_path.name)
+                    if not _valid_image(img_path):
+                        log.warning(f"扁平化跳过坏的或空的图片，留在章节目录: {img_path}"
+                                    + ("（不替换已有的扁平页）" if os.path.lexists(dest) else ""))
+                        continue
+                    # 它自己的新页名散图已经在、却坏了：不按旧页丢掉，下面替换那张坏散图（否则坏图永远留着、每次重新下载）
+                    if (not (os.path.lexists(dest) and not _valid_image(dest))
+                            and _take_legacy_copy(img_path, legacy_copies.digests(ch_dir.name))):
+                        try:
+                            _retry_on_lock(os.remove, img_path)
+                            dropped += 1
+                            log.info(f"扁平化：和漫画目录里一张旧版本扁平页逐字节相同，删掉刚下载的这一张: {img_path}")
+                        except OSError as e:
+                            left += 1
+                            log.warning(f"扁平化：和旧版本扁平页相同的新页删不掉（可能正被别的程序占用），保留在章节目录，"
+                                        f"下次下载这部漫画后再整理: {img_path} error={e}")
+                        continue
+                    replace = os.path.lexists(dest)
+                    try:
+                        _rename_with_retry(img_path, dest, replace=replace)
+                        moved += 1
+                    except OSError as e:
+                        left += 1
+                        log.warning(f"扁平化移动图片失败（可能正被别的程序占用），保留在章节目录，下次下载这部漫画后再整理: "
+                                    f"{img_path} -> {dest} replace={replace} error={e}")
+                # 删除空章节目录（有章节标记的目录不空，照旧保留）
                 _remove_empty_dir(ch_dir)
-            log.info(f"扁平化整理完成: {output_path}, 共整理 {counter} 张图片")
+            log.info(f"扁平化整理完成: {output_path}, 共整理 {moved} 张图片"
+                     + (f"，{dropped} 张和旧扁平页相同、已删掉" if dropped else "")
+                     + (f"，{left} 张移动失败、留在章节目录" if left else ""))
+            if report is not None:
+                report["left"] = left
             return output_path  # 路径不变
 
     except Exception as e:
@@ -777,22 +1138,44 @@ def _chapter_output_dir(album_dir, photo):
 
 def _download_chapter(
     job_id, album_id, album, album_dir, photo, total_pages,
-    done_pages, pending_images, failed_pages, tracker, pause_ev, lock, pass_num, timeout,
+    done_pages, pending_images, failed_pages, tracker, pause_ev, lock, pass_num, timeout, album_root=None,
 ):
-    """下载单个章节的所有图片（支持章节内多图并行，每图独立 client）"""
+    """下载单个章节的所有图片（支持章节内多图并行，每图独立 client）。
+    album_root：首趟各章共用的漫画目录第一层（_AlbumRoot）；不传时这一章自己列一次"""
     image_threads = int(get_settings().get("image_threads", "3"))
     photo_dir = _chapter_output_dir(album_dir, photo)
     # 旧版本下载的章节：GIF 页可能已被切片/只剩第一帧，首趟不按“已存在”跳过它们
     refetch_gif = _chapter_format(photo_dir) < _CHAPTER_FORMAT
 
     photo_images = list(enumerate(photo))
-    if len(photo_images) <= 1 or image_threads <= 1:
+    skip = get_settings().get("skip_existing", "true") == "true"
+    # 已经扁平化在漫画目录里的页（散图和压缩包；只有首趟、开启了 skip_existing 时才看）
+    flat = _FlatPages(photo_dir, album_root) if skip and pass_num == 1 else None
+    flat_pages = frozenset(flat.numbers) if flat is not None else frozenset()
+    # 旧格式章节只有 GIF 页需要重取（其余页照样按“已存在”跳过）：没有 GIF 页就不算需要重取
+    needs_refetch = refetch_gif and any(image_is_gif(img) for _, img in photo_images)
+    if (flat is not None and not needs_refetch
+            and _legacy_flattened_chapter(photo_dir, len(photo_images), flat)):
+        # 旧版本扁平化过的整章（页名是累加序号，逐页认不出来）：整章算已存在，一页都不下载，
+        # 否则每一页都会再下一遍、整理后出现两次
+        log.info(f"章节已扁平化整理在漫画目录里，整章跳过 job_id={job_id} photo_id={photo.photo_id} "
+                 f"pages={len(photo_images)}")
+        with lock:
+            done_pages[0] += len(photo_images)
+        if tracker:
+            tracker.push("progress", {
+                "job_id": job_id, "status": "running",
+                "done_pages": done_pages[0],
+                "total_pages": total_pages or 0,
+                "progress": round(done_pages[0] / (total_pages or 1) * 100, 1),
+            })
+    elif len(photo_images) <= 1 or image_threads <= 1:
         # 单张图或禁止并行 → 串行
         for i, img in photo_images:
             _download_chapter_image(
                 None, job_id, album_id, album, photo, photo_dir,
                 i, img, total_pages, done_pages, pending_images,
-                failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif,
+                failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif, flat_pages,
             )
     else:
         # 多图并行：每个线程独立 client，避免 HTTP 非线程安全问题
@@ -803,7 +1186,7 @@ def _download_chapter(
                     bind_request_id(_download_chapter_image),
                     None, job_id, album_id, album, photo, photo_dir,
                     i, img, total_pages, done_pages, pending_images,
-                    failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif,
+                    failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif, flat_pages,
                 )
                 img_futs.append(fut)
             for fut in as_completed(img_futs):
@@ -821,7 +1204,7 @@ def _download_chapter(
 def _download_chapter_image(
     _, job_id, album_id, album, photo, photo_dir,
     i, img, total_pages, done_pages, pending_images,
-    failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif=False,
+    failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif=False, flat_pages=frozenset(),
 ):
     """下载单张图片（每个线程独立 client，避免 HTTP 非线程安全问题）"""
     # _should_stop 内部已持锁（db 查询），无需额外保护
@@ -840,6 +1223,7 @@ def _download_chapter_image(
             done_pages, total_pages, failed_pages,
             pending_images if pass_num == 1 else None,
             tracker, photo_dir, pass_num=pass_num, timeout=timeout, lock=lock, refetch_gif=refetch_gif,
+            flat_pages=flat_pages,
         )
     finally:
         close_client(img_client)
@@ -954,6 +1338,8 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
         # ── 首趟：章节级并行，每章独立线程 ──
         photo_threads = int(get_settings().get("photo_threads", "3"))
         log.info(f"章节并行下载 threads={photo_threads} chapters={len(photos_to_download)} job_id={job_id}")
+        # 各章认已扁平化的页（skip_existing）共用的漫画目录第一层：整个首趟只列一次，不是每章列一遍
+        album_root = _AlbumRoot(album_dir) if get_settings().get("skip_existing", "true") == "true" else None
 
         with ThreadPoolExecutor(max_workers=photo_threads) as pool:
             futs = []
@@ -962,7 +1348,7 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
                     bind_request_id(_download_chapter),
                     job_id, album_id, album, album_dir, photo, total_pages,
                     done_pages, pending_images, failed_pages,
-                    tracker, pause_ev, _lock, 1, _FIRST_PASS_TIMEOUT,
+                    tracker, pause_ev, _lock, 1, _FIRST_PASS_TIMEOUT, album_root,
                 )
                 futs.append(fut)
             # 等待所有章节完成，不阻塞 cancel（每个 chapter 线程内检查 _should_stop）
@@ -1018,20 +1404,28 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
 
         # -- 以下为 CBZ 打包、元数据写入、完成标记等（不变）--
         organize_mode = get_settings().get("organize_mode", "none")
+        flat_report = {}
         if (not failed_pages and organize_mode == "by_author"
                 and not _same_dir(Path(output_path).parent, dl_root)):
             # 写进的是已经按作者整理过的目录（不在下载目录第一层）：不再移动，否则会套进 <作者>/<作者>/ 里。
             # 扁平化只在目录里面挪文件，照常做
             log.info(f"下载目录已按作者整理过，不再移动 job_id={job_id} path={output_path}")
         elif not failed_pages and organize_mode and organize_mode != "none":
-            new_path = organize_download(output_path, organize_mode, album)
+            new_path = organize_download(output_path, organize_mode, album, flat_report)
             if new_path:
                 output_path = new_path
                 db.update_job(job_id, output_path=output_path)
                 log.info(f"整理后 output_path 已更新: {output_path}")
 
         settings = get_settings()
-        if not failed_pages and settings.get("auto_pack") == "true":
+        # 扁平化没做完（有页移不动、留在了章节目录里，或整理出错）：这次不自动打包。否则那一页会按章节路径打进包、
+        # 开了“删除原图”还会被删掉，下次下载时再也整理不到它，重新下载的同一页换了名字，包里永远有两份。
+        # 散图原样留着，下次下载这部漫画、整理完后再打包
+        flat_unfinished = (not failed_pages and organize_mode == "flat" and flat_report.get("left") != 0)
+        if flat_unfinished and settings.get("auto_pack") == "true":
+            log.warning(f"扁平化整理没做完（{flat_report.get('left', '出错')} 张图片留在章节目录），这次不自动打包，"
+                        f"下次下载这部漫画后再打包 job_id={job_id} path={output_path}")
+        if not failed_pages and settings.get("auto_pack") == "true" and not flat_unfinished:
             tracker.push("archiving", {
                 "job_id": job_id, "status": "archiving",
                 "message": "正在打包 CBZ...",

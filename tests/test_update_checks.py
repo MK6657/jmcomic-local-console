@@ -232,7 +232,12 @@ def download(client, downloads, monkeypatch):
                     failed_pages, *rest):
             folder = jm_service._chapter_output_dir(album_dir, photo)
             for n in range(1, (written or len(photo)) + 1):
-                (folder / f"{n:05d}.webp").write_bytes(f"{photo.photo_id}-{n}".encode())
+                if organize == "flat":      # flattening moves only valid images: write real ones
+                    from PIL import Image
+                    Image.new("RGB", (8, 8), (int(photo.photo_id) % 256, n * 20 % 256, 90)).save(
+                        folder / f"{n:05d}.webp", "WEBP")
+                else:
+                    (folder / f"{n:05d}.webp").write_bytes(f"{photo.photo_id}-{n}".encode())
                 done_pages[0] += 1
             if outcome == "failed":
                 failed_pages.append("下载失败")

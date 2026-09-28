@@ -168,8 +168,13 @@ def find_archive(folder) -> Path | None:
 def select(folder) -> ArchiveIndex | None:
     """该用的压缩包：按优先顺序第一个能读的；都读不了时优先报暂时打不开的那个（不说成损坏），
     否则第一个（说明原因用）；一个都没有 → None。"""
+    return select_from(candidates(folder))
+
+
+def select_from(paths) -> ArchiveIndex | None:
+    """select 的规则，用已经列好的候选（candidates 的结果；同一个目录要选好几次时不再每次列目录）"""
     first = busy = None
-    for path in candidates(folder):
+    for path in paths:
         index = read_index(path)
         if index.status == "ok":
             return index
