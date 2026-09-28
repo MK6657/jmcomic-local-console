@@ -242,3 +242,23 @@ def local_state(album_id: str) -> LocalState | None:
 def is_readable(album_id: str) -> bool:
     state = local_state(album_id)
     return bool(state and state.readable)
+
+
+def readable_folder(album_id: str) -> str | None:
+    """阅读器现在打开的目录：最近一次完成（没被取代）的任务的输出目录，本地可读时；否则 None。与 local_states 同一规则"""
+    album_id = str(album_id)
+    if not validate_numeric(album_id):
+        return None
+    conn = db.get_db()
+    try:
+        row = conn.execute(
+            "SELECT job_id, output_path, superseded_at FROM jobs WHERE status='completed' AND album_id=? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (album_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or row["superseded_at"] or not row["output_path"]:
+        return None
+    state = _folder_state(row["output_path"], row["job_id"], time.monotonic(), [])
+    return row["output_path"] if state.readable else None

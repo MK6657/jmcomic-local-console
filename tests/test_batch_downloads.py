@@ -408,7 +408,7 @@ def test_active_album_skipped(client, make_local, active):
 
 def test_multiple_jobs_one_comic(client, make_local, downloads):
     make_local("3001", parent="Someone")                  # the older completed download, organized by author
-    newer = downloads / "New_3001" / "第1话__71"
+    newer = downloads / "New_3001" / "第1话__71"          # the newest completed download, in another folder
     newer.mkdir(parents=True)
     (newer / "00001.webp").write_bytes(b"page")
     _job("j_new", "3001", "completed", downloads / "New_3001")          # the newest completed: directly in downloads
@@ -423,11 +423,12 @@ def test_multiple_jobs_one_comic(client, make_local, downloads):
     assert len(_jobs()) == before + 1
 
 
-def test_organized_folder_skipped(client, make_local):
+def test_organized_folder_included(client, make_local):
+    # the job writes into the folder the reader opens (core.jm_service._reusable_album_dir), even organized by author
     make_local("3001", parent="author")
     confirm_new("3001", ["71", "72", "73", "74"])
     data = preview(client, "new_chapters")
-    assert data["items"] == [] and _reasons(data) == [("3001", "organized")]
+    assert _photos(data) == [("3001", ["74"])] and data["skipped"] == []
 
 
 def test_baseline_ids_never_requested(client, make_local):

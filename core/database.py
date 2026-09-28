@@ -260,19 +260,6 @@ def active_album_ids(conn, album_ids) -> set[str]:
     return {row[0] for row in rows}
 
 
-def newest_completed_outputs(conn, album_ids) -> dict[str, str]:
-    """各 album_id 最近一次完成的任务的输出目录（与 core.local_availability 判断本地可读看的是同一个任务）"""
-    rows = conn.execute(
-        "SELECT album_id, output_path FROM jobs WHERE status='completed' "
-        "AND album_id IN (SELECT value FROM json_each(?)) ORDER BY created_at DESC, id DESC",
-        (json.dumps([str(a) for a in album_ids]),),
-    ).fetchall()
-    outputs: dict[str, str] = {}
-    for row in rows:
-        outputs.setdefault(row["album_id"], row["output_path"] or "")
-    return outputs
-
-
 def queue_ahead(conn=None) -> int:
     """排队 / 下载中 / 已暂停的任务数"""
     own = conn is None

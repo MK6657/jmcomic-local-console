@@ -134,7 +134,7 @@ A1_ITEMS = [
     # no title (the server sends the id), 7 chapters without names
     _a1_item("3002", "3002", [_chapter(str(80 + n), n, "", TODAY_1030) for n in range(1, 8)], TODAY_1030),
 ]
-A1_SKIPPED = [_skip("3003", "Gamma", "active"), _skip("3004", "3004", "organized"), _skip("3005", "Eps", "too_many")]
+A1_SKIPPED = [_skip("3003", "Gamma", "active"), _skip("3004", "3004", "active"), _skip("3005", "Eps", "too_many")]
 A1_REVIEW = [{"album_id": "3009", "title": "Changed", "new_count": 1, "removed_count": 2}]
 A2_ITEMS = [_fav_item("4001", "Never"), _fav_item("4002", "Cancel", "canceled")]
 SELECTED_IDS = ["4001", "4010", "4011", "4012", "4013", "4014", "4015", "4016"]
@@ -144,7 +144,6 @@ SELECTED_SKIPPED = [_skip("4010", "Read", "readable"), _skip("4011", "Fail", "fa
 
 REASONS = {
     "active": "已在下载队列中（排队中 / 下载中 / 已暂停），不重复创建任务",
-    "organized": "本地文件在按作者整理后的文件夹里：新章节会下载到另一个文件夹，阅读时只看得到新下载的章节，所以这次不下载",
     "too_many": "新章节超过 1000 话，请到详情页选择要下载的章节",
     "records_cleared": "下载记录被清理过（例如在「下载管理」里清空了已结束的任务），下载目录里可能还有这部漫画的文件，"
                        "这次不整部下载；确定要整部下载请点收藏里这一行的「下载」，或到详情页选择章节下载",
@@ -436,7 +435,7 @@ def test_copy_per_kind():
     ]
     assert view["listLabel"] == "这次会下载的漫画"
     assert view["skippedTitle"] == "这些不会下载（3 部）" and view["skippedLabel"] == "batch-dialog-skipped-title"
-    assert view["skipped"] == ["Gamma（3003）：" + REASONS["active"], "车号 3004：" + REASONS["organized"],
+    assert view["skipped"] == ["Gamma（3003）：" + REASONS["active"], "车号 3004：" + REASONS["active"],
                                "Eps（3005）：" + REASONS["too_many"]]
     assert view["reviewTitle"] == "章节列表有变动的 1 部不在这里下载，请先到详情页核对："
     assert view["review"] == [{"text": "Changed：新出现 1 话，另有 2 话已不在上游 · 去核对",

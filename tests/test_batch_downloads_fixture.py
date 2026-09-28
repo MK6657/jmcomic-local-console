@@ -110,12 +110,13 @@ def test_ui_fixture_batch_samples_seed_the_planned_targets(client, downloads):
         assert manager._schedule_next is metrics["stub"] and job_module.download_album_job is metrics["refuse"]
         seeded = {job["job_id"] for job in db.get_all_jobs()}
 
-        # 下载新章节: 3 comics / 4 话; skipped 900021 (queued job) and 900022 (organized); 900009 for review
+        # 下载新章节: 4 comics / 5 话 (900022 organized by author is listed); skipped 900021 (queued job); 900009 for review
         new = _preview(client, "new_chapters")
-        assert _chapters(new) == {"900011": ["91104"], "900020": ["92103", "92104"], "900500": ["95002"]}
-        assert [item["album_id"] for item in new["items"]] == ["900011", "900020", "900500"]   # oldest confirmed first
-        assert new["counts"] == {"albums": 3, "chapters": 4} and new["more"] == 0
-        assert _reasons(new) == [("900021", "active"), ("900022", "organized")]
+        assert _chapters(new) == {"900011": ["91104"], "900020": ["92103", "92104"], "900500": ["95002"],
+                                  "900022": ["92302"]}
+        assert [item["album_id"] for item in new["items"]] == ["900011", "900020", "900022", "900500"]  # oldest first
+        assert new["counts"] == {"albums": 4, "chapters": 5} and new["more"] == 0
+        assert _reasons(new) == [("900021", "active")]
         assert [(r["album_id"], r["new_count"], r["removed_count"]) for r in new["review"]] == [("900009", 1, 1)]
         assert new["out_of_scope"] == {"changed": 1}
         assert [c["photo_id"] for c in new["items"][1]["chapters"]] == ["92103", "92104"]
@@ -141,17 +142,18 @@ def test_ui_fixture_batch_samples_seed_the_planned_targets(client, downloads):
                                       ("900500", "not_favourite")]
         assert metrics["schedule_calls"] == 0 and len(db.get_all_jobs()) == len(seeded)
 
-        # confirm 下载新章节 with 900500 unticked (the click script): two queued jobs, one schedule call, no download
+        # confirm 下载新章节 with 900500 unticked (the click script): three queued jobs, one schedule call, no download
         response = client.post(CONFIRM, json={"kind": "new_chapters", "token": new["token"], "exclude": ["900500"]})
         assert response.status_code == 201, response.get_json()
         assert [(j["album_id"], j["photo_ids"]) for j in response.get_json()["created"]] == [
-            ("900011", ["91104"]), ("900020", ["92103", "92104"])]
+            ("900011", ["91104"]), ("900020", ["92103", "92104"]), ("900022", ["92302"])]
         assert metrics["schedule_calls"] == 1 and metrics["download_calls"] == 0 and not _dl_threads()
         view = json.loads(json.dumps(fixture.batch_metrics(db, manager, metrics, seeded)))   # the route's JSON
         assert view["schedule"] == "stub" and view["download"] == "refuse" and view["dl_threads"] == []
         assert (view["schedule_calls"], view["download_calls"]) == (1, 0)
-        assert _new_jobs(view) == [("900011", "queued", ["91104"]), ("900020", "queued", ["92103", "92104"])]
-        assert len(view["jobs"]) == len(seeded) + 2
+        assert _new_jobs(view) == [("900011", "queued", ["91104"]), ("900020", "queued", ["92103", "92104"]),
+                                   ("900022", "queued", ["92302"])]
+        assert len(view["jobs"]) == len(seeded) + 3
 
         # confirm 下载未下载的收藏: three whole-comic jobs
         response = client.post(CONFIRM, json={"kind": "undownloaded_favourites", "token": undownloaded["token"]})
@@ -173,8 +175,8 @@ def test_ui_fixture_batch_samples_seed_the_planned_targets(client, downloads):
 
         view = fixture.batch_metrics(db, manager, metrics, seeded)
         assert [(album_id, status) for album_id, status, _ in _new_jobs(view)] == [
-            ("900011", "queued"), ("900020", "queued"), ("900030", "queued"), ("900008", "queued"),
-            ("900701", "queued"), ("900031", "queued"), ("900040", "queued"), ("900600", "queued")]
+            ("900011", "queued"), ("900020", "queued"), ("900022", "queued"), ("900030", "queued"),
+            ("900008", "queued"), ("900701", "queued"), ("900031", "queued"), ("900040", "queued"), ("900600", "queued")]
         assert view["download_calls"] == 0 and view["dl_threads"] == [] and not _dl_threads()
         manager.start()                                   # a no-op: the 2 s loop never runs in the fixture
         assert manager._scheduler_thread is None

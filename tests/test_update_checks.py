@@ -207,20 +207,26 @@ def _isolated(downloads, tmp_path):
 @pytest.fixture
 def download(client, downloads, monkeypatch):
     """The real download_album_job; only the client and fetching one chapter are replaced.
-    download.serve(chapters) changes what upstream lists for the download's own fetch."""
+    download.serve(chapters) changes what upstream lists for the download's own fetch; download.rename(name)
+    changes the album's upstream title."""
     from core import database as db, jm_service
     from core.progress import progress_manager
     monkeypatch.setattr(jm_service, "close_client", lambda _client: None)
-    served = {"chapters": list(CHAPTERS)}
-    monkeypatch.setattr(jm_service, "get_client", lambda shared=True: (_Client(_Album(
-        [_Photo(*c) for c in served["chapters"]],
-        episode_list=[(pid, str(n), name) for n, (pid, name, _) in enumerate(served["chapters"], 1)])), None))
+    served = {"chapters": list(CHAPTERS), "name": _Album.name}
 
-    def run(job_id, photo_ids, outcome="completed", written=None, pack=False, pack_format="cbz", insert=True):
+    def get_client(shared=True):
+        album = _Album([_Photo(*c) for c in served["chapters"]],
+                       episode_list=[(pid, str(n), name) for n, (pid, name, _) in enumerate(served["chapters"], 1)])
+        album.name = served["name"]
+        return _Client(album), None
+    monkeypatch.setattr(jm_service, "get_client", get_client)
+
+    def run(job_id, photo_ids, outcome="completed", written=None, pack=False, pack_format="cbz", insert=True,
+            organize="none"):
         """insert=False runs a job that already exists (e.g. one a batch download queued)."""
         from core.settings import update_settings
         update_settings({"auto_pack": "true" if pack else "false", "delete_originals": "true" if pack else "false",
-                         "pack_format": pack_format, "organize_mode": "none"})
+                         "pack_format": pack_format, "organize_mode": organize})
 
         def chapter(job_id, album_id, album, album_dir, photo, total_pages, done_pages, pending_images,
                     failed_pages, *rest):
@@ -247,6 +253,7 @@ def download(client, downloads, monkeypatch):
         return db.get_job(job_id)["status"]
 
     run.serve = lambda chapters: served.__setitem__("chapters", list(chapters))
+    run.rename = lambda name: served.__setitem__("name", name)
     return run
 
 
@@ -1778,3 +1785,154 @@ def test_a2_job_completes_then_leaves_a2(client, download, upstream, checker, ba
     assert _check() == "new"
     assert _batch_photos(batch) == [("3001", ["74"])]
     assert _batch_photos(batch, "undownloaded_favourites") == []
+
+
+# ─── partial jobs write into the folder the reader opens (upstream renamed, organized, archive only) ───
+
+
+def _dirs(root):
+    """Every folder under root, relative, as posix paths (chapter folders included)."""
+    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_dir())
+
+
+def _local_photo_pages(client, album_id="3001"):
+    """What the reader shows: pages per chapter (photo_id) from GET /api/preview/<id>."""
+    data = client.get(f"/api/preview/{album_id}").get_json()
+    assert data["status"] == "ok", data
+    pages = {}
+    for page in data["pages"]:
+        pages[page["photo_id"]] = pages.get(page["photo_id"], 0) + 1
+    return pages
+
+
+def test_new_chapter_job_after_an_upstream_rename_writes_into_the_readable_folder(
+        client, download, downloads, upstream, checker, batch):
+    from core import database as db, update_store
+    _pending_74(download, upstream, checker)                  # 71 downloaded into Name_3001
+    download.rename("Renamed")                                # the upstream title changed since
+    job = _batch_confirm(batch, "new_chapters")
+    assert download(job["job_id"], job["photo_ids"], insert=False) == "completed"
+    assert _dirs(downloads) == ["Name_3001", "Name_3001/第1话__71", "Name_3001/第4话__74"]   # no Renamed_3001
+    assert db.get_job(job["job_id"])["output_path"] == str(downloads / "Name_3001")
+    assert _local_photo_pages(client) == {"71": 3, "74": 5}   # the reader shows the old and the new chapter
+    assert update_store.pending_new_chapters() == [] and "74" in _row()["baseline_ids"]
+
+
+def test_detail_page_selected_chapters_after_a_rename_join_the_readable_folder(client, download, downloads):
+    from core import database as db
+    assert download("ja", ["71"]) == "completed"
+    download.rename("Renamed")
+    assert download("jb", ["72"]) == "completed"              # POST /api/jobs from the detail page: the same path
+    assert db.get_job("jb")["output_path"] == str(downloads / "Name_3001")
+    assert _local_photo_pages(client) == {"71": 3, "72": 2}
+
+
+def test_rename_with_archive_only_content_merges_into_one_archive(client, download, downloads, upstream, checker,
+                                                                   batch):
+    from core import archive_pages
+    assert download("ja", ["71"], pack=True) == "completed"   # packed, the loose pages deleted: only the CBZ is left
+    folder = downloads / "Name_3001"
+    assert list(folder.rglob("*.webp")) == [] and (folder / "Name_3001.cbz").is_file()
+    upstream.set("3001", ["71", "72", "73", "74"])
+    assert _check() == "new"
+    download.serve(CHAPTERS + [CH74])
+    download.rename("Renamed")
+    job = _batch_confirm(batch, "new_chapters")
+    assert download(job["job_id"], job["photo_ids"], pack=True, insert=False) == "completed"
+    assert not (downloads / "Renamed_3001").exists()
+    archive_pages.clear_cache()
+    index = archive_pages.read_index(folder / "Name_3001.cbz")
+    assert index.status == "ok" and len(index.pages) == 3 + 5   # the old chapter kept, the new one added
+    assert _local_photo_pages(client) == {"71": 3, "74": 5}
+
+
+def test_organized_folder_gets_the_new_chapters_and_is_not_organized_again(client, download, downloads, upstream,
+                                                                            checker, batch):
+    from core import database as db
+    assert download("ja", ["71"], organize="by_author") == "completed"
+    folder = downloads / "someone" / "Name_3001"
+    assert db.get_job("ja")["output_path"] == str(folder)
+    upstream.set("3001", ["71", "72", "73", "74"])
+    assert _check() == "new"
+    download.serve(CHAPTERS + [CH74])
+    download.rename("Renamed")
+    job = _batch_confirm(batch, "new_chapters")
+    assert download(job["job_id"], job["photo_ids"], insert=False, organize="by_author") == "completed"
+    assert _dirs(downloads) == ["someone", "someone/Name_3001", "someone/Name_3001/第1话__71",
+                                "someone/Name_3001/第4话__74"]            # no someone/someone/, nothing at the top
+    assert db.get_job(job["job_id"])["output_path"] == str(folder)
+    assert _local_photo_pages(client) == {"71": 3, "74": 5}
+
+
+def test_whole_album_job_and_unreadable_folders_keep_the_upstream_name(client, download, downloads):
+    import shutil
+    from core import database as db
+    assert download("ja", ["71"]) == "completed"
+    download.rename("Renamed")
+    assert download("jb", []) == "completed"                  # a whole-comic download: named after upstream as before
+    assert db.get_job("jb")["output_path"] == str(downloads / "Renamed_3001")
+    shutil.rmtree(downloads / "Renamed_3001")                 # the folder the reader opened is gone
+    download.rename("Third")
+    assert download("jc", ["72"]) == "completed"              # nothing readable to join: a new folder as before
+    assert db.get_job("jc")["output_path"] == str(downloads / "Third_3001")
+
+
+def test_detail_page_download_all_after_a_rename_joins_the_readable_folder(client, download, downloads):
+    # the detail page's 下载全部 sends every chapter id (not []): it is a listed-chapters job
+    from core import database as db
+    assert download("ja", ["71"]) == "completed"
+    download.rename("Renamed")
+    assert download("jb", ["71", "72", "73"]) == "completed"
+    assert db.get_job("jb")["output_path"] == str(downloads / "Name_3001")
+    assert not (downloads / "Renamed_3001").exists()
+    assert _local_photo_pages(client) == {"71": 3, "72": 2, "73": 4}      # no chapter twice
+
+
+def test_flat_mode_still_flattens_a_joined_author_folder(client, download, downloads):
+    from core import database as db
+    assert download("ja", ["71"], organize="by_author") == "completed"
+    folder = downloads / "someone" / "Name_3001"
+    download.rename("Renamed")
+    assert download("jb", ["72"], organize="flat") == "completed"         # the user switched to 扁平化 since
+    assert db.get_job("jb")["output_path"] == str(folder)
+    assert [p.name for p in folder.glob("第2话__72_*.webp")]                # flattened inside the joined folder
+    assert sorted(p.name for p in downloads.iterdir()) == ["someone"]
+    assert sorted(p.name for p in (downloads / "someone").iterdir()) == ["Name_3001"]   # no someone/someone/
+
+
+def test_a_partial_job_never_joins_the_root_itself(client, download, downloads):
+    from core import database as db
+    other = downloads / "Other_4001" / "c1"
+    other.mkdir(parents=True)
+    (other / "00001.webp").write_bytes(b"page")                           # the root has pages somewhere below
+    db.insert_job("j0", "3001", "Name", ["71"])                          # a hand-edited or legacy row
+    db.update_job("j0", status="completed", output_path=str(downloads), completed_at=datetime.now().isoformat())
+    _forget_local()
+    assert download("jb", ["72"]) == "completed"
+    assert db.get_job("jb")["output_path"] == str(downloads / "Name_3001")
+    assert sorted(p.name for p in downloads.iterdir()) == ["Name_3001", "Other_4001"]   # nothing written into downloads/
+
+
+def test_a_partial_job_never_joins_an_empty_shell(client, download, downloads):
+    import shutil
+    from core import database as db
+    assert download("ja", ["71"]) == "completed"
+    folder = downloads / "Name_3001"
+    for child in folder.iterdir():
+        shutil.rmtree(child)                                              # the folder is left, its pages are gone
+    _forget_local()
+    download.rename("Renamed")
+    assert download("jb", ["72"]) == "completed"
+    assert db.get_job("jb")["output_path"] == str(downloads / "Renamed_3001")
+
+
+def test_a_partial_job_never_joins_a_superseded_folder(client, download, downloads):
+    import shutil
+    from core import database as db
+    assert download("ja", ["71"]) == "completed"
+    shutil.rmtree(downloads / "Name_3001")
+    assert download("jf", ["71"], outcome="failed") == "failed"          # recreates Name_3001: ja is superseded
+    assert db.get_job("ja")["superseded_at"]
+    download.rename("Renamed")
+    assert download("jb", ["72"]) == "completed"
+    assert db.get_job("jb")["output_path"] == str(downloads / "Renamed_3001")

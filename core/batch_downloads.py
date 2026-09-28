@@ -61,10 +61,6 @@ def _skip(album_id, title, reason) -> dict:
     return {"album_id": album_id, "title": title or album_id, "reason": reason}
 
 
-def _same_dir(a, b) -> bool:
-    return os.path.normcase(os.path.realpath(str(a))) == os.path.normcase(os.path.realpath(str(b)))
-
-
 def _album_dirs_with_pages(candidate_ids) -> set[str]:
     """下载目录第一层或按作者整理后的第二层（<作者>/<名字>_<album_id>）里名字是 <任意>_<album_id>、album_id 在
     candidate_ids 里、有本地能读的页（散图或压缩包）的漫画。第二层只看第一层里不像漫画文件夹（名字不以 _<数字> 结尾）
@@ -138,7 +134,6 @@ def _plan_new_chapters(conn, readable, review) -> tuple[list, list, list, int]:
         "SELECT album_id, baseline_ids FROM album_update_checks WHERE album_id IN (SELECT value FROM json_each(?))",
         (ids,))}
     active = db.active_album_ids(conn, json.loads(ids))
-    outputs = db.newest_completed_outputs(conn, json.loads(ids))
     items, skipped = [], []
     for row in rows:
         album_id = row["album_id"]
@@ -155,13 +150,7 @@ def _plan_new_chapters(conn, readable, review) -> tuple[list, list, list, int]:
         if len(photo_ids) > MAX_PHOTOS:
             skipped.append(_skip(album_id, title, "too_many"))
             continue
-        output = outputs.get(album_id)
-        if not output:
-            continue
-        if not _same_dir(os.path.dirname(os.path.abspath(output)), path_guard.DOWNLOAD_ROOT):
-            # 按作者整理过：新任务会写到下载目录下另一个文件夹，阅读时只看得到新下载的章节
-            skipped.append(_skip(album_id, title, "organized"))
-            continue
+        # 任务开始时写进阅读器现在打开的目录（core.jm_service._reusable_album_dir）：上游改了标题、按作者整理过也不另建
         wanted, chapters = set(photo_ids), []
         for chapter in row["chapters"]:
             photo_id = str(chapter.get("photo_id"))

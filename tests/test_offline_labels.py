@@ -364,10 +364,18 @@ def test_detail_does_not_ask_for_a_count_when_nothing_is_readable():
 # ─── review round: other folders, busy archives, extra pages, one chapter, wording in the render code ───
 
 
-def test_an_earlier_download_in_another_folder_stops_the_count(client, download, downloads):
-    # organize_mode=by_author moves the first download to <author>/<title>_<id>; the next one cannot move there
+def _split_like_before(monkeypatch):
+    """Downloads made before partial jobs joined the folder the reader opens (core.jm_service._reusable_album_dir):
+    the next partial download went to a new <current upstream title>_<id> folder. Libraries may still hold these."""
+    from core import jm_service
+    monkeypatch.setattr(jm_service, "_reusable_album_dir", lambda album_id: None)
+
+
+def test_an_earlier_download_in_another_folder_stops_the_count(client, download, downloads, monkeypatch):
+    # organize_mode=by_author moved the first download to <author>/<title>_<id>; the next one could not move there
     assert download("ja", ["71", "72"], organize="by_author") == "completed"
     assert (downloads / "someone" / "Name_3001").is_dir()
+    _split_like_before(monkeypatch)
     assert download("jb", ["73"], organize="by_author") == "completed"
     assert (downloads / "Name_3001").is_dir()
     _chapter_list()
@@ -376,10 +384,23 @@ def test_an_earlier_download_in_another_folder_stops_the_count(client, download,
 
 def test_a_renamed_album_stops_the_count(client, download, monkeypatch):
     assert download("ja", ["71", "72"]) == "completed"
-    monkeypatch.setattr(_Album, "name", "Name v2")        # upstream renamed it: the next download gets a new folder
+    monkeypatch.setattr(_Album, "name", "Name v2")        # upstream renamed it
+    _split_like_before(monkeypatch)                       # …and the next download got a new folder
     assert download("jb", ["73"]) == "completed"
     _chapter_list()
     assert _claim(client) == (None, "other_folders")
+
+
+@pytest.mark.parametrize("organize", ["none", "by_author"])
+def test_a_partial_download_after_a_rename_joins_the_folder_and_is_counted(client, download, downloads, monkeypatch,
+                                                                            organize):
+    assert download("ja", ["71"], organize=organize) == "completed"
+    monkeypatch.setattr(_Album, "name", "Name v2")        # upstream renamed it: the partial job still joins Name_3001
+    assert download("jb", ["72"], organize=organize) == "completed"
+    base = downloads / "someone" if organize == "by_author" else downloads
+    assert sorted(p.name for p in base.iterdir()) == ["Name_3001"]
+    _chapter_list()
+    assert _claim(client) == ({"downloaded": 2, "total": 3}, "partial")
 
 
 def test_a_busy_preferred_archive_stops_the_count(client, download, monkeypatch):

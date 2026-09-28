@@ -164,7 +164,7 @@ UPDATE_UPSTREAM = {
     "900500": _episodes("95001", "95002"),                               # new
     "900020": _episodes("92101", "92102", "92103", "92104"),             # new: 第3话 + 第4话 (CBZ only)
     "900021": _episodes("92200", "92201"),                               # new, but a job is already queued
-    "900022": _episodes("92301", "92302"),                               # new, organized by author
+    "900022": _episodes("92301", "92302"),                               # new, organized by author (listed)
     "900040": _episodes("94101", "94102", "94103"),                      # never → new 第3话 (the table refresh)
 }
 SLOW_UPDATE = {"900013": 3.0}
@@ -307,8 +307,9 @@ def add_batch_samples(downloads, db, Image, ImageDraw):
     """批量下载 samples. Rows are written only through core.database and core.update_store (no check or job runs).
     下载新章节: 900020 'Batch CBZ new chapters sample' CBZ only, download baseline 92101-92102, 第3话 + 第4话
     confirmed · 900021 'Batch queued sample' readable, 92201 confirmed, but a job is already queued (skipped:
-    active) · 900022 'Batch organized sample' under downloads/UI author/, 92302 confirmed (skipped: organized).
-    With 900011 (91104) and 900500 (95002) that is 3 comics / 4 话; 900009 is listed for review; 900700 nowhere.
+    active) · 900022 'Batch organized sample' under downloads/UI author/, 92302 confirmed (listed: the job writes
+    into that folder). With 900011 (91104) and 900500 (95002) that is 4 comics / 5 话; 900009 is listed for review;
+    900700 nowhere.
     下载未下载的收藏 (favourites): 900030 last download canceled (listed) · 900031 last download failed (outside:
     失败) · 900032 no job records but a download baseline row (skipped: records_cleared) · 900033 a job queued
     (outside: 排队中). With 900701 and 900008 (never downloaded) that is 3 favourites.
@@ -362,7 +363,7 @@ def add_batch_samples(downloads, db, Image, ImageDraw):
     downloaded("900021", ("92200",), now - timedelta(days=4))
     checked("900021", now - timedelta(hours=2))
     job("job_ui_900021_queued", "900021", "Batch queued sample", "queued", photo_ids=("92201",))
-    # 900022 organized by author: a new-chapter job would write to another folder
+    # 900022 organized by author: a new-chapter job writes into this folder (core.jm_service._reusable_album_dir)
     organized = downloads / "UI author" / "Batch organized sample"
     chapters(organized, "BATCH ORGANIZED", ("92301",))
     job("job_ui_900022", "900022", "Batch organized sample", "completed", organized)
