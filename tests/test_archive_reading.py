@@ -927,7 +927,7 @@ for (const r of ['deleted', 'archive_corrupt', 'archive_empty', 'bogus']) {
 for (const f of ['cbz', 'zip', 'rar']) { const b = window.localBadges.archive(f); out.badges[f] = b && [b.className, b.textContent.trim()]; }
 // search card: (readable, archive format, unavailable reason, archive problem) as refreshReadable passes them
 const card = el('div'); const box = el('div'); box.className = 'cover-badges';
-const cover = el('span'); cover.className = 'offline-badge offline-badge--cover'; cover.hidden = true; cover.textContent = '已下载 · 可离线阅读';
+const cover = el('span'); cover.className = 'offline-badge offline-badge--cover'; cover.hidden = true; cover.textContent = '已下载内容 · 可离线阅读';
 box.appendChild(cover); card.appendChild(box);
 const read = window.readLink.create('101', undefined, 'reader-link'); read.classList.add('reader-link'); card.appendChild(read);
 for (const args of [[true, 'cbz'], [false, undefined, 'archive_corrupt', 'archive_corrupt'],
@@ -936,7 +936,7 @@ for (const args of [[true, 'cbz'], [false, undefined, 'archive_corrupt', 'archiv
 }
 // detail: (readable, archive format, unavailable reason)
 const marker = el('div'); marker.hidden = true; const offline = el('span'); offline.className = 'offline-badge'; offline.hidden = true;
-offline.textContent = '已下载 · 可离线阅读'; marker.appendChild(offline); ids['album-offline-status'] = marker;
+offline.textContent = '已下载内容 · 可离线阅读'; marker.appendChild(offline); ids['album-offline-status'] = marker;
 const btn = el('a'); btn.hidden = true; ids['local-read-btn'] = btn;
 for (const args of [[true, 'cbz'], [false, undefined, 'archive_empty'], [false, undefined, 'deleted'], [true], [false]]) {
   setOfflineStatus(...args); out.detail.push([marker.hidden, visible(marker), btn.hidden]);
@@ -983,21 +983,21 @@ def test_reason_and_archive_badges(badge_harness):
 
 def test_search_cards_show_the_shared_badges_and_drop_stale_ones(badge_harness):
     assert badge_harness["search"] == [
-        [["已下载 · 可离线阅读", "CBZ"], "local"],
+        [["已下载内容 · 可离线阅读", "CBZ"], "local"],
         [["压缩包损坏"], "archive_problem"],
         [[], "archive_problem"],          # failed / queued group: no reason badge, but 阅读 explains the archive
         [["文件已删除"], "online"],
-        [["已下载 · 可离线阅读", "ZIP"], "local"],
+        [["已下载内容 · 可离线阅读", "ZIP"], "local"],
         [[], "online"],
     ]
 
 
 def test_detail_shows_the_shared_badges(badge_harness):
     assert badge_harness["detail"] == [
-        [False, ["已下载 · 可离线阅读", "CBZ"], False],
+        [False, ["已下载内容 · 可离线阅读", "CBZ"], False],
         [False, ["压缩包无可阅读图片"], True],
         [False, ["文件已删除"], True],
-        [False, ["已下载 · 可离线阅读"], False],
+        [False, ["已下载内容 · 可离线阅读"], False],
         [True, [], True],
     ]
 
@@ -1240,7 +1240,7 @@ const visible = box => box.all().filter(b => (b.classList.contains('badge') || b
     const card = el('div'); card.setAttribute('data-album-id', id);
     const box = el('div'); box.className = 'cover-badges';
     const cover = el('span'); cover.className = 'offline-badge offline-badge--cover'; cover.hidden = true;
-    cover.textContent = '已下载 · 可离线阅读'; box.appendChild(cover); card.appendChild(box);
+    cover.textContent = '已下载内容 · 可离线阅读'; box.appendChild(cover); card.appendChild(box);
     const link = window.readLink.create(id, undefined, 'reader-link'); link.classList.add('reader-link'); card.appendChild(link);
     return card;
   });
@@ -1255,7 +1255,7 @@ const visible = box => box.all().filter(b => (b.classList.contains('badge') || b
   eval(pick(detailPath, 'function setOfflineStatus', 'function bindEvents'));
   for (const id of data.ids) {
     const marker = el('div'); marker.hidden = true; const offline = el('span'); offline.className = 'offline-badge';
-    offline.hidden = true; offline.textContent = '已下载 · 可离线阅读'; marker.appendChild(offline);
+    offline.hidden = true; offline.textContent = '已下载内容 · 可离线阅读'; marker.appendChild(offline);
     ids['album-offline-status'] = marker; const btn = el('a'); btn.hidden = true; ids['local-read-btn'] = btn;
     global.albumId = id;
     refreshOfflineStatus();
@@ -1292,7 +1292,7 @@ def wiring(client, downloads, tmp_path):
     return json.loads(result.stdout)
 
 
-OFFLINE = "已下载 · 可离线阅读"
+OFFLINE = "已下载内容 · 可离线阅读"
 
 
 def test_download_manager_cards_follow_the_api(wiring):

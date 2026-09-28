@@ -6,7 +6,7 @@ from urllib.parse import quote
 from flask import Blueprint, Response, jsonify, request, send_file
 
 import core.database as db
-from core import archive_pages
+from core import archive_pages, chapter_inventory
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.database import get_completed_job_by_album_id
 from core.file_tree import safe_files
@@ -75,6 +75,21 @@ def preview_available():
         "archive_problems": {aid: state.problem for aid, state in states.items()
                              if state.state in ("archive_corrupt", "archive_empty")},
     })
+
+
+@api_preview_bp.get("/api/local-chapters/<album_id>")
+def local_chapters(album_id: str):
+    """本地章节能否证明“只下载了部分章节”（core.chapter_inventory）：
+    → {"status": "ok", "partial": {"downloaded": M, "total": N} 或 null, "reason": ...}。
+    只读数据库和磁盘：不联网、不建下载任务；章节列表只用详情页刚取到、没过期的缓存。"""
+    if not validate_numeric(album_id):
+        return jsonify({"status": "error", "message": "album_id 必须是纯数字"}), 400
+    try:
+        partial, reason = chapter_inventory.partial_chapters(album_id)
+    except Exception as e:
+        log.error(f"本地章节清点失败 album_id={album_id} error={e}")
+        partial, reason = None, "error"
+    return jsonify({"status": "ok", "partial": partial, "reason": reason})
 
 
 def _find_album_dir(album_id: str) -> tuple[Path | None, str | None]:

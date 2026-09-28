@@ -7,7 +7,8 @@
  *
  * 不使用内联 onclick：按钮只带 data-action + data-job-id / data-status，
  * 由 #downloadTabsContent 上的一个委托监听器分派（拼进内联 JS 的数据会被 HTML 解码后执行）。
- * 已完成任务按与其他页面相同的规则标记：本地可读 →“已下载 · 可离线阅读”+“预览”（/preview，单页翻页），
+ * 已完成任务按与其他页面相同的规则标记：本地可读 →“已下载内容 · 可离线阅读”+“预览”（/preview，单页翻页；
+ * 本地可读不代表整部漫画都已下载，所以不说“完整”），
  * 只剩压缩包也能读时再跟一个 CBZ / ZIP 标记；判断过但读不到 → 原因（文件已删除 / 压缩包损坏 /
  * 压缩包无可阅读图片，utils.js localBadges），不给“预览”（它只读本地文件）。
  * 已完成和失败的任务都有“阅读”（utils.js readLink）：已下载打开本地文件，否则在线阅读。
@@ -457,7 +458,7 @@
       ? window.localBadges.archiveHtml(packFormat, '已打包为 ' + packFormat.toUpperCase() + '；本地还有散图，阅读时优先用散图')
       : '';
     var marker = readable
-      ? '<span class="offline-badge" title="本地文件完整，可以离线阅读"><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载 · 可离线阅读</span>'
+      ? '<span class="offline-badge" title="本地有已下载的内容，可以离线阅读；不一定是整部漫画"><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载内容 · 可离线阅读</span>'
         + (fromArchive ? window.localBadges.archiveHtml(local.archive) : '')
       // 不可读的原因：文件已删除 / 压缩包损坏 / 压缩包无可阅读图片
       : (known ? window.localBadges.problemHtml({ archive_corrupt: 'archive_corrupt', archive_empty: 'archive_empty' }[local.state] || 'deleted') : '');

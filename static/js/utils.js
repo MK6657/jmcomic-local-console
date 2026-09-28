@@ -211,7 +211,7 @@ window.encodeJobId = function (id) {
  * “阅读”按钮（搜索 / 资源库 / 收藏 / 下载管理共用），每部漫画都有。
  * 链接始终是 /read/<id>，由服务端在点击时决定：本地可读（core.local_availability）→ 打开本地文件，
  * 否则转到在线阅读 /online/<id>。readable 只决定按钮外观：
- *   true  → 实心 + 书本图标，“已下载：打开本地文件阅读”
+ *   true  → 实心 + 书本图标，“已下载内容：打开本地文件阅读”（本地可读不代表整部漫画都已下载）
  *   false → 描边 + 地球图标，“未下载：在线阅读”，读屏名称“阅读（在线）”（aria-label，以可见文字开头；
  *           不用 visually-hidden 文本：它绝对定位，会撑出收藏表格的横向滚动容器，整页可以左右滚动）
  *   'archive_problem'（本地只剩打不开的压缩包）→ 描边 + 书本图标，点开由阅读页说明原因、可改为在线阅读
@@ -220,7 +220,7 @@ window.encodeJobId = function (id) {
  */
 (function () {
   var STATES = {
-    local: { variant: 'btn-primary', icon: 'bi-book', title: '已下载：打开本地文件阅读，无需联网', label: '' },
+    local: { variant: 'btn-primary', icon: 'bi-book', title: '已下载内容：打开本地文件阅读，无需联网', label: '' },
     online: { variant: 'btn-outline-primary', icon: 'bi-globe2', title: '未下载：在线阅读（从网络加载，不下载、不保存）', label: '阅读（在线）' },
     archive_problem: { variant: 'btn-outline-primary', icon: 'bi-book', title: '本地压缩包打不开：打开后说明原因，可以改为在线阅读', label: '' },
     unknown: { variant: 'btn-outline-primary', icon: 'bi-book', title: '已下载则打开本地文件，否则在线阅读', label: '' }

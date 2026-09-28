@@ -229,7 +229,7 @@ def test_detail_page_offers_local_reading_and_plain_back(client):
     source = (STATIC_JS / "detail.js").read_text(encoding="utf-8")
     assert "'/api/preview/available'" in source
     assert 'id="local-read-btn"' in source and "'/read/' + encodeURIComponent(album.album_id)" in source
-    assert "已下载 · 可离线阅读" in source
+    assert "已下载内容 · 可离线阅读" in source
     assert "返回搜索" not in source and "readingNav.bindBack" in source
 
 
@@ -245,7 +245,7 @@ def test_search_and_downloads_ask_the_shared_endpoint():
 def test_search_cover_badge_uses_the_offline_wording():
     # a bare "已下载" contradicted the library/favourites, where a comic whose files are gone is not downloaded
     search = (STATIC_JS / "search.js").read_text(encoding="utf-8")
-    assert "已下载 · 可离线阅读</span>" in search
+    assert "已下载内容 · 可离线阅读</span>" in search
     assert "> 已下载</span>" not in search
 
 
@@ -254,7 +254,7 @@ def test_downloads_completed_cards_show_the_shared_marker():
     card = source[source.index("function renderCompletedCard"):source.index("function renderFailedCard")]
     # readable → the same marker as every other page (+ CBZ / ZIP when read from the archive);
     # checked and not readable → the shared reason badge (文件已删除 / 压缩包损坏 / 压缩包无可阅读图片)
-    assert "offline-badge" in card and "已下载 · 可离线阅读" in card
+    assert "offline-badge" in card and "已下载内容 · 可离线阅读" in card
     assert "window.localBadges.problemHtml(" in card and "window.localBadges.archiveHtml(local.archive)" in card
     utils = (STATIC_JS / "utils.js").read_text(encoding="utf-8")
     assert "status-badge-muted" in utils and "文件已删除" in utils

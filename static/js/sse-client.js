@@ -96,7 +96,8 @@
       try {
         var data = JSON.parse(e.data);
         var title = window._jobTitleMap[data.job_id] || data.job_id;
-        showToast('✅ ' + title + ' 下载完成', 'success');
+        // 任务完成不代表整部漫画都已下载（可能只选了部分章节）
+        showToast('✅ ' + title + ' 下载任务完成', 'success');
       } catch (err) { /* 忽略 */ }
       if (_callbacks.onCompleted) _callbacks.onCompleted(e);
     });

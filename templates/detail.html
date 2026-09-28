@@ -4,7 +4,8 @@
 {% block content %}
 
 <!-- 封面与信息卡片在 JS 渲染的 .row 内并排、垂直居中；章节列表在下方占满整行；
-     本地可读时显示“已下载 · 可离线阅读”标记与“阅读”按钮（/api/preview/available） -->
+     本地可读时显示“已下载内容 · 可离线阅读”标记与“阅读”按钮（/api/preview/available）；
+     能证明只下载了部分章节时另有“部分章节已下载 · M/N 话”（/api/local-chapters） -->
 <div class="pt-3" id="album-detail-container">
     <!-- 加载中 -->
     <div class="text-center py-5" id="loading-spinner">

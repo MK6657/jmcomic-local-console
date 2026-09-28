@@ -11,7 +11,7 @@
             <span class="stat-item"><i class="bi bi-book"></i> 共 <strong id="stat-total">-</strong> 条</span>
             <span class="stat-item"><i class="bi bi-bookmark"></i> 收藏 <strong id="stat-wishlist">-</strong></span>
             <span class="stat-item" title="完成过下载任务的漫画，含本地文件已不可用的"><i class="bi bi-download"></i> 下载过 <strong id="stat-downloaded">-</strong></span>
-            <span class="stat-item" title="本地文件完整、可以离线阅读的漫画"><i class="bi bi-book-half"></i> 可离线阅读 <strong id="stat-readable">-</strong></span>
+            <span class="stat-item" title="本地有已下载内容、可以离线阅读的漫画（不一定是整部）"><i class="bi bi-book-half"></i> 可离线阅读 <strong id="stat-readable">-</strong></span>
             <span class="stat-item"><i class="bi bi-tags"></i> 标签 <strong id="stat-tags">-</strong></span>
         </div>
     </div>
@@ -50,7 +50,7 @@
         <select id="library-status" class="form-select" aria-label="按下载状态筛选" autocomplete="off">
             <!-- 五档互不重叠、合起来就是全部，与收藏清单同一套分组；每档就是卡片上的状态徽章 -->
             <option value="">状态：全部</option>
-            <option value="readable">可离线阅读</option>
+            <option value="readable">已下载内容 · 可离线阅读</option>
             <option value="active">排队中 / 下载中</option>
             <option value="failed">失败</option>
             <option value="missing">下载过 · 本地文件不可用</option>

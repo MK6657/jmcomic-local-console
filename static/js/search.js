@@ -329,7 +329,7 @@
       html += '<div class="col">';
       html += '<div class="card album-card h-100" data-album-url="' + albumUrl + '" data-album-id="' + escapeHtmlAttr(item.album_id) + '">';
       // 已下载标记（+ 压缩包标记）或本地文件不可用的原因：盖在封面左上角，由 refreshReadable 按 /api/preview/available 的结果显示
-      html += '<div class="cover-badges"><span class="offline-badge offline-badge--cover" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载 · 可离线阅读</span></div>';
+      html += '<div class="cover-badges"><span class="offline-badge offline-badge--cover" title="本地有已下载的内容，可以离线阅读；不一定是整部漫画" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载内容 · 可离线阅读</span></div>';
       html += '<a href="' + albumUrl + '" class="card-cover-link" tabindex="-1" aria-hidden="true">';
 
       // 封面
