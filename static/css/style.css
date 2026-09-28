@@ -1515,7 +1515,7 @@ code {
 }
 /* 窄屏表格：按钮整个换行，不把“阅读”拆成一字一行 */
 .wishlist-actions .btn { white-space: nowrap; }
-/* 表格列窄时“已下载 · 可离线阅读”只在“·”后换行（两段各自不断行），不把状态列撑到一行宽 */
+/* 表格列窄时“已下载内容 · 可离线阅读”只在“·”后换行（两段各自不断行），不把状态列撑到一行宽 */
 .wishlist-status .offline-badge { white-space: normal; }
 
 /* ════════════════════════════════════════════════════════════════
@@ -1720,6 +1720,14 @@ body:has(.quick-nav) .footer { padding-bottom: calc(16px + 44px + 16px); }
   border: 1px solid var(--info);
 }
 .badge.status-badge-archive .bi { color: var(--info); }
+/* 详情页“部分章节已下载 · M/N 话”（2026-09-28）：与压缩包标记同一组 info 色，图标 bi-layers 区分；
+   只在本地文件能证明只下载了部分章节时出现 */
+.badge.status-badge-partial {
+  color: var(--text-primary);
+  background: var(--info-bg);
+  border: 1px solid var(--info);
+}
+.badge.status-badge-partial .bi { color: var(--info); }
 /* 搜索结果卡片：封面左上角的一组标记（已下载 + 压缩包，或不可用的原因），放不下时换行 */
 .album-card .cover-badges {
   position: absolute;

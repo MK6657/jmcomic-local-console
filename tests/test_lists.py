@@ -329,7 +329,8 @@ def test_library_labels_completed_jobs_as_downloaded_before(client):
     html = client.get("/library").get_data(as_text=True)
     assert '<option value="missing">下载过 · 本地文件不可用</option>' in html
     assert re.search(r"下载过 <strong id=\"stat-downloaded\">", html)
-    assert "已下载" not in html.replace("已下载 · 可离线阅读", "")
+    # only the qualified “已下载内容” (downloaded content, not necessarily the whole comic) may appear
+    assert "已下载" not in html.replace("已下载内容", "")
     source = (STATIC_JS / "library.js").read_text(encoding="utf-8")
     assert "item.status_group" in source and "item.files_missing" in source and "item.activity" in source
 
@@ -446,7 +447,7 @@ def test_library_status_select_offers_the_buckets(client):
     select = html[html.index('id="library-status"'):]
     select = select[:select.index("</select>")]
     options = re.findall(r'<option value="([^"]*)">([^<]*)</option>', select)
-    assert options == [("", "状态：全部"), ("readable", "可离线阅读"), ("active", "排队中 / 下载中"),
+    assert options == [("", "状态：全部"), ("readable", "已下载内容 · 可离线阅读"), ("active", "排队中 / 下载中"),
                        ("failed", "失败"), ("missing", "下载过 · 本地文件不可用"), ("undownloaded", "未下载")]
     wishlist = client.get("/wishlist").get_data(as_text=True)
     for value, label in (("active", "排队中 / 下载中"), ("failed", "失败"), ("none", "未下载")):
@@ -589,8 +590,8 @@ def test_wishlist_table_markup_uses_the_layout_classes(client):
     assert "el('div', 'wishlist-author', item.author || '-')" in row
     badges = source[source.index("function statusBadges"):source.index("function activityBadge")]
     # short label in the table; the full wording stays in the title and the screen-reader text
-    assert "el('span', 'visually-hidden', '已下载 · ')" in badges and "el('span', null, '可离线阅读')" in badges
-    assert "offline.title = '已下载 · 可离线阅读" in badges
+    assert "el('span', 'visually-hidden', '已下载内容 · ')" in badges and "el('span', null, '可离线阅读')" in badges
+    assert "offline.title = '已下载内容 · 可离线阅读" in badges
     assert "text-nowrap" not in badges
 
 

@@ -95,7 +95,7 @@
         html += '<div class="card"><div class="card-body">';
         html += '<h3 class="card-title">' + window.escapeHtml(album.title) + ' <button type="button" id="wishlist-toggle-btn" class="btn btn-sm wishlist-btn btn-outline-warning ms-2" title="收藏" aria-label="收藏" aria-pressed="false"><i class="bi bi-star" aria-hidden="true"></i></button></h3>';
         // 已下载标记（+ 压缩包标记）或本地文件不可用的原因：由 refreshOfflineStatus 显示（放在标题外，收藏时取的标题文字不受影响）
-        html += '<div id="album-offline-status" class="local-status-row" hidden><span class="offline-badge" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i> 已下载 · 可离线阅读</span></div>';
+        html += '<div id="album-offline-status" class="local-status-row" hidden><span class="offline-badge" title="本地有已下载的内容，可以离线阅读；不一定是整部漫画" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i> 已下载内容 · 可离线阅读</span></div>';
         html += '<div class="row mt-3">';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-person"></i> 作者：</strong> ' + window.escapeHtml(album.author || '-') + '</div>';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-hash"></i> 车号：</strong> <code>' + window.escapeHtml(album.album_id) + '</code></div>';
@@ -173,7 +173,7 @@
         html += '<div class="card-footer"><div class="d-flex flex-wrap gap-2">';
         html += '<button type="button" id="download-selected-btn" class="btn btn-primary"><i class="bi bi-download"></i> 下载选中章节</button>';
         html += '<button type="button" id="download-all-btn" class="btn btn-success"><i class="bi bi-download"></i> 下载全部</button>';
-        html += '<a href="' + localReadUrl + '" id="local-read-btn" class="btn btn-primary" title="已下载：打开本地文件连续阅读，无需联网" hidden><i class="bi bi-book" aria-hidden="true"></i> 阅读</a>';
+        html += '<a href="' + localReadUrl + '" id="local-read-btn" class="btn btn-primary" title="已下载内容：打开本地文件连续阅读，无需联网" hidden><i class="bi bi-book" aria-hidden="true"></i> 阅读</a>';
         html += '<a href="' + onlineUrl + '" id="online-read-btn" class="btn btn-outline-primary" title="页面实时从网络加载，不下载、不保存"><i class="bi bi-globe2"></i> 在线观看</a>';
         // 从搜索/资源库/收藏等站内页面进入时后退（保留原页面的结果与滚动位置），否则跟随 href
         html += '<a href="/search" id="detail-back" class="btn btn-outline-secondary ms-auto"><i class="bi bi-arrow-left" aria-hidden="true"></i> 返回</a>';
@@ -239,6 +239,32 @@
         if (readBtn) readBtn.hidden = !readable;
     }
 
+    // “部分章节已下载 · M/N 话”：只在服务端能用本地文件和刚取到的章节列表证明时出现（/api/local-chapters，
+    // core.chapter_inventory；不联网）；否则只有“已下载内容 · 可离线阅读”，不说完整、也不猜数量
+    function setChapterClaim(partial) {
+        var marker = document.getElementById('album-offline-status');
+        if (!marker) return;
+        var old = marker.querySelector('.status-badge-partial');
+        if (old) old.remove();
+        if (!partial || !(partial.downloaded > 0) || !(partial.total > partial.downloaded)) return;
+        var b = document.createElement('span');
+        b.className = 'badge status-badge-partial';
+        b.title = '本地完整地有 ' + partial.downloaded + ' 话，这部漫画共 ' + partial.total + ' 话（按刚取到的章节列表核对）';
+        var i = document.createElement('i');
+        i.className = 'bi bi-layers';
+        i.setAttribute('aria-hidden', 'true');
+        b.appendChild(i);
+        b.appendChild(document.createTextNode(' 部分章节已下载 · ' + partial.downloaded + '/' + partial.total + ' 话'));
+        marker.appendChild(b);
+    }
+
+    function refreshChapterClaim() {
+        window.apiFetch('/api/local-chapters/' + encodeURIComponent(String(albumId)),
+            { timeoutMs: 15000, abortKey: 'detail-local-chapters' })
+        .then(function (data) { if (data.status === 'ok') setChapterClaim(data.partial); })
+        .catch(function () { /* 静默：不显示章节数，不影响详情页其他功能 */ });
+    }
+
     function refreshOfflineStatus() {
         window.apiFetch('/api/preview/available', {
             method: 'POST',
@@ -250,8 +276,9 @@
         .then(function (data) {
             if (data.status !== 'ok') return;
             var id = String(albumId);
-            setOfflineStatus((data.readable || []).map(String).indexOf(id) >= 0,
-                (data.archives || {})[id], (data.unavailable || {})[id]);
+            var readable = (data.readable || []).map(String).indexOf(id) >= 0;
+            setOfflineStatus(readable, (data.archives || {})[id], (data.unavailable || {})[id]);
+            if (readable) refreshChapterClaim();
         })
         .catch(function () { /* 静默：保持当前显示，不影响详情页其他功能 */ });
     }

@@ -3,6 +3,7 @@
 Run with the project Python: python tests/ui_reader_fixture.py --port 5010
 """
 import argparse
+import json
 import tempfile
 from pathlib import Path
 import sys
@@ -84,6 +85,27 @@ def add_archive_samples(downloads, db, Image, ImageDraw):
     completed("job_ui_900009", "900009", "Damaged page sample", half)
 
 
+def add_partial_sample(downloads, db, Image, ImageDraw):
+    """900010: 3 chapters upstream, only chapter 1 (3 pages) downloaded by a selected-chapter job. The detail page
+    shows “部分章节已下载 · 1/3 话” (its detail request writes the chapter list the count is checked against)."""
+    folder = downloads / "Partial chapters sample"
+    chapter = folder / "第1话__91001"
+    chapter.mkdir(parents=True)
+    (chapter / ".jm-chapter.json").write_text(json.dumps({"photo_id": "91001", "format": 2}), encoding="utf-8")
+    for page in range(1, 4):
+        img = Image.new("RGB", (600, 800), "#eeeae1")
+        ImageDraw.Draw(img).text((200, 350), f"PARTIAL ch1 p{page}", fill="#2B2A27")
+        img.save(chapter / f"{page:05d}.webp")
+    db.add_wishlist("900010", "Partial chapters sample")
+    db.insert_job("job_ui_900010", "900010", "Partial chapters sample", ["91001"])
+    db.update_job("job_ui_900010", status="completed", output_path=str(folder))
+    return {"album_id": "900010", "title": "Partial chapters sample", "author": "UI fixture",
+            "cover": "/static/images/no-cover.svg", "tags": [], "chapter_count": 3,
+            "photos": [{"photo_id": "91001", "title": "第1话", "page_count": 3},
+                       {"photo_id": "91002", "title": "第2话", "page_count": 4},
+                       {"photo_id": "91003", "title": "第3话", "page_count": 2}]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=5010)
@@ -128,6 +150,7 @@ def main():
     db.update_job("job_ui_missing", status="completed", output_path=str(sandbox / "downloads" / "gone"))
     db.add_wishlist("900701", "Never downloaded sample")
     add_archive_samples(sandbox / "downloads", db, Image, ImageDraw)
+    partial_detail = add_partial_sample(sandbox / "downloads", db, Image, ImageDraw)
     calls = {"search": 0}
     def search():
         calls["search"] += 1
@@ -139,6 +162,10 @@ def main():
             "author": "UI fixture", "cover_url": "/static/images/no-cover.svg", "tags": ["sample"],
         } for index in range(start, min(start + page_size, 120))])
     def detail(album_id):
+        if album_id == "900010":
+            # like the real /api/album: the detail page leaves a fresh chapter list in album_detail_cache
+            db.set_cached_album_detail(album_id, json.dumps(partial_detail, ensure_ascii=False))
+            return jsonify(status="ok", data=partial_detail)
         return jsonify(status="ok", data={"album_id": album_id, "title": "Sample detail", "author": "UI fixture",
             "cover": "/static/images/no-cover.svg", "photos": [], "tags": [], "chapter_count": 0})
     app.view_functions["api_search.search"] = search

@@ -28,7 +28,7 @@
     'none': '未下载',
     'missing': '下载过 · 本地文件不可用',
     'active': '排队中 / 下载中',
-    'readable': '已下载 · 可离线阅读',
+    'readable': '已下载内容 · 可离线阅读',
     'failed': '失败'
   };
 
@@ -265,11 +265,12 @@
     var group = item.status_group;
     if (group === 'readable') {
       // 与详情页、搜索页、资源库同一个“已下载”标记（style.css .offline-badge）。
-      // 表格里只显示“可离线阅读”，徽章不断行也不把状态列撑宽；完整的“已下载 · 可离线阅读”在读屏文本和 title 里
+      // 表格里只显示“可离线阅读”，徽章不断行也不把状态列撑宽；完整的“已下载内容 · 可离线阅读”在读屏文本和 title 里。
+      // 本地可读不代表整部漫画都已下载（可能只下载了部分章节），所以不说“完整”
       var offline = el('span', 'offline-badge');
-      offline.title = '已下载 · 可离线阅读：本地文件完整，无需联网';
+      offline.title = '已下载内容 · 可离线阅读：本地有已下载的内容，可以离线阅读；不一定是整部漫画';
       offline.appendChild(icon('bi-check-circle-fill'));
-      offline.appendChild(el('span', 'visually-hidden', '已下载 · '));
+      offline.appendChild(el('span', 'visually-hidden', '已下载内容 · '));
       offline.appendChild(el('span', null, '可离线阅读'));
       box.appendChild(offline);
       // 只剩压缩包也能读：跟一个 CBZ / ZIP 标记（item.archive，与其他页面同一规则）

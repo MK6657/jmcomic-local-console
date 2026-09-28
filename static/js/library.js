@@ -379,14 +379,14 @@
         return badge(spec[0], spec[1]);
     }
 
-    // 与详情页、搜索页同一个“已下载”标记（style.css .offline-badge）
+    // 与详情页、搜索页同一个“已下载内容”标记（style.css .offline-badge）：本地可读不代表整部漫画都已下载
     function offlineBadge() {
         var b = el('span', 'offline-badge');
-        b.title = '本地文件完整，可以离线阅读';
+        b.title = '本地有已下载的内容，可以离线阅读；不一定是整部漫画';
         b.appendChild(icon('bi-check-circle-fill'));
         // 手机上卡片放不下一行时只在“·”后换行，不把“可离线阅读”拆开
         var text = el('span');
-        text.appendChild(el('span', 'text-nowrap', '已下载 ·'));
+        text.appendChild(el('span', 'text-nowrap', '已下载内容 ·'));
         text.appendChild(document.createTextNode(' '));
         text.appendChild(el('span', 'text-nowrap', '可离线阅读'));
         b.appendChild(text);

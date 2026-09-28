@@ -70,9 +70,11 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   search results and page (shown from memory, without searching the site again), the same filters, sort and page, and
   the same place in the list — even if you scrolled back up to reach the menu. Typing `/search` directly still opens a
   fresh search page.
-- Comics you can read offline are marked "✓ 已下载 · 可离线阅读" everywhere: on search result covers, the detail
+- Comics you can read offline are marked "✓ 已下载内容 · 可离线阅读" everywhere: on search result covers, the detail
   page, library cards, favourites and 下载管理 (which also offers 预览 for them). "Readable" means the
-  latest download's folder still exists and contains page images; deleted or emptied folders are shown as 文件已删除.
+  latest download's folder still exists and contains page images (or a readable CBZ/ZIP); it does not mean the whole
+  comic is downloaded. When the local chapter folders and a freshly fetched chapter list prove that only some chapters
+  are downloaded, the detail page adds "部分章节已下载 · M/N 话". Deleted or emptied folders are shown as 文件已删除.
 - Every comic in search results, the library, favourites and 下载管理 (completed and failed tasks) has a **阅读**
   button: a downloaded comic opens its local files (filled button, book icon), anything else opens online reading
   (outlined button, globe icon). The choice is made when you click, so it is right even if the files changed after
