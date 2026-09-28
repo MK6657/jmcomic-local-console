@@ -312,7 +312,8 @@ def test_read_follows_the_files_after_the_page_was_rendered(client, downloads):
 
 def test_read_button_helper_picks_the_look_not_the_destination():
     source = (STATIC_JS / "utils.js").read_text(encoding="utf-8")
-    helper = source[source.index("“阅读”按钮（搜索"):]
+    # only the readLink block (the helpers after it, e.g. updateBadges, have their own tests)
+    helper = source[source.index("“阅读”按钮（搜索"):source.index("本地文件徽章")]
     assert "link.href = '/read/' + encodeURIComponent(id);" in helper
     assert "'/online/" not in helper  # the server decides when the button is clicked
     assert "icon: 'bi-book'" in helper and "icon: 'bi-globe2'" in helper and "label: '阅读（在线）'" in helper

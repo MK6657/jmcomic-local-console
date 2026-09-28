@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from flask import Blueprint, jsonify, request
 
 import core.database as db
+from core import update_store
 from core.jm_service import get_album_detail, get_album_detail_cached
 from core.local_availability import MAX_IDS, local_states, readable_album_ids
 from core.logger import bind_request_id, log
@@ -38,17 +39,26 @@ def mark_local_details(items):
     local_problem：“下载过 · 本地文件不可用”的原因 —— deleted 文件已删除 / archive_corrupt 压缩包损坏 /
     archive_empty 压缩包无可阅读图片；不属于这一档时为 None。
     archive_problem：本地只剩打不开的压缩包时的原因（不论下载状态分组，与 /read 的去向同一依据），否则 None——
-    “阅读”按钮的外观按它决定。条目需已带 readable / files_missing。"""
+    “阅读”按钮的外观按它决定。
+    update：检查新章节已确认有新章节时的摘要（core.update_store.summaries，与 POST /api/updates/states 同一形状），
+    只给本地可读的条目，否则 None——列表只显示确认过的事实。条目需已带 readable / files_missing。"""
     ids = [item["album_id"] for item in items]
     states = {}
     for start in range(0, len(ids), MAX_IDS):
         states.update(local_states(ids[start:start + MAX_IDS]))
+    try:
+        # 一次查询；检查记录读不出来时列表照常显示，只是没有“有新章节”标记
+        updates = update_store.summaries(str(item["album_id"]) for item in items if item.get("readable"))
+    except Exception as e:
+        log.warning(f"读取检查新章节状态失败 count={len(items)} error={e}")
+        updates = {}
     for item in items:
         state = states.get(str(item["album_id"]))
         item["archive"] = state.archive if item.get("readable") and state and state.state == "archive" else None
         item["local_problem"] = ((state.problem if state else None) or "deleted") if item.get("files_missing") else None
         item["archive_problem"] = (state.problem if state and state.state in ("archive_corrupt", "archive_empty")
                                    else None)
+        item["update"] = updates.get(str(item["album_id"])) if item.get("readable") else None
     return items
 
 

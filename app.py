@@ -181,6 +181,7 @@ log.info("=== JMComic 下载控制台 启动 ===")
 import core.database as db
 from core.job_manager import job_manager
 from core.scheduler import start as start_scheduler, stop as stop_scheduler
+from core import update_checker  # 检查新章节：只有 main() 启动后台线程（create_app 从不启动）
 
 # ── jmcomic 库全局优化（必须在任何 client 创建前设置）──
 from jmcomic import JmModuleConfig
@@ -202,6 +203,7 @@ from routes.api_online import api_online_bp
 from routes.api_export import api_export_bp
 from routes.api_wishlist import api_wishlist_bp
 from routes.api_library import api_library_bp
+from routes.api_updates import api_updates_bp
 from routes.api_system import api_system_bp
 
 
@@ -286,6 +288,7 @@ def create_app() -> Flask:
     app.register_blueprint(api_export_bp)
     app.register_blueprint(api_wishlist_bp)
     app.register_blueprint(api_library_bp)
+    app.register_blueprint(api_updates_bp)
     # 系统自检
     app.register_blueprint(api_system_bp)
 
@@ -391,6 +394,7 @@ def main():
         log.warning(f"收到信号 {signum}，开始优雅关闭...")
         job_manager.stop()
         stop_scheduler()
+        update_checker.stop()
         _release_lock()
         sys.exit(0)
 
@@ -417,6 +421,8 @@ def main():
             # Do not start/resume downloads when no server port can be acquired.
             job_manager.start()
             start_scheduler()
+            # 检查新章节的后台线程（启动 5–7 分钟后才开始第一次检查；只取章节列表，从不下载）
+            update_checker.start()
             # 记录实际端口
             _PORT_FILE.write_text(json.dumps(_startup_record(actual_port)))
             log.info(f"服务已启动 → http://127.0.0.1:{actual_port}")
@@ -426,6 +432,7 @@ def main():
     finally:
         job_manager.stop()
         stop_scheduler()
+        update_checker.stop()
         _release_lock()
 
 

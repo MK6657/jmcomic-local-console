@@ -1760,3 +1760,47 @@ body:has(.quick-nav) .footer { padding-bottom: calc(16px + 44px + 16px); }
   white-space: normal;
   text-align: left;
 }
+
+/* ════════════════════════════════════════════════════════════════
+   检查新章节（2026-09-28 新增，utils.js window.updateBadges / detail.js 章节更新）
+   只追加、不改动上方规则。颜色只用 eye-care token：
+   - “有新章节 · N 话”与章节表里的“新”：--primary-bg 底，--primary 边框和图标，字用 --text-primary
+   - “章节有变动”复用上方 .status-badge-warning（bi-exclamation-triangle）
+   详情页状态行间距 4/8，字号 14 / 说明 12；没有动画（“检查中…”的沙漏图标是静止的）。
+   ════════════════════════════════════════════════════════════════ */
+.badge.status-badge-update {
+  color: var(--text-primary);
+  background: var(--primary-bg);
+  border: 1px solid var(--primary);
+}
+.badge.status-badge-update .bi { color: var(--primary); }
+/* 下载管理里的标记是链接：不加下划线，悬停时才有 */
+a.badge.status-badge-update,
+a.badge.status-badge-warning { text-decoration: none; }
+a.badge.status-badge-update:hover,
+a.badge.status-badge-warning:hover { text-decoration: underline; }
+/* 详情页状态行：[徽章 / 图标 + 文字] [选中这些章节] [立即检查]，下面是新章节名与说明（各占一整行） */
+.update-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 8px;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.update-status-meta,
+.update-new-list {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.update-status-warn .bi { color: var(--warning); }
+/* 资源库窄卡片：与其他标记一样允许在徽章内换行 */
+.library-card .card-actions .badge.status-badge-update {
+  white-space: normal;
+  text-align: left;
+}
+/* 收藏表格：短写里给读屏的“有”“话”是绝对定位的 .visually-hidden，让它相对徽章定位（同 .offline-badge），
+   否则窄屏时会越过 .table-responsive 把整页撑出横向滚动 */
+.wishlist-status .badge.status-badge-update { position: relative; }

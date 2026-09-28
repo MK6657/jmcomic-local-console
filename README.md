@@ -75,6 +75,14 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   latest download's folder still exists and contains page images (or a readable CBZ/ZIP); it does not mean the whole
   comic is downloaded. When the local chapter folders and a freshly fetched chapter list prove that only some chapters
   are downloaded, the detail page adds "部分章节已下载 · M/N 话". Deleted or emptied folders are shown as 文件已删除.
+- **New chapter checks** (Settings → 检查新章节, on by default): comics with downloaded content ("已下载内容 · 可离线阅读",
+  including partial and CBZ/ZIP-only downloads) are checked slowly in the background — one comic at a time, each about
+  once a day, at least 2 minutes apart, waiting while a download runs. A check fetches the chapter list once and
+  **never downloads anything**. "New" means chapters published upstream after your download; chapters you did not
+  select are never new, and comics downloaded before this feature only get their current list recorded on the first
+  check. Confirmed new chapters show as "有新章节 · N 话" in the library, favourites and 下载管理; the detail page shows
+  the status, marks the new chapters, has **立即检查** (works even with the setting off) and **选中这些章节**, which only
+  ticks those chapters — downloading still needs **下载选中章节**.
 - Every comic in search results, the library, favourites and 下载管理 (completed and failed tasks) has a **阅读**
   button: a downloaded comic opens its local files (filled button, book icon), anything else opens online reading
   (outlined button, globe icon). The choice is made when you click, so it is right even if the files changed after

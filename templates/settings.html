@@ -211,6 +211,28 @@
         </div>
     </div>
 
+    <!-- ===== 检查新章节（core/update_checker.py：只取章节列表，从不下载；状态由 js/settings.js loadUpdateSummary 读取） ===== -->
+    <div class="settings-section" id="update-check">
+        <h5><i class="bi bi-bell"></i> 检查新章节</h5>
+        <div class="row g-3">
+            <div class="col-12" data-setting-key="auto_update_check">
+                <div class="form-check form-switch">
+                    <input type="checkbox" id="auto_update_check" name="auto_update_check"
+                           class="form-check-input" role="switch" value="true"
+                           aria-describedby="auto_update_check_help"
+                           {% if settings.auto_update_check == 'true' %}checked{% endif %}>
+                    <label class="form-check-label" for="auto_update_check"><strong>自动检查已下载漫画的新章节</strong></label>
+                </div>
+                <div class="form-text" id="auto_update_check_help">
+                    开启后在后台慢慢检查：一次只查一部漫画，每部大约一天查一次，两次检查之间至少隔 2 分钟；有下载在进行时先等下载。只查本地有已下载内容的漫画（包括只下载了部分章节的、只剩 CBZ / ZIP 压缩包的），只收藏、没有下载的不查。“新章节”指你下载之后上游新出的章节，下载时没选的章节不算。检查只取章节列表，<strong>从不下载任何内容</strong>；失败后会逐渐拉长重试间隔，连不上服务器时暂停。关闭后仍可在漫画详情页点「立即检查」。
+                </div>
+            </div>
+            <div class="col-12">
+                <div class="form-text" id="update-check-status" role="status" aria-live="polite">正在读取检查状态…</div>
+            </div>
+        </div>
+    </div>
+
     <!-- ===== 界面操作 ===== -->
     <div class="settings-section">
         <h5><i class="bi bi-hand-index"></i> 界面操作</h5>

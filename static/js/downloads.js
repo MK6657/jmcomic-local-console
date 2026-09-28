@@ -12,6 +12,8 @@
  * 只剩压缩包也能读时再跟一个 CBZ / ZIP 标记；判断过但读不到 → 原因（文件已删除 / 压缩包损坏 /
  * 压缩包无可阅读图片，utils.js localBadges），不给“预览”（它只读本地文件）。
  * 已完成和失败的任务都有“阅读”（utils.js readLink）：已下载打开本地文件，否则在线阅读。
+ * 检查新章节已确认有新章节的漫画（/api/updates/states），只在它最新的已完成任务卡片上放“有新章节 · N 话”
+ * （或“章节有变动”）链接，点开详情选择下载；这里从不下载。
  */
 (function () {
   'use strict';
@@ -265,7 +267,62 @@
   var readableSerial = 0;
   var lastCompleted = [];
   var lastFailed = [];
+  var newestCompleted = {};  // album_id → 这部漫画最新的已完成任务的 job_id（新章节标记只放在这张卡片上）
   var READABLE_RECHECK_MS = 60000; // 文件可能在页面打开期间被移走：至少每分钟复查一次
+
+  // ── 检查新章节：可读的漫画里已确认有新章节的（/api/updates/states，只读数据库） ──
+  var updateInfo = {};       // album_id → {state, new_count, removed_count, confirmed_at, titles}；没有键 = 没有已确认的新章节
+  var updatesKey = null;     // 上次查询时的可读 album_id 集合
+  var lastNewestKey = null;  // 上次渲染时各漫画最新的已完成任务：变了（有任务新完成）就立即重新判断
+  var updatesCheckedAt = 0;
+  var updatesSerial = 0;
+
+  function refreshUpdates(readableIds) {
+    var ids = readableIds.slice().sort();
+    var key = ids.join(',');
+    if (key === updatesKey && Date.now() - updatesCheckedAt < READABLE_RECHECK_MS) return;
+    updatesKey = key;
+    updatesCheckedAt = Date.now();
+    var serial = ++updatesSerial;
+    if (ids.length === 0) { updateInfo = {}; return; }
+
+    var chunks = [];
+    for (var i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200)); // 接口单次最多 200 个
+    Promise.all(chunks.map(function (chunk, n) {
+      return apiFetch('/api/updates/states', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ album_ids: chunk }),
+        timeoutMs: 15000,
+        abortKey: 'downloads-updates-' + n
+      });
+    }))
+      .then(function (results) {
+        if (serial !== updatesSerial) return;
+        var next = {};
+        results.forEach(function (data) {
+          if (data.status !== 'ok') throw new Error(data.message || '读取失败');
+          var updates = data.updates || {};
+          Object.keys(updates).forEach(function (id) { next[String(id)] = updates[id]; });
+        });
+        updateInfo = next;
+        renderSection('completed', lastCompleted, renderCompletedCard);
+      })
+      .catch(function () {
+        // 失败时保留上次结果，下次轮询重试（静默）
+        if (serial === updatesSerial) updatesKey = null;
+      });
+  }
+
+  /** 每部漫画最新的已完成任务（/api/jobs 按创建时间倒序：第一次出现的就是最新的） */
+  function newestCompletedJobs(jobs) {
+    var newest = {};
+    jobs.forEach(function (job) {
+      var key = String(job.album_id);
+      if (!Object.prototype.hasOwnProperty.call(newest, key)) newest[key] = job.job_id;
+    });
+    return newest;
+  }
 
   function refreshReadable(finishedJobs) {
     var ids = [];
@@ -278,7 +335,7 @@
     readableKey = key;
     readableCheckedAt = Date.now();
     var serial = ++readableSerial;
-    if (ids.length === 0) { readableAlbums = {}; localInfo = {}; return; }
+    if (ids.length === 0) { readableAlbums = {}; localInfo = {}; refreshUpdates([]); return; }
 
     var chunks = [];
     for (var i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200)); // 接口单次最多 200 个
@@ -306,6 +363,8 @@
         localInfo = info;
         renderSection('completed', lastCompleted, renderCompletedCard);
         renderSection('failed', lastFailed, renderFailedCard);
+        // 可读的漫画里有没有已确认的新章节（只读数据库，不联网）
+        refreshUpdates(ids.filter(function (id) { return next[id] === true; }));
       })
       .catch(function () {
         // 失败时保留上次结果，下次轮询重试（中止/超时/网络错误都静默，不打扰用户）
@@ -361,6 +420,14 @@
     // 渲染每个区域（已完成/失败区先用缓存的可读结果渲染，“阅读”按钮不会随轮询闪烁）
     lastCompleted = groups.completed;
     lastFailed = groups.failed;
+    newestCompleted = newestCompletedJobs(groups.completed);
+    // 有任务新完成：立即重新判断可读与新章节（刚下载的新章节已被服务端并入，不能再挂着“有新章节”）
+    var newestKey = JSON.stringify(newestCompleted);
+    if (newestKey !== lastNewestKey) {
+      lastNewestKey = newestKey;
+      readableKey = null;
+      updatesKey = null;
+    }
     renderSection('running', runningItems, renderRunningCard);
     renderSection('queued', groups.queued, renderQueuedCard);
     renderSection('completed', groups.completed, renderCompletedCard);
@@ -462,6 +529,10 @@
         + (fromArchive ? window.localBadges.archiveHtml(local.archive) : '')
       // 不可读的原因：文件已删除 / 压缩包损坏 / 压缩包无可阅读图片
       : (known ? window.localBadges.problemHtml({ archive_corrupt: 'archive_corrupt', archive_empty: 'archive_empty' }[local.state] || 'deleted') : '');
+    // 检查新章节已确认的新章节 / 章节有变动：只放在这部漫画最新的已完成任务上（点开详情选择下载，这里不下载）
+    var updateChip = readable && newestCompleted[albumKey] === job.job_id && window.updateBadges
+      ? window.updateBadges.chipHtml(updateInfo[albumKey], { link: true, albumId: job.album_id })
+      : '';
     // 阅读（连续滚动）每张卡片都有：已下载打开本地文件，否则在线阅读；
     // 预览（/preview，单页翻页）只读本地文件，只在本地可读时出现
     var readBtn = window.readLink.html(job.album_id, readableState(job.album_id), 'btn-sm');
@@ -470,7 +541,7 @@
     return '<div class="card job-card shadow-sm mb-3" data-job-id="' + escapeHtmlAttr(job.job_id) + '" data-status="completed">'
       + '<div class="card-body job-card-row">'
       + '<div class="job-card-info"><h6 class="mb-1">' + escapeHtml(job.title) + '</h6>'
-      + '<div class="job-card-status">' + cbzBadge + '<span class="badge bg-success">已完成</span>' + marker + '</div>'
+      + '<div class="job-card-status">' + cbzBadge + '<span class="badge bg-success">已完成</span>' + marker + updateChip + '</div>'
       + '<small class="text-muted"><i class="bi bi-folder"></i> ' + escapeHtml(job._path) + '</small></div>'
       + '<div class="job-card-actions">'
       + readBtn
@@ -530,7 +601,8 @@
   window.addEventListener('pagehide', stopPolling);
   window.addEventListener('pageshow', function (event) {
     if (!event.persisted) return;
-    readableKey = null; // 回到本页：重新判断哪些可以离线阅读
+    readableKey = null; // 回到本页：重新判断哪些可以离线阅读、哪些有已确认的新章节
+    updatesKey = null;
     refreshJobs();
     startPolling();
   });
@@ -538,6 +610,7 @@
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState !== 'visible' || !pollTimer) return;
     readableKey = null;
+    updatesKey = null;   // 可能刚在详情页点过“立即检查”
     refreshJobs();
   });
 })();

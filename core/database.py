@@ -106,6 +106,47 @@ def init_db():
                 tags_synced_at TEXT,
                 updated_at     TEXT
             );
+
+            -- 检查新章节（core/update_store.py）：每部漫画一行基线 + 最近一次检查的结论。
+            -- 只有检查和下载任务的两个记录点写这两张表；检查从不建下载任务、不碰文件。
+            CREATE TABLE IF NOT EXISTS album_update_checks (
+                album_id        TEXT PRIMARY KEY,
+                baseline_ids    TEXT,                        -- 已知章节 id 的 JSON 列表（上游顺序，下载完成时并入）；NULL = 还没有基线
+                baseline_source TEXT,                        -- 'download' | 'first_check'
+                baseline_at     TEXT,
+                gone_ids        TEXT NOT NULL DEFAULT '[]',  -- 已知章节在上游不见了、且已经确认过的
+                removed_ids     TEXT NOT NULL DEFAULT '[]',  -- 发现新章节的那次检查同时不见了的已知章节（'changed'）
+                upstream_count  INTEGER,
+                new_chapters    TEXT NOT NULL DEFAULT '[]',  -- JSON [{photo_id, index, title, confirmed_at}]，上游顺序
+                new_count       INTEGER NOT NULL DEFAULT 0,  -- = len(new_chapters)
+                result          TEXT,                        -- 最近一次成功检查的结论：baseline / no_update / new / changed；NULL = 从未成功
+                last_success_at TEXT,
+                last_attempt_at TEXT,                        -- 发请求之前写（租约）
+                last_trigger    TEXT,                        -- 'auto' | 'manual'
+                error_kind      TEXT,                        -- 成功后为 NULL；network / timeout / not_found / upstream_error
+                error_detail    TEXT,                        -- 只记异常类名，不记网址、代理
+                fail_count      INTEGER NOT NULL DEFAULT 0,  -- 连续失败次数
+                next_check_at   TEXT,                        -- 最早的下一次自动检查
+                created_at      TEXT,
+                updated_at      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_update_checks_next ON album_update_checks(next_check_at);
+            CREATE INDEX IF NOT EXISTS idx_update_checks_new ON album_update_checks(new_count);
+
+            CREATE TABLE IF NOT EXISTS update_check_log (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                album_id       TEXT NOT NULL,
+                trigger        TEXT NOT NULL,
+                started_at     TEXT NOT NULL,
+                finished_at    TEXT,
+                outcome        TEXT NOT NULL,
+                error_kind     TEXT,
+                error_type     TEXT,
+                requests       INTEGER NOT NULL DEFAULT 0,
+                upstream_count INTEGER,
+                new_count      INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_update_check_log_started ON update_check_log(started_at);
         """)
         conn.commit()
 
@@ -1412,6 +1453,16 @@ def set_cached_album_detail(album_id: str, detail_json: str, cover_cdn_url: str 
             (album_id, detail_json, cover_cdn_url, datetime.now().isoformat()),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_cached_album_detail(album_id: str) -> int:
+    """只删这一部漫画的详情缓存（检查新章节确认了新章节后，详情页下次打开时重新取章节列表）。返回删除行数。"""
+    conn = get_db()
+    try:
+        with conn:
+            return conn.execute("DELETE FROM album_detail_cache WHERE album_id=?", (str(album_id),)).rowcount
     finally:
         conn.close()
 
