@@ -328,8 +328,8 @@
       var albumUrl = '/album/' + encodeURIComponent(item.album_id);
       html += '<div class="col">';
       html += '<div class="card album-card h-100" data-album-url="' + albumUrl + '" data-album-id="' + escapeHtmlAttr(item.album_id) + '">';
-      // 已下载标记：盖在封面左上角，由 refreshReadable 按 /api/preview/available 的结果显示
-      html += '<span class="offline-badge offline-badge--cover" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载 · 可离线阅读</span>';
+      // 已下载标记（+ 压缩包标记）或本地文件不可用的原因：盖在封面左上角，由 refreshReadable 按 /api/preview/available 的结果显示
+      html += '<div class="cover-badges"><span class="offline-badge offline-badge--cover" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载 · 可离线阅读</span></div>';
       html += '<a href="' + albumUrl + '" class="card-cover-link" tabindex="-1" aria-hidden="true">';
 
       // 封面
@@ -380,11 +380,19 @@
   // ── 已下载（本地可读）标记 ──
   // 与详情/下载管理/收藏/资源库共用服务端同一判定（core.local_availability）
 
-  function setCardReadable(card, readable) {
+  // archive：只剩压缩包也能读时的格式；problem：“下载过 · 本地文件不可用”的原因；
+  // archiveProblem：本地只剩打不开的压缩包（“阅读”会打开阅读页说明原因）。没有时为 undefined
+  function setCardReadable(card, readable, archive, problem, archiveProblem) {
     var badge = card.querySelector('.offline-badge--cover');
     if (badge) badge.hidden = !readable;
+    var box = card.querySelector('.cover-badges');
+    if (box) {
+      Array.prototype.forEach.call(box.querySelectorAll('.badge'), function (b) { b.remove(); });
+      var extra = readable ? window.localBadges.archive(archive) : window.localBadges.problem(problem);
+      if (extra) box.appendChild(extra);
+    }
     var link = card.querySelector('.reader-link');
-    if (link) window.readLink.apply(link, readable);
+    if (link) window.readLink.apply(link, window.readLink.stateFor(readable, archiveProblem));
   }
 
   function refreshReadable() {
@@ -408,10 +416,15 @@
       if (data.status !== 'ok') return;
       var readable = {};
       (data.readable || []).forEach(function (id) { readable[String(id)] = true; });
+      var archives = data.archives || {};
+      var unavailable = data.unavailable || {};
+      var archiveProblems = data.archive_problems || {};
       cards.forEach(function (card) {
         var id = card.getAttribute('data-album-id');
         // 只更新本次请求覆盖、且仍在页面上的卡片
-        if (ids.indexOf(id) >= 0 && resultsDiv.contains(card)) setCardReadable(card, !!readable[id]);
+        if (ids.indexOf(id) >= 0 && resultsDiv.contains(card)) {
+          setCardReadable(card, !!readable[id], archives[id], unavailable[id], archiveProblems[id]);
+        }
       });
     })
     .catch(function (err) {

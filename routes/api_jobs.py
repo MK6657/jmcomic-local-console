@@ -17,36 +17,38 @@ from core.progress import progress_manager
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.validation import validate_numeric, validate_job_id, require_job_id
 from core.packer import CbzPacker
-# ── 模块级 CBZ 存在性缓存（避免 N+1 文件系统扫描） ──
-_cbz_cache: dict[str, tuple[bool, float]] = {}
+from core import archive_pages
+# ── 模块级压缩包检查缓存（避免 N+1 文件系统扫描）：值是压缩包格式 'cbz' / 'zip'，没有为 None ──
+_cbz_cache: dict[str, tuple[str | None, float]] = {}
 _CBZ_CACHE_TTL = 60  # 缓存有效期（秒）
 _CBZ_CACHE_MAX = 500  # 最大缓存条目数
 _cbz_cache_lock = threading.Lock()
 
 
-def _scan_cbz_path(output_path: str) -> bool:
-    """实际扫描文件系统，检查输出路径中是否存在 .cbz 文件（最多递归 2 层）"""
+def _scan_cbz_path(output_path: str) -> str | None:
+    """实际扫描文件系统：输出目录里打包出的、能读的压缩包格式 'cbz' / 'zip'（与阅读器同一规则：
+    core.archive_pages.select_status，含 pack_format=zip 写的 <目录名>.zip；打不开 / 没有图片的不算），
+    第二层还有 .cbz 也算 'cbz'（旧版按章节打包）；没有为 None"""
     if not output_path:
-        return False
+        return None
     try:
         p = Path(output_path)
         if not p.exists() or not p.is_dir():
-            return False
+            return None
         if not is_safe_path(p):
-            return False
+            return None
+        found = archive_pages.select_status(p)
+        if found is not None and found[1] == "ok":
+            return found[2]
         # 使用 glob 高效扫描（限制递归深度为 2 层）
-        first_level = list(p.glob("*.cbz"))
-        if first_level:
-            return True
-        second_level = list(p.glob("*/*.cbz"))
-        return len(second_level) > 0
+        return "cbz" if any(p.glob("*/*.cbz")) else None
     except Exception:
         pass
-    return False
+    return None
 
 
-def _check_cbz_path(output_path: str) -> bool:
-    """检查单个路径的 CBZ 存在性（带 TTL 缓存）"""
+def _check_cbz_path(output_path: str) -> str | None:
+    """检查单个路径的压缩包格式（带 TTL 缓存）"""
     now = time.time()
     with _cbz_cache_lock:
         cached = _cbz_cache.get(output_path)
@@ -62,9 +64,9 @@ def _check_cbz_path(output_path: str) -> bool:
     return exists
 
 
-def check_cbz_exists(job):
-    """检查任务的输出路径中是否存在 .cbz 文件（兼容旧调用方）"""
-    return _check_cbz_path(job.get("output_path") or "")
+def check_cbz_exists(job) -> bool:
+    """检查任务的输出路径中是否有打包出的压缩包（兼容旧调用方）"""
+    return bool(_check_cbz_path(job.get("output_path") or ""))
 
 
 # 仍会往输出目录写入的任务状态（打开文件夹时目录可以先建出来）
@@ -134,7 +136,9 @@ def list_jobs():
     cbz_map = {p: _check_cbz_path(p) for p in output_paths}
     for job in jobs:
         op = job.get("output_path", "")
-        job["has_cbz"] = cbz_map.get(op, False) if op else False
+        fmt = cbz_map.get(op) if op else None
+        job["has_cbz"] = bool(fmt)
+        job["archive_format"] = fmt if fmt in ("cbz", "zip") else ("cbz" if fmt else None)
     return jsonify({"status": "ok", "jobs": jobs})
 
 
@@ -153,7 +157,9 @@ def get_single_job(job_id: str):
             job["selected_photo_ids"] = json.loads(job["selected_photo_ids"])
         except (json.JSONDecodeError, TypeError):
             job["selected_photo_ids"] = []
-    job["has_cbz"] = check_cbz_exists(job)
+    fmt = _check_cbz_path(job.get("output_path") or "")
+    job["has_cbz"] = bool(fmt)
+    job["archive_format"] = fmt if fmt in ("cbz", "zip") else ("cbz" if fmt else None)
     return jsonify({"status": "ok", "job": job})
 
 

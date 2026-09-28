@@ -8,6 +8,82 @@ from pathlib import Path
 import sys
 
 
+def add_archive_samples(downloads, db, Image, ImageDraw):
+    """Archive-only reading samples (ids 900002-900009, all favourites, on the first search page):
+    900002 CBZ only, 3 chapters (auto-packed, then the originals deleted) · 900003 the app's ZIP only, 2 chapters ·
+    900004 a CBZ of 12 pages + only pages 1-5 still loose (like a re-download that stopped half way): the reader shows
+    12 pages, 1-5 from the loose files, 6-12 from the CBZ · 900005 corrupt CBZ · 900006 CBZ without pages ·
+    900007 files deleted · 900008 never downloaded · 900009 CBZ whose page 3 is damaged."""
+    import shutil
+    import zipfile
+    from core.packer import CbzPacker
+
+    def draw(path, label, colour):
+        img = Image.new("RGB", (600, 800), "#eeeae1")
+        pen = ImageDraw.Draw(img)
+        pen.rectangle((30, 30, 570, 770), outline=colour, width=6)
+        pen.text((200, 350), label, fill="#2B2A27")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(path)
+
+    def chapters(folder, prefix, counts, colour):
+        for chapter, count in enumerate(counts, start=1):
+            for page in range(1, count + 1):
+                draw(folder / f"ch{chapter}" / f"{page:03d}.png", f"{prefix} ch{chapter} p{page}", colour)
+
+    def completed(job_id, album_id, title, folder):
+        db.add_wishlist(album_id, title)
+        db.insert_job(job_id, album_id, title, [])
+        db.update_job(job_id, status="completed", output_path=str(folder))
+
+    for album_id, title, suffix, counts, colour in (
+        ("900002", "CBZ only sample", ".cbz", (6, 7, 5), "#2B6CB0"),
+        ("900003", "ZIP only sample", ".zip", (4, 4), "#2F855A"),
+    ):
+        folder = downloads / title
+        chapters(folder, suffix[1:].upper(), counts, colour)
+        CbzPacker().pack(folder, folder / f"{title}{suffix}")   # auto-pack ...
+        for chapter in list(folder.iterdir()):
+            if chapter.is_dir():
+                shutil.rmtree(chapter)                             # ... then the originals were deleted
+        completed(f"job_ui_{album_id}", album_id, title, folder)
+
+    both = downloads / "Loose and CBZ sample"
+    chapters(both, "LOOSE", (12,), "#B7791F")
+    CbzPacker().pack(both, both / "Loose and CBZ sample.cbz")   # the archive holds 12 pages ...
+    for extra in range(6, 13):
+        (both / "ch1" / f"{extra:03d}.png").unlink()              # ... the loose folder only 1-5: 6-12 from the CBZ
+    completed("job_ui_900004", "900004", "Loose and CBZ sample", both)
+
+    corrupt = downloads / "Corrupt CBZ sample"
+    corrupt.mkdir()
+    (corrupt / "Corrupt CBZ sample.cbz").write_bytes(b"PK\x03\x04 not really a zip")
+    completed("job_ui_900005", "900005", "Corrupt CBZ sample", corrupt)
+
+    empty = downloads / "Empty CBZ sample"
+    empty.mkdir()
+    with zipfile.ZipFile(empty / "Empty CBZ sample.cbz", "w") as zf:
+        zf.writestr("ComicInfo.xml", "<ComicInfo/>")
+        zf.writestr("readme.txt", "no pages here")
+    completed("job_ui_900006", "900006", "Empty CBZ sample", empty)
+
+    completed("job_ui_900007", "900007", "Deleted files sample 2", downloads / "gone-900007")
+    db.add_wishlist("900008", "Never downloaded sample 2")
+
+    half = downloads / "Damaged page sample"
+    chapters(half, "HALF", (5,), "#C53030")
+    target = half / "Damaged page sample.cbz"
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as zf:   # stored: one flipped byte breaks one page
+        for page in sorted((half / "ch1").iterdir()):
+            zf.write(page, f"ch1/{page.name}")
+    third = (half / "ch1" / "003.png").read_bytes()
+    shutil.rmtree(half / "ch1")
+    data = bytearray(target.read_bytes())
+    data[data.index(third) + len(third) // 2] ^= 0xFF
+    target.write_bytes(bytes(data))
+    completed("job_ui_900009", "900009", "Damaged page sample", half)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=5010)
@@ -51,6 +127,7 @@ def main():
     db.insert_job("job_ui_missing", "900700", "Deleted files sample", [])
     db.update_job("job_ui_missing", status="completed", output_path=str(sandbox / "downloads" / "gone"))
     db.add_wishlist("900701", "Never downloaded sample")
+    add_archive_samples(sandbox / "downloads", db, Image, ImageDraw)
     calls = {"search": 0}
     def search():
         calls["search"] += 1

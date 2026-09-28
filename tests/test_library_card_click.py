@@ -113,7 +113,10 @@ function page(opts) {
       fetches.push({ url, opts: o, resolve, reject, done: false, aborted: false });
     }),
     // utils.js readLink.create: a link with an icon (the 'read-link' class only lets the harness find it)
-    readLink: { create: () => { const a = makeEl('a'); a.className = 'btn btn-sm read-link'; a.appendChild(makeEl('i')); return a; } },
+    readLink: { create: () => { const a = makeEl('a'); a.className = 'btn btn-sm read-link'; a.appendChild(makeEl('i')); return a; },
+                stateFor: (readable) => readable === true },
+    // utils.js localBadges: CBZ / ZIP mark and the "local files unavailable" reason
+    localBadges: { archive: () => makeEl('span'), problem: () => makeEl('span') },
     open: (...args) => { opens.push(args); return null; },
     requestAnimationFrame: fn => fn(),
     performance: { getEntriesByType: () => [{ type: opts.navType || 'navigate' }] },

@@ -56,8 +56,8 @@
             .catch(function (err) {
                 if (err && err.name === 'AbortError') return; // pagehide 中止，静默
                 if (err && err.status) {
-                    // HTTP 错误：保持原有「服务端 message」提示
-                    showError(err.message || '加载失败');
+                    // HTTP 错误：保持原有「服务端 message」提示；503（压缩包暂时打不开）另给“重试”
+                    showError(err.message || '加载失败', err.status === 503);
                 } else {
                     showError('网络错误: ' + (err.message || '未知错误'));
                 }
@@ -167,10 +167,28 @@
         if (next) preloader.src = next.url;
     });
     previewImage.addEventListener('error', function () {
-        if (previewImage.getAttribute('src')) showImageHint('图片加载失败', true);
+        var src = previewImage.getAttribute('src');
+        if (!src) return;
+        var page = currentPage;
+        showImageHint('图片加载失败', true);
+        // 压缩包里这一页坏了：重试没有用，说明原因并给在线阅读（同一章的同一页）；
+        // 压缩包已重新打包、这一页不在了：刷新页面拿新的页列表
+        nav.archivePageProblem(src).then(function (problem) {
+            if (!problem || page !== currentPage) return;
+            if (problem.reason === 'archive_busy') {
+                showImageHint(problem.message, true);  // 暂时的：保留“重试”
+                return;
+            }
+            if (problem.reason === 'archive_changed') {
+                showImageHint(problem.message, false, null, true);
+                return;
+            }
+            showImageHint(problem.message, false, nav.onlinePageUrl(albumId, pages[page - 1]));
+        });
     });
 
-    function showImageHint(message, canRetry) {
+    // online：{url, exact}（nav.onlinePageUrl）时加“在线阅读（这一页）”；reload 为 true 时加“刷新页面”
+    function showImageHint(message, canRetry, online, reload) {
         clearTimeout(spinnerTimer);
         imgSpinner.classList.add('d-none');
         previewImage.classList.add('d-none');
@@ -189,16 +207,43 @@
             retry.addEventListener('click', function () { showImage(true); });
             imageHint.appendChild(retry);
         }
+        if (online) {
+            var link = document.createElement('a');
+            link.className = 'btn btn-sm btn-outline-primary mt-2';
+            link.href = online.url;
+            var globe = document.createElement('i');
+            globe.className = 'bi bi-globe2';
+            globe.setAttribute('aria-hidden', 'true');
+            link.append(globe, online.exact ? ' 在线阅读这一页' : ' 在线阅读');
+            imageHint.appendChild(link);
+        }
+        if (reload) {
+            var again = document.createElement('button');
+            again.type = 'button';
+            again.className = 'btn btn-sm btn-outline-primary mt-2';
+            again.textContent = '刷新页面';
+            again.addEventListener('click', function () { location.reload(); });
+            imageHint.appendChild(again);
+        }
         imageHint.classList.remove('d-none');
     }
 
     // ── 错误 ──
-    function showError(msg) {
+    function showError(msg, canRetry) {
+        // 标题不再停在“加载中...”；具体原因在下面的错误提示里
+        $('album-title').textContent = '无法预览本地文件';
+        document.title = '无法预览本地文件 - JMComic 图片预览';
         $('preview-loading').classList.add('d-none');
         $('reader-content').classList.add('d-none');
         $('preview-error').classList.remove('d-none');
         $('error-message').textContent = msg;
+        $('preview-retry').classList.toggle('d-none', !canRetry);
     }
+    $('preview-retry').addEventListener('click', function () {
+        $('preview-error').classList.add('d-none');
+        $('preview-loading').classList.remove('d-none');
+        loadPreview();
+    });
 
     // ── 事件绑定 ──
     $('btn-first').addEventListener('click', function () { goPage(1); });

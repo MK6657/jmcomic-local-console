@@ -214,6 +214,7 @@ window.encodeJobId = function (id) {
  *   true  → 实心 + 书本图标，“已下载：打开本地文件阅读”
  *   false → 描边 + 地球图标，“未下载：在线阅读”，读屏名称“阅读（在线）”（aria-label，以可见文字开头；
  *           不用 visually-hidden 文本：它绝对定位，会撑出收藏表格的横向滚动容器，整页可以左右滚动）
+ *   'archive_problem'（本地只剩打不开的压缩包）→ 描边 + 书本图标，点开由阅读页说明原因、可改为在线阅读
  *   其他（还没判断）→ 描边 + 书本图标
  * album_id 不是纯数字（/read 会拒绝）时不生成按钮：create 返回 null，html 返回 ''。
  */
@@ -221,10 +222,12 @@ window.encodeJobId = function (id) {
   var STATES = {
     local: { variant: 'btn-primary', icon: 'bi-book', title: '已下载：打开本地文件阅读，无需联网', label: '' },
     online: { variant: 'btn-outline-primary', icon: 'bi-globe2', title: '未下载：在线阅读（从网络加载，不下载、不保存）', label: '阅读（在线）' },
+    archive_problem: { variant: 'btn-outline-primary', icon: 'bi-book', title: '本地压缩包打不开：打开后说明原因，可以改为在线阅读', label: '' },
     unknown: { variant: 'btn-outline-primary', icon: 'bi-book', title: '已下载则打开本地文件，否则在线阅读', label: '' }
   };
 
   function stateName(readable) {
+    if (readable === 'archive_problem') return readable;
     return readable === true ? 'local' : (readable === false ? 'online' : 'unknown');
   }
 
@@ -264,6 +267,67 @@ window.encodeJobId = function (id) {
       return link ? link.outerHTML : '';
     },
     /** 可读判断结果回来后更新已有按钮的外观（去向不变） */
-    apply: apply
+    apply: apply,
+    /** 列表条目的按钮外观：readable 为 true → 本地；本地只剩打不开的压缩包（problem 为 archive_corrupt /
+     *  archive_empty，取自服务端的 archive_problem(s)：与 /read 的去向同一依据，不论下载状态分组）
+     *  → 'archive_problem'（/read 打开阅读页说明原因，不说成“未下载：在线阅读”）；其他 → 在线 */
+    stateFor: function (readable, problem) {
+      if (readable === true) return true;
+      return problem === 'archive_corrupt' || problem === 'archive_empty' ? 'archive_problem' : false;
+    }
+  };
+})();
+
+/**
+ * 本地文件徽章（搜索 / 详情 / 下载管理 / 收藏 / 资源库共用，判定规则在服务端 core.local_availability）：
+ *   problem(reason)       “下载过 · 本地文件不可用”的具体原因：
+ *                         deleted 文件已删除 / archive_corrupt 压缩包损坏 / archive_empty 压缩包无可阅读图片
+ *   archive(format, title) 压缩包标记（CBZ / ZIP）：只剩压缩包也能离线阅读时，跟在“可离线阅读”后面
+ * 返回元素（未知原因 / 格式返回 null）；problemHtml / archiveHtml 返回 HTML 字符串（未知时为 ''）。
+ */
+(function () {
+  var PROBLEMS = {
+    deleted: { variant: 'status-badge-muted', icon: '', text: '文件已删除', title: '下载过，但本地文件已不在，需要重新下载' },
+    archive_corrupt: { variant: 'status-badge-warning', icon: 'bi-exclamation-triangle', text: '压缩包损坏', title: '下载过，但本地压缩包已损坏、打不开；可以重新下载，或者在线阅读' },
+    archive_empty: { variant: 'status-badge-warning', icon: 'bi-exclamation-triangle', text: '压缩包无可阅读图片', title: '下载过，但本地压缩包里没有能阅读的图片；可以重新下载，或者在线阅读' }
+  };
+  var FORMATS = { cbz: 'CBZ', zip: 'ZIP' };
+
+  function badge(variant, iconName, text, title) {
+    var b = document.createElement('span');
+    b.className = 'badge ' + variant;
+    b.title = title;
+    if (iconName) {
+      var i = document.createElement('i');
+      i.className = 'bi ' + iconName;
+      i.setAttribute('aria-hidden', 'true');
+      b.appendChild(i);
+      b.appendChild(document.createTextNode(' '));
+    }
+    b.appendChild(document.createTextNode(text));
+    return b;
+  }
+
+  function problem(reason) {
+    var spec = PROBLEMS[reason];
+    return spec ? badge(spec.variant, spec.icon, spec.text, spec.title) : null;
+  }
+
+  function archive(format, title) {
+    var label = FORMATS[format];
+    if (!label) return null;
+    return badge('status-badge-archive', 'bi-file-zip', label,
+      title || '本地只保留了压缩包（' + label + '），直接从压缩包离线阅读，不解压到下载目录');
+  }
+
+  function html(node) { return node ? node.outerHTML : ''; }
+
+  window.localBadges = {
+    problem: problem,
+    archive: archive,
+    problemHtml: function (reason) { return html(problem(reason)); },
+    archiveHtml: function (format, title) { return html(archive(format, title)); },
+    /** 原因的文字（没有 / 未知 → ''） */
+    problemText: function (reason) { return PROBLEMS[reason] ? PROBLEMS[reason].text : ''; }
   };
 })();

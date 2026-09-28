@@ -59,7 +59,13 @@ def test_available_lists_only_readable_albums_in_request_order(client, downloads
     _job("j5", "555", "failed", downloads / "A")
     response = _post(client, {"album_ids": ["222", "333", "444", "555", "666", "111", "222"]})
     assert response.status_code == 200
-    assert response.get_json() == {"status": "ok", "readable": ["222", "111"]}
+    assert response.get_json() == {
+        "status": "ok", "readable": ["222", "111"], "archives": {},
+        # only albums with a completed download have a local state; 444's folder is gone
+        "local": {"111": {"state": "loose", "archive": None}, "222": {"state": "loose", "archive": None},
+                  "444": {"state": "missing", "archive": None}},
+        "unavailable": {"444": "deleted"}, "archive_problems": {},
+    }
 
 
 def test_available_matches_the_shared_rule(client, downloads):
@@ -79,8 +85,11 @@ def test_available_matches_the_shared_rule(client, downloads):
 def test_available_accepts_integer_ids_and_empty_list(client, downloads):
     _album(downloads / "D")
     _job("d", "123", "completed", downloads / "D")
-    assert _post(client, {"album_ids": [123, 456]}).get_json() == {"status": "ok", "readable": ["123"]}
-    assert _post(client, {"album_ids": []}).get_json() == {"status": "ok", "readable": []}
+    assert _post(client, {"album_ids": [123, 456]}).get_json() == {
+        "status": "ok", "readable": ["123"], "archives": {},
+        "local": {"123": {"state": "loose", "archive": None}}, "unavailable": {}, "archive_problems": {}}
+    assert _post(client, {"album_ids": []}).get_json() == {
+        "status": "ok", "readable": [], "archives": {}, "local": {}, "unavailable": {}, "archive_problems": {}}
 
 
 def test_available_accepts_the_maximum_batch(client, downloads):
@@ -243,9 +252,12 @@ def test_search_cover_badge_uses_the_offline_wording():
 def test_downloads_completed_cards_show_the_shared_marker():
     source = (STATIC_JS / "downloads.js").read_text(encoding="utf-8")
     card = source[source.index("function renderCompletedCard"):source.index("function renderFailedCard")]
-    # readable → the same marker as every other page; checked and not readable → 文件已删除
+    # readable → the same marker as every other page (+ CBZ / ZIP when read from the archive);
+    # checked and not readable → the shared reason badge (文件已删除 / 压缩包损坏 / 压缩包无可阅读图片)
     assert "offline-badge" in card and "已下载 · 可离线阅读" in card
-    assert "status-badge-muted" in card and "文件已删除" in card
+    assert "window.localBadges.problemHtml(" in card and "window.localBadges.archiveHtml(local.archive)" in card
+    utils = (STATIC_JS / "utils.js").read_text(encoding="utf-8")
+    assert "status-badge-muted" in utils and "文件已删除" in utils
     # 预览 reads the same local files as 阅读: offered only when the album is readable
     preview = card.index("href=\"/preview/' + albumPath")
     assert re.search(r"readable && job\._path \? '<a[^']*$", card[:preview])
@@ -312,10 +324,11 @@ def test_read_button_helper_picks_the_look_not_the_destination():
 
 @pytest.mark.parametrize("script, call", [
     # the created button is appended whenever the id is valid, whatever item.readable says
-    ("library.js", "        var read = window.readLink.create(albumId, item.readable === true, 'btn-sm');\n"
-                   "        if (read) buttons.appendChild(read);\n"),
-    ("wishlist.js", "    var read = window.readLink.create(albumId, item.readable === true, 'btn-sm');\n"
-                    "    if (read) actions.appendChild(read);\n"),
+    # (stateFor only picks the look: local / archive that cannot be opened / online)
+    ("library.js", "        var read = window.readLink.create(albumId, window.readLink.stateFor(item.readable, "
+                   "item.archive_problem), 'btn-sm');\n        if (read) buttons.appendChild(read);\n"),
+    ("wishlist.js", "    var read = window.readLink.create(albumId, window.readLink.stateFor(item.readable, "
+                    "item.archive_problem), 'btn-sm');\n    if (read) actions.appendChild(read);\n"),
     ("search.js", "\n      html += window.readLink.html(item.album_id, undefined, 'btn-sm flex-fill reader-link');\n"),
 ])
 def test_every_list_always_offers_read(script, call):
@@ -328,7 +341,7 @@ def test_every_list_always_offers_read(script, call):
 def test_search_updates_the_read_button_when_the_check_returns():
     source = (STATIC_JS / "search.js").read_text(encoding="utf-8")
     setter = source[source.index("function setCardReadable"):source.index("function refreshReadable")]
-    assert "window.readLink.apply(link, readable)" in setter
+    assert "window.readLink.apply(link, window.readLink.stateFor(readable, archiveProblem))" in setter
 
 
 def test_downloads_offer_read_on_completed_and_failed_cards():

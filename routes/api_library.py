@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify, request
 
 import core.database as db
 from core.jm_service import get_album_detail, get_album_detail_cached
-from core.local_availability import MAX_IDS, readable_album_ids
+from core.local_availability import MAX_IDS, local_states, readable_album_ids
 from core.logger import bind_request_id, log
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 
@@ -32,6 +32,26 @@ def readable_among(album_ids) -> set[str]:
     return readable
 
 
+def mark_local_details(items):
+    """列表条目的本地细节，与详情 / 搜索 / 下载管理同一规则（core.local_availability）：
+    archive：只剩压缩包也能离线读时是 'cbz' / 'zip'（显示压缩包标记），否则 None；
+    local_problem：“下载过 · 本地文件不可用”的原因 —— deleted 文件已删除 / archive_corrupt 压缩包损坏 /
+    archive_empty 压缩包无可阅读图片；不属于这一档时为 None。
+    archive_problem：本地只剩打不开的压缩包时的原因（不论下载状态分组，与 /read 的去向同一依据），否则 None——
+    “阅读”按钮的外观按它决定。条目需已带 readable / files_missing。"""
+    ids = [item["album_id"] for item in items]
+    states = {}
+    for start in range(0, len(ids), MAX_IDS):
+        states.update(local_states(ids[start:start + MAX_IDS]))
+    for item in items:
+        state = states.get(str(item["album_id"]))
+        item["archive"] = state.archive if item.get("readable") and state and state.state == "archive" else None
+        item["local_problem"] = ((state.problem if state else None) or "deleted") if item.get("files_missing") else None
+        item["archive_problem"] = (state.problem if state and state.state in ("archive_corrupt", "archive_empty")
+                                   else None)
+    return items
+
+
 def _mark_readable(items, readable=None):
     """给每个条目加上 readable 布尔值（已算好整批集合时直接复用，否则只判断这一页），
     再按与收藏相同的规则（db.download_state）加上 status_group / activity / files_missing，
@@ -48,7 +68,7 @@ def _mark_readable(items, readable=None):
             item["readable"], facts.get("active_job"), facts.get("latest_job"),
             facts.get("has_completed"), facts.get("legacy_status"),
         ))
-    return items
+    return mark_local_details(items)
 
 
 # 排序白名单

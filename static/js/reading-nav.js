@@ -63,6 +63,43 @@
           }
         } catch (_) { /* referrer 为空：跟随 href */ }
       });
+    },
+
+    /**
+     * 本地压缩包里的一页读不出来时服务端回说明（<img> 拿不到）：再取一次这一页读出原因。返回 Promise：
+     *   {reason: 'archive_corrupt', message}  这一页坏了（422）：重试没有用，给在线阅读
+     *   {reason: 'archive_changed', message}  压缩包已重新打包、这一页不在了（409）：刷新页面拿新的页列表
+     *   {reason: 'archive_busy', message}     压缩包暂时打不开（503）：说明原因，保留“重试”
+     *   null  不是压缩包的页、网络问题等（照常给“重试”）
+     */
+    archivePageProblem: function (url) {
+      var archive;
+      try {
+        var path = new URL(url, location.origin).pathname;
+        archive = path.indexOf('/api/preview-archive/') === 0;
+        // 散图：只看 409（阅读页打开后这一页被打包进了压缩包）；真的不在了（404）照常给“重试”
+        if (!archive && path.indexOf('/api/preview-img/') !== 0) return Promise.resolve(null);
+      } catch (_) { return Promise.resolve(null); }
+      return fetch(url, { cache: 'no-store' }).then(function (response) {
+        if (response.ok || !((archive && (response.status === 422 || response.status === 503)) || response.status === 409)) return null;
+        return response.json().then(function (data) {
+          if (!data || ['archive_corrupt', 'archive_changed', 'archive_busy'].indexOf(data.reason) < 0) return null;
+          var message = String(data.message || '压缩包里这一页读不出来');
+          return { reason: data.reason, message: /[。！？]$/.test(message) ? message : message + '。' };
+        });
+      }).catch(function () { return null; });
+    },
+
+    /**
+     * 本地的一页在线读：同一章（photo_id）里的同一位置（offset）。本地可能只下载了部分章节，按本地页码去在线阅读
+     * 会是别的章节；章节目录名里没有 photo_id 时只能打开在线阅读的开头（exact=false，按钮不说“这一页”）。
+     */
+    onlinePageUrl: function (albumId, page) {
+      var base = '/online/' + encodeURIComponent(albumId);
+      if (page && /^[0-9]{1,20}$/.test(String(page.photo_id || ''))) {
+        return { url: base + '?chapter=' + page.photo_id + '&offset=' + (Number(page.offset) || 0), exact: true };
+      }
+      return { url: base, exact: false };
     }
   };
 })();

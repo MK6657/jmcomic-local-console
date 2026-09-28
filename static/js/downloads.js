@@ -7,8 +7,9 @@
  *
  * 不使用内联 onclick：按钮只带 data-action + data-job-id / data-status，
  * 由 #downloadTabsContent 上的一个委托监听器分派（拼进内联 JS 的数据会被 HTML 解码后执行）。
- * 已完成任务按与其他页面相同的规则标记：本地可读 →“已下载 · 可离线阅读”+“预览”（/preview，单页翻页）；
- * 判断过但读不到 →“文件已删除”，不给“预览”（它只读本地文件）。
+ * 已完成任务按与其他页面相同的规则标记：本地可读 →“已下载 · 可离线阅读”+“预览”（/preview，单页翻页），
+ * 只剩压缩包也能读时再跟一个 CBZ / ZIP 标记；判断过但读不到 → 原因（文件已删除 / 压缩包损坏 /
+ * 压缩包无可阅读图片，utils.js localBadges），不给“预览”（它只读本地文件）。
  * 已完成和失败的任务都有“阅读”（utils.js readLink）：已下载打开本地文件，否则在线阅读。
  */
 (function () {
@@ -108,9 +109,17 @@
             throw new Error(data.message || '导出失败');
           });
         }
+        // 本程序不会回 204：这是下载工具（如 IDM）接管了带附件的响应，自己保存文件，只给页面一个空响应。
+        // 不再另存一个空文件，也不说“导出完成”
+        if (r.status === 204) return null;
         return r.blob();
       })
       .then(function (blob) {
+        if (blob === null) {
+          showToast('ℹ️ ' + label + ' 已交给下载工具保存，请在下载工具里查看', 'info');
+          return;
+        }
+        if (!blob.size) throw new Error('导出的文件是空的');
         var filename = label === 'ZIP' ? 'download.zip' : 'download.pdf';
         var link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
@@ -249,6 +258,7 @@
   // ── 本地可读（已下载）判断：与搜索/详情/收藏/资源库同一规则（/api/preview/available） ──
 
   var readableAlbums = {};   // album_id → true（可读）/ false（判断过，不可读）；没有键 = 还没判断
+  var localInfo = {};        // album_id → {state, archive}（/api/preview/available 的 local）：压缩包标记与不可读的原因
   var readableKey = null;    // 上次判断时的已完成 + 失败 album_id 集合
   var readableCheckedAt = 0;
   var readableSerial = 0;
@@ -267,7 +277,7 @@
     readableKey = key;
     readableCheckedAt = Date.now();
     var serial = ++readableSerial;
-    if (ids.length === 0) { readableAlbums = {}; return; }
+    if (ids.length === 0) { readableAlbums = {}; localInfo = {}; return; }
 
     var chunks = [];
     for (var i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200)); // 接口单次最多 200 个
@@ -283,12 +293,16 @@
       .then(function (results) {
         if (serial !== readableSerial) return;
         var next = {};
+        var info = {};
         ids.forEach(function (id) { next[id] = false; });
         results.forEach(function (data) {
           if (data.status !== 'ok') throw new Error(data.message || '判断失败');
           (data.readable || []).forEach(function (id) { next[String(id)] = true; });
+          var local = data.local || {};
+          Object.keys(local).forEach(function (id) { info[String(id)] = local[id]; });
         });
         readableAlbums = next;
+        localInfo = info;
         renderSection('completed', lastCompleted, renderCompletedCard);
         renderSection('failed', lastFailed, renderFailedCard);
       })
@@ -362,10 +376,12 @@
     });
   }
 
-  /** readableAlbums 里的判断结果：true / false；还没判断 → undefined */
+  /** readableAlbums 里的判断结果：true / false；本地只剩打不开的压缩包 → 'archive_problem'（“阅读”点开说明原因）；
+   *  还没判断 → undefined */
   function readableState(albumId) {
     var key = String(albumId);
-    return Object.prototype.hasOwnProperty.call(readableAlbums, key) ? readableAlbums[key] === true : undefined;
+    if (!Object.prototype.hasOwnProperty.call(readableAlbums, key)) return undefined;
+    return window.readLink.stateFor(readableAlbums[key], (localInfo[key] || {}).state);
   }
 
   function renderSection(status, items, renderFn) {
@@ -427,15 +443,24 @@
   }
 
   function renderCompletedCard(job) {
-    var cbzBadge = job.has_cbz ? '<span class="badge bg-info"><i class="bi bi-archive"></i> 📦 CBZ</span>' : '';
     var albumPath = encodeURIComponent(job.album_id);
     // 本地可读：与其他页面同一规则、同一标记。判断结果回来之前（known=false）两种标记都不显示
     var albumKey = String(job.album_id);
     var known = Object.prototype.hasOwnProperty.call(readableAlbums, albumKey);
     var readable = known && readableAlbums[albumKey] === true;
+    var local = localInfo[albumKey] || {};
+    var fromArchive = readable && local.state === 'archive'; // 没有散图，直接从压缩包读
+    // 压缩包标记：只剩压缩包时跟在“可离线阅读”后面；确认散图可读、又打包过时放在最前（“已打包”，任务的 archive_format）。
+    // 压缩包损坏 / 没有图片 / 文件不在、或还没判断时不放，只由原因徽章说明
+    var packFormat = job.archive_format || (job.has_cbz ? 'cbz' : '');
+    var cbzBadge = readable && local.state === 'loose' && packFormat
+      ? window.localBadges.archiveHtml(packFormat, '已打包为 ' + packFormat.toUpperCase() + '；本地还有散图，阅读时优先用散图')
+      : '';
     var marker = readable
       ? '<span class="offline-badge" title="本地文件完整，可以离线阅读"><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载 · 可离线阅读</span>'
-      : (known ? '<span class="badge status-badge-muted" title="下载过，但本地文件已不在，需要重新下载">文件已删除</span>' : '');
+        + (fromArchive ? window.localBadges.archiveHtml(local.archive) : '')
+      // 不可读的原因：文件已删除 / 压缩包损坏 / 压缩包无可阅读图片
+      : (known ? window.localBadges.problemHtml({ archive_corrupt: 'archive_corrupt', archive_empty: 'archive_empty' }[local.state] || 'deleted') : '');
     // 阅读（连续滚动）每张卡片都有：已下载打开本地文件，否则在线阅读；
     // 预览（/preview，单页翻页）只读本地文件，只在本地可读时出现
     var readBtn = window.readLink.html(job.album_id, readableState(job.album_id), 'btn-sm');

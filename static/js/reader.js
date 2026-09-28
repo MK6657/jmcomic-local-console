@@ -7,7 +7,8 @@
   var albumId = root.getAttribute('data-album-id');
   var online = root.getAttribute('data-source') === 'online';
   var positionKey = online ? 'online:' + albumId : albumId;   // online page memory stays separate
-  var imagePrefix = online ? '/api/online-img/' : '/api/preview-img/';
+  // pages only ever come from this app: online pages, local loose files, or pages read out of the local CBZ / ZIP
+  var imagePrefixes = online ? ['/api/online-img/'] : ['/api/preview-img/', '/api/preview-archive/'];
   var AUTO_RETRY_MS = 3000;   // online mode: one automatic retry of a failed page before showing the error
   var nav = window.readingNav;
   var pages = [];
@@ -135,7 +136,8 @@
   function readerImageUrl(value) {
     try {
       var url = new URL(value, location.origin);
-      return url.origin === location.origin && url.pathname.indexOf(imagePrefix) === 0 ? url.href : null;
+      var ours = imagePrefixes.some(function (prefix) { return url.pathname.indexOf(prefix) === 0; });
+      return url.origin === location.origin && ours ? url.href : null;
     } catch (_) { return null; }
   }
   function appendPages() {
@@ -188,6 +190,33 @@
             return;
           }
           img.classList.add('d-none'); error.classList.remove('d-none'); alignJump();
+          // 压缩包里这一页坏了：重试没有用，说明原因并给在线阅读（同一章的同一页）；
+          // 压缩包已重新打包、这一页不在了：刷新页面拿新的页列表
+          if (!online && src) {
+            nav.archivePageProblem(src).then(function (problem) {
+              if (!problem) return;
+              message.textContent = problem.message;
+              if (problem.reason === 'archive_busy') return;  // 暂时的：保留“重新加载图片”
+              if (problem.reason === 'archive_changed') {
+                var again = document.createElement('button');
+                again.type = 'button';
+                again.className = 'btn btn-outline-primary btn-sm';
+                again.textContent = '刷新页面';
+                again.addEventListener('click', function () { location.reload(); });
+                retry.replaceWith(again);
+                return;
+              }
+              var target = nav.onlinePageUrl(albumId, page);
+              var link = document.createElement('a');
+              link.className = 'btn btn-outline-primary btn-sm';
+              link.href = target.url;
+              var globe = document.createElement('i');
+              globe.className = 'bi bi-globe2';
+              globe.setAttribute('aria-hidden', 'true');
+              link.append(globe, target.exact ? ' 在线阅读这一页' : ' 在线阅读');
+              retry.replaceWith(link);
+            });
+          }
         };
         retry.addEventListener('click', function () {
           if (!src) return;
@@ -238,13 +267,20 @@
         var start = nav.initialPage(positionKey);
         // ?chapter=<photo_id> (chapter links on the detail page) opens at that chapter's first page and
         // becomes ?page=, so later scrolling keeps the address current and a reload resumes in place.
-        var chapter = new URLSearchParams(location.search).get('chapter');
+        var params = new URLSearchParams(location.search);
+        var chapter = params.get('chapter');
         if (chapter) {
           var first = data.pages.findIndex(function (page) { return page.photo_id === chapter; });
-          if (first >= 0) start = first + 1;
+          if (first >= 0) {
+            // &offset=n（本地阅读“在线阅读这一页”）：这一章里的第 n+1 页，超出这一章时停在本章最后一页
+            var inChapter = data.pages.filter(function (page) { return page.photo_id === chapter; }).length;
+            var offset = Math.max(0, Math.min(inChapter - 1, parseInt(params.get('offset'), 10) || 0));
+            start = first + 1 + offset;
+          }
           try {
             var url = new URL(location.href);
             url.searchParams.delete('chapter');
+            url.searchParams.delete('offset');
             url.searchParams.set('page', start);
             history.replaceState(history.state, '', url.pathname + url.search);
           } catch (_) {}
