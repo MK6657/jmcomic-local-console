@@ -38,6 +38,8 @@
                 rendered = true;
                 // 本地是否已下载、可离线阅读（与搜索/下载管理/收藏/资源库同一判定）
                 refreshOfflineStatus();
+                // 检查新章节的状态（只读数据库；本地没有已下载内容时不显示）
+                refreshUpdateStatus();
                 // 收藏状态检查 + 收藏按钮绑定（按钮由 renderAlbum 动态生成，必须在渲染后执行）
                 initWishlist(data.data);
                 // 加载本地标签管理
@@ -96,6 +98,8 @@
         html += '<h3 class="card-title">' + window.escapeHtml(album.title) + ' <button type="button" id="wishlist-toggle-btn" class="btn btn-sm wishlist-btn btn-outline-warning ms-2" title="收藏" aria-label="收藏" aria-pressed="false"><i class="bi bi-star" aria-hidden="true"></i></button></h3>';
         // 已下载标记（+ 压缩包标记）或本地文件不可用的原因：由 refreshOfflineStatus 显示（放在标题外，收藏时取的标题文字不受影响）
         html += '<div id="album-offline-status" class="local-status-row" hidden><span class="offline-badge" title="本地有已下载的内容，可以离线阅读；不一定是整部漫画" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i> 已下载内容 · 可离线阅读</span></div>';
+        // 检查新章节的状态行（“部分章节已下载 · M/N 话”正下方）：只在本地有已下载内容时由 refreshUpdateStatus 显示
+        html += '<div id="album-update-status" class="update-status" role="status" aria-live="polite" hidden></div>';
         html += '<div class="row mt-3">';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-person"></i> 作者：</strong> ' + window.escapeHtml(album.author || '-') + '</div>';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-hash"></i> 车号：</strong> <code>' + window.escapeHtml(album.album_id) + '</code></div>';
@@ -344,6 +348,326 @@
             if (typeof showToast === 'function') showToast(toastErr(err, '创建任务失败'), 'danger');
         });
     }
+
+    // ── 章节更新 ──
+    // 检查新章节（/api/updates，core/update_checker.py）：状态行紧跟在“已下载内容 · 可离线阅读”“部分章节已下载 · M/N 话”下面，
+    // 只在本地有已下载内容时显示（eligible；只收藏、下载失败、文件删了的都不显示）。
+    //   “立即检查”只 POST /api/updates/<id>/check：只取一次章节列表核对，从不下载；
+    //   “选中这些章节”只勾选章节表里的复选框，下载仍要点“下载选中章节”；
+    //   章节表里已确认的新章节行标“新”（渲染后按复选框的 photo_id 加上，不自动勾选）。
+    // 上游的章节标题只经 textContent / title 进入 DOM。后台检查不弹 Toast。
+    var updateData = null;        // 最近一次读到 / 检查后的回答
+    var updateChecking = false;   // “立即检查”正在进行
+    var updatePollTimer = null;
+    var updatePolls = 0;
+    var UPDATE_POLL_MS = 3000;    // 后台正在检查这一部时每 3 秒再读一次……
+    var UPDATE_POLL_MAX = 40;     // ……最多 40 次
+
+    function updateToast(message, type) {
+        if (typeof showToast === 'function') showToast(message, type);
+    }
+
+    function updateNode(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined && text !== null) node.textContent = text;
+        return node;
+    }
+
+    function updateIcon(name) {
+        var i = updateNode('i', 'bi ' + name);
+        i.setAttribute('aria-hidden', 'true');
+        return i;
+    }
+
+    // 章节名：上游标题，没有时“第 N 话”
+    function chapterName(c) {
+        var title = String((c && c.title) || '').trim();
+        return title || ('第' + (c && c.index != null ? c.index : '?') + '话');
+    }
+
+    function newChapterNames(chapters, n) {
+        var shown = chapters.slice(0, 5).map(chapterName).join(' · ');
+        return n > 5 ? shown + ' … 等 ' + n + ' 话' : shown;
+    }
+
+    // 回答 → 要显示的内容：lead（徽章或图标 + 文字）、names（新章节名）、meta（时间与说明）、select（勾选按钮文字）
+    function updateView(data, busy, now) {
+        var fmt = window.updateBadges;
+        var u = data.update || {};
+        var auto = !!data.auto_enabled;
+        var n = Number(u.new_count) || 0;
+        var chapters = u.new_chapters || [];
+        var upstream = u.upstream_count != null ? u.upstream_count : u.baseline_count;
+        var when = function (iso) { return fmt.formatTime(iso, now); };
+        var next = auto ? ' · 下次' + fmt.about(u.next_check_at, now) : ' · 自动检查已关闭';
+        var reason = fmt.reasonText(u.error && u.error.kind);
+        var view = { badge: null, icon: '', warn: false, text: '', names: '', meta: '', select: '' };
+        var state = busy || data.checking ? 'checking' : u.state;
+        // 失败了但还带着已确认的新章节：照旧显示新章节，只换说明
+        var pending = n > 0 ? (Number(u.removed_count) > 0 ? 'changed' : 'new') : '';
+        if (state === 'failed' && pending) state = pending;
+
+        if (state === 'checking') {
+            view.icon = 'bi-hourglass-split';
+            view.text = '正在检查新章节…';
+            view.meta = '只取一次章节列表核对，不会下载任何内容';
+        } else if (state === 'new' || state === 'changed') {
+            if (state === 'new') {
+                view.badge = { cls: 'status-badge-update', icon: 'bi-bell', text: '有新章节 · ' + n + ' 话',
+                    title: '上游在你下载之后新出的章节；下载时没选的章节不算' };
+                view.meta = when(u.confirmed_at) + ' 检查确认 · 检查不会自动下载' + next;
+                view.select = '选中这些章节';
+            } else {
+                view.badge = { cls: 'status-badge-warning', icon: 'bi-exclamation-triangle', text: '章节列表有变动',
+                    title: '上游新出现了章节，同时有以前的章节不见了（可能删除或重新上传）' };
+                view.text = '新出现 ' + n + ' 话，另有 ' + (Number(u.removed_count) || 0) + ' 话已不在上游';
+                view.meta = when(u.last_success_at) + ' 检查 · 请先核对下面的章节列表再决定是否下载';
+                view.select = '选中新出现的章节';
+            }
+            view.names = newChapterNames(chapters, n);
+            if (u.state === 'failed') {
+                view.meta = '最近一次检查没成功（' + reason + '），'
+                    + (auto ? fmt.about(u.next_check_at, now) + ' 自动重试' : '可以稍后再点「立即检查」')
+                    + '；上面的新章节是 ' + when(u.confirmed_at) + ' 确认的';
+            }
+        } else if (state === 'failed') {
+            view.warn = true;
+            view.icon = 'bi-exclamation-triangle';
+            view.text = '这次没检查成功：' + reason;
+            if (!auto) view.meta = '自动检查已关闭，可以稍后再点「立即检查」';
+            else if (u.paused_until) view.meta = '连续几次连不上服务器，自动检查暂停，' + fmt.about(u.next_check_at, now) + ' 再试';
+            else view.meta = fmt.about(u.next_check_at, now) + ' 自动重试';
+            if (u.last_success_at) {
+                view.meta += ' · 上次成功检查：' + when(u.last_success_at) + '（'
+                    + (u.last_result === 'baseline' ? '已记下 ' + upstream + ' 话' : '没有新章节') + '）';
+            }
+        } else if (state === 'baseline') {
+            view.icon = 'bi-bookmark-check';
+            view.text = '已记下上游现有的 ' + upstream + ' 话';
+            view.meta = when(u.last_success_at) + ' 检查 · 以后新出的章节会在这里提示' + next;
+        } else if (state === 'no_update') {
+            view.icon = 'bi-check2-circle';
+            view.text = '没有新章节';
+            view.meta = '上次检查：' + when(u.last_success_at) + ' · 上游共 ' + upstream + ' 话' + next;
+        } else {
+            // never：还没成功检查过（下载时记下了基线，或是更新前下载的漫画）
+            view.icon = 'bi-clock-history';
+            view.text = '还没检查过新章节';
+            var fromDownload = u.baseline_source === 'download' && u.baseline_count != null;
+            if (fromDownload) {
+                view.meta = '下载时记下了上游的 ' + u.baseline_count + ' 话'
+                    + (auto ? '；后台会自动检查，每部漫画大约一天一次' : ' · 自动检查已关闭，可以点「立即检查」');
+            } else {
+                view.meta = auto ? '后台会在一天内自动检查，之后每部漫画大约一天一次' : '自动检查已关闭，可以点「立即检查」';
+            }
+        }
+        return view;
+    }
+
+    // 章节表：已确认的新章节行（复选框的值是其 photo_id）在章节名后标“新”；不勾选
+    function markNewChapters(chapters) {
+        Array.prototype.forEach.call(document.querySelectorAll('.update-new-mark'), function (m) { m.remove(); });
+        var byId = {};
+        (chapters || []).forEach(function (c) { if (c && c.photo_id != null) byId[String(c.photo_id)] = c; });
+        Array.prototype.forEach.call(document.querySelectorAll('.chapter-checkbox-item'), function (cb) {
+            var c = byId[String(cb.value)];
+            var row = c ? cb.closest('tr') : null;
+            var cell = row ? row.children[2] : null;
+            if (!cell) return;
+            var mark = updateNode('span', 'badge status-badge-update ms-1 update-new-mark', '新');
+            var when = window.updateBadges.formatTime(c.confirmed_at);
+            mark.title = (when ? when + ' ' : '') + '检查确认的新章节';
+            cell.appendChild(mark);
+        });
+    }
+
+    function renderUpdateStatus(data) {
+        var box = document.getElementById('album-update-status');
+        if (!box || !window.updateBadges) return;
+        box.textContent = '';
+        var eligible = !!(data && data.eligible && data.update);
+        markNewChapters(eligible ? data.update.new_chapters : []);
+        if (!eligible) {
+            box.hidden = true;   // 本地没有已下载的内容：不检查，也不显示以前的检查结果
+            return;
+        }
+        var busy = updateChecking || !!data.checking;
+        var view = updateView(data, busy);
+        if (view.badge) {
+            var badge = updateNode('span', 'badge ' + view.badge.cls);
+            badge.title = view.badge.title;
+            badge.appendChild(updateIcon(view.badge.icon));
+            badge.appendChild(document.createTextNode(' ' + view.badge.text));
+            box.appendChild(badge);
+        }
+        if (view.text) {
+            var lead = updateNode('span', view.warn ? 'update-status-warn' : 'update-status-text');
+            if (view.icon) {
+                lead.appendChild(updateIcon(view.icon));
+                lead.appendChild(document.createTextNode(' '));
+            }
+            lead.appendChild(document.createTextNode(view.text));
+            box.appendChild(lead);
+        }
+        if (view.select) {
+            var select = updateNode('button', 'btn btn-sm btn-outline-primary');
+            select.type = 'button';
+            select.setAttribute('data-action', 'select-new-chapters');
+            select.appendChild(updateIcon('bi-check2-square'));
+            select.appendChild(document.createTextNode(' ' + view.select));
+            select.addEventListener('click', selectNewChapters);
+            box.appendChild(select);
+        }
+        var check = updateNode('button', 'btn btn-sm btn-outline-primary');
+        check.type = 'button';
+        check.setAttribute('data-action', 'check-updates');
+        check.title = '只取一次章节列表核对，不会下载任何内容';
+        if (busy) {
+            check.disabled = true;
+            check.setAttribute('aria-busy', 'true');
+            check.appendChild(updateIcon('bi-hourglass-split'));
+            check.appendChild(document.createTextNode(' 检查中…'));
+        } else {
+            check.appendChild(updateIcon('bi-arrow-repeat'));
+            check.appendChild(document.createTextNode(' 立即检查'));
+            check.addEventListener('click', checkUpdatesNow);
+        }
+        box.appendChild(check);
+        if (view.names) box.appendChild(updateNode('div', 'update-new-list', view.names));
+        if (view.meta) box.appendChild(updateNode('div', 'update-status-meta', view.meta));
+        box.hidden = false;
+    }
+
+    function stopUpdatePoll() {
+        if (updatePollTimer) clearTimeout(updatePollTimer);
+        updatePollTimer = null;
+    }
+
+    // 读检查状态（只读数据库；15s 超时）。后台正在检查这一部时每 3 秒再读一次，最多 40 次
+    function refreshUpdateStatus(fromPoll) {
+        stopUpdatePoll();
+        if (fromPoll !== true) updatePolls = 0;
+        window.apiFetch('/api/updates/' + encodeURIComponent(String(albumId)),
+            { timeoutMs: 15000, abortKey: 'detail-update-status' })
+        .then(function (data) {
+            if (data.status !== 'ok' || updateChecking) return;   // “立即检查”的回答会自己显示
+            // 后台轮询读到的和上次一样：不重建这一行（读屏软件不会每 3 秒重复播报）
+            if (fromPoll === true && updateData && JSON.stringify(data) === JSON.stringify(updateData)) {
+                data = updateData;
+            } else {
+                updateData = data;
+                renderUpdateStatus(data);
+            }
+            if (data.eligible && data.checking && updatePolls < UPDATE_POLL_MAX) {
+                updatePolls++;
+                updatePollTimer = setTimeout(function () {
+                    updatePollTimer = null;
+                    refreshUpdateStatus(true);
+                }, UPDATE_POLL_MS);
+            }
+        })
+        .catch(function () { /* 静默：保持当前显示，不影响详情页其他功能 */ });
+    }
+
+    // “立即检查”之后的 Toast：[文案, 类型]
+    function checkOutcomeToast(data) {
+        var u = data.update || {};
+        var outcome = data.outcome;
+        if (outcome === 'coalesced') {
+            // 等锁的时候这一部刚被查过：按查完的状态提示
+            outcome = { 'new': 'new', changed: 'changed', no_update: 'no_update', baseline: 'baseline', failed: 'failed' }[u.state]
+                || 'throttled';
+        }
+        var upstream = u.upstream_count != null ? u.upstream_count : u.baseline_count;
+        switch (outcome) {
+            case 'new': return ['发现 ' + (Number(u.new_count) || 0) + ' 话新章节（只提示，不会自动下载）', 'success'];
+            case 'changed': return ['章节列表有变动，请核对', 'warning'];
+            case 'no_update': return ['没有新章节', 'info'];
+            case 'baseline': return ['已记下上游现有的 ' + upstream + ' 话', 'info'];
+            case 'failed': return ['这次没检查成功：' + window.updateBadges.reasonText(u.error && u.error.kind), 'warning'];
+            case 'throttled': return ['刚刚检查过，结果如上', 'info'];
+        }
+        return null;
+    }
+
+    // 立即检查：只 POST /api/updates/<id>/check（请求体不需要），服务端只取一次章节列表，从不下载。
+    // 最多等 20 秒拿锁再加一次检查自己的时限：前端给 100 秒
+    // 重建这一行后把键盘焦点放回“立即检查”（点之前焦点在它上面时）
+    function refocusCheckButton(refocus) {
+        if (!refocus) return;
+        var b = document.querySelector('#album-update-status [data-action="check-updates"]');
+        if (b && !b.disabled) b.focus();
+    }
+
+    function checkUpdatesNow() {
+        if (updateChecking) return;
+        var active = document.activeElement;
+        var refocus = !!(active && active.getAttribute && active.getAttribute('data-action') === 'check-updates');
+        updateChecking = true;
+        stopUpdatePoll();
+        if (updateData) renderUpdateStatus(updateData);   // 显示“正在检查新章节…”与“检查中…”
+        window.apiFetch('/api/updates/' + encodeURIComponent(String(albumId)) + '/check',
+            { method: 'POST', timeoutMs: 100000, abortKey: 'detail-update-check' })
+        .then(function (data) {
+            updateChecking = false;
+            if (data.status !== 'ok') {
+                if (updateData) renderUpdateStatus(updateData);
+                updateToast(data.message || '检查新章节失败', 'danger');
+                return;
+            }
+            updateData = data;
+            renderUpdateStatus(data);
+            refocusCheckButton(refocus);
+            var toast = checkOutcomeToast(data);
+            if (toast) updateToast(toast[0], toast[1]);
+        })
+        .catch(function (err) {
+            updateChecking = false;
+            if (updateData) renderUpdateStatus(updateData);
+            refocusCheckButton(refocus);
+            if (err && err.name === 'AbortError') {
+                // pagehide 中止（检查在服务端照样完成、结果照样保存）：不提示，悄悄重新读一次，
+                // 从 bfcache 回来时不会停在“检查中…”
+                refreshUpdateStatus();
+                return;
+            }
+            if (err && err.status === 409) {
+                // 本地还没有已下载的内容 / 正在检查别的漫画：服务端的说明
+                updateToast(err.message || '现在不能检查新章节', 'warning');
+            } else {
+                updateToast(toastErr(err, '检查新章节失败'), 'danger');
+            }
+            refreshUpdateStatus();
+        });
+    }
+
+    // 选中这些章节：只勾选章节表里这些新章节的复选框（其余取消勾选），不创建下载任务
+    function selectNewChapters() {
+        var u = updateData && updateData.eligible ? (updateData.update || {}) : {};
+        var wanted = {};
+        (u.new_chapters || []).forEach(function (c) { if (c && c.photo_id != null) wanted[String(c.photo_id)] = true; });
+        var total = Object.keys(wanted).length;
+        if (!total) return;
+        var boxes = Array.prototype.slice.call(document.querySelectorAll('.chapter-checkbox-item'));
+        var present = boxes.filter(function (cb) { return wanted[String(cb.value)]; });
+        if (present.length < total) {
+            // 章节表是检查之前取的：刷新页面会重新取章节列表（确认新章节时服务端已丢掉这部漫画的详情缓存）
+            updateToast('章节列表里还没有这些新章节，请刷新页面后再选', 'warning');
+            return;
+        }
+        boxes.forEach(function (cb) { cb.checked = !!wanted[String(cb.value)]; });
+        var all = boxes.length > 0 && present.length === boxes.length;
+        ['select-all-chapters', 'select-all-inline'].forEach(function (id) {
+            var b = document.getElementById(id);
+            if (b) b.checked = all;
+        });
+        // 瞬时定位到第一话新章节（Bootstrap 的 :root { scroll-behavior: smooth } 会让它慢慢滑过去）
+        var row = present[0].closest('tr');
+        if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'center', behavior: 'instant' });
+        updateToast('已选中 ' + present.length + ' 话新章节，点「下载选中章节」开始下载', 'info');
+    }
+    // ── 章节更新结束 ──
 
     // ── 收藏功能 ──
     // 注意：收藏按钮由 renderAlbum() 动态生成，状态检查与事件绑定必须在渲染完成后执行。
@@ -632,12 +956,13 @@
 
     loadAlbum();
 
-    // 从 bfcache 返回（如 详情 → 下载管理 → 后退）：重新判断是否已下载；
+    // 从 bfcache 返回（如 详情 → 下载管理 → 后退）：重新判断是否已下载、重新读检查新章节的状态；
     // 离开时详情请求被 pagehide 中止、页面仍停在加载中的，重新加载
     window.addEventListener('pageshow', function (event) {
         if (!event.persisted) return;
         if (rendered) {
             refreshOfflineStatus();
+            refreshUpdateStatus();
         } else if (errorDiv.classList.contains('d-none')) {
             loadAlbum();
         }

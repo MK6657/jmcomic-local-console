@@ -324,6 +324,7 @@
         }
       }
       showToast('设置已保存', 'success');
+      loadUpdateSummary(); // “自动检查新章节”开关可能刚改过
     } catch (err) {
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默（finally 仍会恢复按钮）
       // 保存失败时，回滚到服务端当前值
@@ -339,6 +340,74 @@
 
 
 
+  // ── 检查新章节状态 ──
+  // “检查新章节”一节下面的状态（GET /api/updates/summary，只读数据库和内存里的运行状态）：
+  // 三行——后台在做什么 / 统计 / 最近一次检查。全部用 textContent（漫画标题来自上游）。
+  // 页面打开、导入设置、保存设置后各读一次（开关保存后面板马上跟着变）。
+
+  // 漫画的名字：标题，没有时用车号
+  function updateAlbumName(item, quoted) {
+    var title = String((item && item.title) || '').trim();
+    if (title) return quoted ? '《' + title + '》' : title;
+    return '车号 ' + String((item && item.album_id) || '?');
+  }
+
+  function updateOutcomeText(last) {
+    switch (last.outcome) {
+      case 'no_update': return '没有新章节';
+      case 'new': return '发现 ' + (Number(last.new_count) || 0) + ' 话新章节';
+      case 'changed': return '章节列表有变动';
+      case 'baseline': return '已记下 ' + (Number(last.upstream_count) || 0) + ' 话';
+      default: return '没检查成功（' + window.updateBadges.reasonText(last.error_kind) + '）';
+    }
+  }
+
+  function updateSummaryLines(data, now) {
+    var fmt = window.updateBadges;
+    var runtime = data.runtime || {};
+    var counts = data.counts || {};
+    var phase;
+    switch (runtime.phase) {
+      case 'starting': phase = '程序刚启动，' + fmt.about(runtime.resume_at, now) + ' 开始检查'; break;
+      case 'idle': phase = '后台检查中：一次只查一部，每部大约一天一次'; break;
+      case 'checking': phase = '正在检查：' + updateAlbumName(runtime.current, false); break;
+      case 'deferred': phase = '有下载任务在进行，检查等下载结束后继续'; break;
+      case 'paused': phase = '连续几次连不上服务器，自动检查暂停，' + fmt.about(runtime.resume_at, now) + ' 再试'; break;
+      case 'not_running': phase = '自动检查已开启，但后台检查没有在运行（重启程序后生效）'; break;
+      default: phase = '自动检查已关闭。已有的检查结果仍会显示，可以在漫画详情页点「立即检查」。';
+    }
+    var parts = ['本地有内容的漫画 ' + (Number(counts.targets) || 0) + ' 部', '检查过 ' + (Number(counts.checked) || 0) + ' 部'];
+    if (Number(counts.with_updates) > 0) parts.push(counts.with_updates + ' 部有新章节');
+    if (Number(counts.failing) > 0) {
+      parts.push(counts.failing + ' 部最近一次没检查成功' + (data.enabled ? '（会自动重试）' : '（不会自动重试）'));
+    }
+    parts.push('过去 24 小时检查 ' + (Number(data.checks_24h) || 0) + ' 次');
+    var last = data.last
+      ? '最近一次：' + fmt.formatTime(data.last.at, now) + ' · ' + updateAlbumName(data.last, true) + ' · ' + updateOutcomeText(data.last)
+      : '还没有检查过';
+    return [phase, parts.join(' · '), last];
+  }
+
+  function loadUpdateSummary() {
+    var box = document.getElementById('update-check-status');
+    if (!box || !window.updateBadges) return;
+    window.apiFetch('/api/updates/summary', { timeoutMs: 15000, abortKey: 'settings-update-summary' })
+      .then(function (data) {
+        if (data.status !== 'ok') throw new Error(data.message || '读取检查状态失败');
+        box.textContent = '';
+        updateSummaryLines(data).forEach(function (text) {
+          var line = document.createElement('div');
+          line.textContent = text;
+          box.appendChild(line);
+        });
+      })
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') return; // pagehide 中止，静默
+        box.textContent = '暂时读不到检查状态，请稍后刷新页面';
+      });
+  }
+  // ── 检查新章节状态结束 ──
+
   // ── 加载设置 ──
 
   async function loadSettings() {
@@ -350,6 +419,7 @@
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默
       showToast('加载设置失败: ' + err.message, 'danger');
     }
+    loadUpdateSummary();
   }
 
 

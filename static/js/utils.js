@@ -331,3 +331,156 @@ window.encodeJobId = function (id) {
     problemText: function (reason) { return PROBLEMS[reason] ? PROBLEMS[reason].text : ''; }
   };
 })();
+
+/**
+ * 检查新章节的标记与文案（详情 / 资源库 / 收藏 / 下载管理 / 设置共用，数据来自 /api/updates 与列表接口的 item.update）：
+ *   chip(update, {compact, link, albumId}) 列表里的“有新章节 · N 话”（--primary 边框）/“章节有变动”（warning）；
+ *                         只在检查已确认有新章节（new_count > 0）或章节有变动时返回元素，其余一律 null——列表只显示确认过的事实。
+ *                         compact：收藏表格里的短写“新章节 · N”（“有”“话”只给读屏）；link：下载管理里可以点开详情的 <a>
+ *   chipHtml(...)         同 chip，返回 HTML 字符串（没有时为 ''）
+ *   formatTime(iso, now)  过去的时间：刚刚 / N 分钟前 / 今天 HH:mm / 昨天 HH:mm / M月D日 HH:mm / YYYY年M月D日 HH:mm
+ *   formatAfter(iso, now) 将来的时间：稍后 / 约 N 分钟后 / 约 N 小时后 / 今天 HH:mm / 明天 HH:mm / M月D日 HH:mm
+ *   about(iso, now)       拼句子用的“约 …”：formatAfter 已带“约”或是“稍后”时原样返回，否则前面加“约 ”
+ *   reasonText(kind)      没检查成功的原因
+ * 章节标题来自上游：只经 textContent / title 进入 DOM。时间是服务端的本地时间字符串（不带时区）。
+ */
+(function () {
+  var REASONS = {
+    network: '连不上服务器',
+    timeout: '服务器响应太慢',
+    not_found: '上游暂时找不到这部漫画（可能已下架）',
+    upstream_error: '服务器返回的章节列表无法识别'
+  };
+  var MINUTE = 60000;
+  var HOUR = 3600000;
+
+  function toDate(value) {
+    if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+    if (typeof value === 'number') return new Date(value);
+    if (!value) return null;
+    var d = new Date(String(value));
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function hm(d) { return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  function monthDay(d) { return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm(d); }
+  // 相差几个日历日（按本地日期，不受夏令时影响）
+  function dayDiff(a, b) {
+    var da = new Date(a.getFullYear(), a.getMonth(), a.getDate());
+    var db = new Date(b.getFullYear(), b.getMonth(), b.getDate());
+    return Math.round((da - db) / 86400000);
+  }
+
+  function formatTime(iso, now) {
+    var t = toDate(iso);
+    if (!t) return '';
+    var n = toDate(now) || new Date();
+    var diff = n - t;
+    if (diff > -MINUTE && diff < MINUTE) return '刚刚';
+    if (diff >= MINUTE && diff < HOUR) return Math.floor(diff / MINUTE) + ' 分钟前';
+    var days = dayDiff(n, t);
+    if (days === 0) return '今天 ' + hm(t);
+    if (days === 1) return '昨天 ' + hm(t);
+    if (t.getFullYear() === n.getFullYear()) return monthDay(t);
+    return t.getFullYear() + '年' + monthDay(t);
+  }
+
+  function formatAfter(iso, now) {
+    var t = toDate(iso);
+    var n = toDate(now) || new Date();
+    if (!t) return '稍后';
+    var diff = t - n;
+    if (diff <= 0) return '稍后';
+    if (diff < HOUR) return '约 ' + Math.max(1, Math.floor(diff / MINUTE)) + ' 分钟后';
+    if (diff < 6 * HOUR) return '约 ' + Math.max(1, Math.round(diff / HOUR)) + ' 小时后';
+    var days = dayDiff(t, n);
+    if (days === 0) return '今天 ' + hm(t);
+    if (days === 1) return '明天 ' + hm(t);
+    return monthDay(t);
+  }
+
+  function about(iso, now) {
+    var text = formatAfter(iso, now);
+    return text === '稍后' || text.indexOf('约') === 0 ? text : '约 ' + text;
+  }
+
+  function reasonText(kind) {
+    return REASONS[kind] || '原因未知';
+  }
+
+  function count(update) {
+    var n = Number(update && update.new_count);
+    return n > 0 ? n : 0;
+  }
+
+  // 新章节的名字（最多 5 个，上游顺序）：“第13话、第14话…”，没有名字时为 ''
+  function names(update, n) {
+    var titles = ((update && update.titles) || []).map(function (t) { return String(t || '').trim(); })
+      .filter(Boolean).slice(0, 5);
+    if (!titles.length) return '';
+    return titles.join('、') + (n > titles.length ? '…' : '');
+  }
+
+  function newTitle(update, link, now) {
+    var n = count(update);
+    var when = formatTime(update.confirmed_at, now);
+    var head = '上游在你下载之后新出了 ' + n + ' 话' + (when ? '（' + when + ' 确认）' : '');
+    if (link) return head + '；打开详情选择下载';
+    var list = names(update, n);
+    return head + (list ? '：' + list : '') + '。检查不会自动下载，打开详情选择下载';
+  }
+
+  function changedTitle(update) {
+    return '上游新出现 ' + count(update) + ' 话，另有 ' + (Number(update.removed_count) || 0)
+      + ' 话已不在上游；打开详情核对';
+  }
+
+  function chip(update, opts) {
+    opts = opts || {};
+    if (!update) return null;
+    var changed = update.state === 'changed';
+    var n = count(update);
+    if (!changed && !n) return null;
+    var id = String(opts.albumId == null ? '' : opts.albumId);
+    var link = opts.link && /^[0-9]{1,20}$/.test(id);
+    var node = document.createElement(link ? 'a' : 'span');
+    node.className = 'badge ' + (changed ? 'status-badge-warning' : 'status-badge-update');
+    if (link) node.href = '/album/' + encodeURIComponent(id);
+    node.title = changed ? changedTitle(update) : newTitle(update, link, opts.now);
+    var icon = document.createElement('i');
+    icon.className = 'bi ' + (changed ? 'bi-exclamation-triangle' : 'bi-bell');
+    icon.setAttribute('aria-hidden', 'true');
+    node.appendChild(icon);
+    if (changed) {
+      node.appendChild(document.createTextNode(' 章节有变动'));
+    } else if (opts.compact) {
+      // 收藏表格里的短写：看得见的是“新章节 · N”，读屏读“有新章节 · N 话”
+      node.appendChild(document.createTextNode(' '));
+      var pre = document.createElement('span');
+      pre.className = 'visually-hidden';
+      pre.textContent = '有';
+      node.appendChild(pre);
+      node.appendChild(document.createTextNode('新章节 · ' + n));
+      var post = document.createElement('span');
+      post.className = 'visually-hidden';
+      post.textContent = ' 话';
+      node.appendChild(post);
+    } else {
+      node.appendChild(document.createTextNode(' 有新章节 · ' + n + ' 话'));
+    }
+    return node;
+  }
+
+  window.updateBadges = {
+    chip: chip,
+    chipHtml: function (update, opts) {
+      var node = chip(update, opts);
+      return node ? node.outerHTML : '';
+    },
+    formatTime: formatTime,
+    formatAfter: formatAfter,
+    about: about,
+    reasonText: reasonText
+  };
+})();

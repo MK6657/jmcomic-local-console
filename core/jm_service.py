@@ -27,7 +27,8 @@ from .validation import safe_dirname as _safe_dirname
 from .path_guard import DOWNLOAD_ROOT, is_safe_path
 from .packer import CbzPacker
 from . import archive_pages
-from .local_availability import forget as forget_local_state, has_local_pages
+from . import update_store
+from .local_availability import forget as forget_local_state, has_local_pages, is_readable
 
 
 # ── 全局复用客户端（搜索/详情用，避免每次新建 client + 连接池）──
@@ -111,6 +112,25 @@ def new_image_client():
         if option.client.postman.src_dict.get("type") == "curl_cffi_session":
             overrides["use_thread_local_curl"] = False
         return option.new_jm_client(**overrides)
+
+
+def new_check_client(timeout: int):
+    """检查新章节（core/update_checker.py）专用的 client：每次检查新建一个，用完 close_client() 关闭。
+
+    与下载同一份 option（代理、impersonate、client 类型都一样），另外三点：
+      - 不带缓存（cache=False 且 set_cache_dict(None)）：每次都向上游要最新的章节列表；
+      - retry_times = 0：第一次出错就抛出，换哪个域名由检查自己决定（每个域名最多问一次）；
+      - timeout 覆盖 curl 的总超时（调用方已限制在 20 秒以内）。
+    计入 get_active_client_count()。"""
+    global _active_independent_clients
+    with _option_lock:
+        client = _get_or_create_option().new_jm_client(cache=False, timeout=timeout)
+    client.set_cache_dict(None)
+    client.retry_times = 0
+    client._jm_counted = True
+    with _clients_lock:
+        _active_independent_clients += 1
+    return client
 
 
 def get_active_client_count() -> int:
@@ -535,6 +555,18 @@ def clear_album_detail_cache():
         db.clear_cached_album_details()
 
 
+def forget_album_detail(album_id: str) -> None:
+    """只丢掉这一部漫画的详情缓存（内存 + 数据库）：检查新章节确认了新章节后调用，
+    详情页下次打开时重新取章节列表，新章节才会出现在章节表里。别的漫画的缓存不动；
+    正在进行的旧请求也不会把旧的章节列表写回来。"""
+    global _detail_cache_generation
+    album_id = str(album_id)
+    with _detail_cache_lock:
+        _detail_cache_generation += 1
+        _detail_cache.pop((str(db.DB_PATH), album_id), None)
+        db.delete_cached_album_detail(album_id)
+
+
 def get_album_detail_cached(album_id: str, ttl: int = 3600) -> dict:
     """Bounded two-tier cache with request coalescing and isolated return values."""
     from copy import deepcopy
@@ -844,6 +876,13 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
         if not photos_to_download or total_pages <= 0:
             raise ValueError("选中的章节不存在或没有可下载图片")
 
+        # 检查新章节的基线（core/update_store.py）：用这次已经取到的完整章节列表，不多发请求。
+        # 本地原来有没有能读的内容，必须在这个任务写任何文件之前判断。记录失败只写日志，绝不影响下载
+        try:
+            update_store.note_download_started(album_id, update_store.episodes_of(album), is_readable(album_id))
+        except Exception as e:
+            log.warning(f"记录检查新章节的基线失败（不影响下载）album_id={album_id} error={e}")
+
         dl_root = str(DOWNLOAD_ROOT)
         os.makedirs(dl_root, exist_ok=True)
 
@@ -1064,6 +1103,12 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
                                      done_pages=done_val, completed_at=now)
             if ok:
                 db.update_wishlist_download_status(album_id, "completed")
+                # 这次真正下载完成的章节并入检查新章节的基线，不再算新章节（失败 / 取消的任务什么都不并入）。
+                # 记录失败只写日志，绝不影响下载
+                try:
+                    update_store.absorb_downloaded(album_id, [str(p.photo_id) for p in photos_to_download])
+                except Exception as e:
+                    log.warning(f"更新检查新章节的基线失败（不影响下载）album_id={album_id} error={e}")
             else:
                 log.warning(f"transition_job_status 失败，状态可能已被取消 job_id={job_id}")
             if ok:

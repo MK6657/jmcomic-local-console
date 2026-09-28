@@ -401,6 +401,12 @@
         if (group === 'readable') {
             frag.appendChild(offlineBadge());
             if (item.archive) frag.appendChild(window.localBadges.archive(item.archive));
+            // 检查新章节已确认的“有新章节 · N 话”/“章节有变动”（item.update，utils.js updateBadges）；
+            // 还没检查、没有新章节、检查失败都不显示——列表只显示确认过的事实
+            if (item.update && window.updateBadges) {
+                var u = window.updateBadges.chip(item.update);
+                if (u) frag.appendChild(u);
+            }
             if (item.activity) frag.appendChild(activityBadge(item.activity));
         } else if (group === 'active') {
             frag.appendChild(activityBadge(item.activity));

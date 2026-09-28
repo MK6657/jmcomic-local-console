@@ -275,6 +275,11 @@
       box.appendChild(offline);
       // 只剩压缩包也能读：跟一个 CBZ / ZIP 标记（item.archive，与其他页面同一规则）
       if (item.archive) box.appendChild(window.localBadges.archive(item.archive));
+      // 检查新章节已确认的新章节（item.update）：表格里短写“新章节 · N”（“有”“话”给读屏），章节有变动时“章节有变动”
+      if (item.update && window.updateBadges) {
+        var u = window.updateBadges.chip(item.update, { compact: true });
+        if (u) box.appendChild(u);
+      }
       if (item.activity) box.appendChild(activityBadge(item.activity)); // 可读，同时又在下载（更新/补章节）
     } else if (group === 'active') {
       box.appendChild(activityBadge(item.activity));

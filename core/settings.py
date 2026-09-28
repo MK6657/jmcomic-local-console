@@ -39,6 +39,8 @@ DEFAULT_SETTINGS = {
     "photo_threads": "1",
     # 界面：资源库卡片正文空白处点一下是否在新标签页打开详情（默认关，封面/标题/“详情”始终可以打开）
     "library_card_click": "false",
+    # 新章节检查：默认开；只查本地有已下载内容的漫画，只取章节列表，从不下载（core/update_checker.py）
+    "auto_update_check": "true",
 }
 
 
@@ -80,7 +82,8 @@ def update_settings(settings: dict):
         "image_threads": (1, 50), "photo_threads": (1, 10),
         "schedule_start": (0, 23), "schedule_end": (0, 23),
     }
-    bool_keys = {"schedule_enabled", "auto_pack", "delete_originals", "skip_existing", "library_card_click"}
+    bool_keys = {"schedule_enabled", "auto_pack", "delete_originals", "skip_existing", "library_card_click",
+                 "auto_update_check"}
     normalized = {}
     for key, value in settings.items():
         if key not in DEFAULT_SETTINGS:

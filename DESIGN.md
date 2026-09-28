@@ -301,6 +301,24 @@ GET /api/preview-archive/<album_id>/<n>             → 只剩压缩包时的第
 GET /api/export/wishlist/format                     → 收藏导出（指定格式）
 ```
 
+### 4.11 检查新章节 API
+
+只有 `POST /api/updates/<album_id>/check` 会联网（只取一次章节列表，从不下载）；其余只读数据库、本地文件和内存里的运行状态。本地没有能读的已下载内容的漫画不返回任何检查结果。
+
+```
+GET  /api/updates/<album_id>            → { eligible:false } 或 { eligible:true, auto_enabled, checking,
+                                             update:{ state: never/checking/baseline/no_update/new/changed/failed,
+                                             new_count, new_chapters:[{photo_id,index,title,confirmed_at}], error, next_check_at, ... } }
+POST /api/updates/<album_id>/check      → 立即检查（请求体忽略）：200 同上 + outcome（new/changed/no_update/baseline/
+                                             failed/throttled/coalesced）；409 not_target 本地没有已下载的内容 / busy 正在检查别的漫画
+POST /api/updates/states                  Body: { "album_ids": [...] }（最多 200）→ { updates:{ id:{state:new/changed, new_count,
+                                             removed_count, confirmed_at, titles} } }（只含本地可读、已确认有新章节的）
+GET  /api/updates/summary               → 设置页状态：{ enabled, runtime:{phase,...}, counts, checks_24h, last }
+GET  /api/updates/pending               → 已确认、可以下载的新章节（给“下载新章节”用；不含“章节有变动”的）
+```
+
+资源库、收藏列表的条目另带 `update`（与 `/api/updates/states` 同一形状，只给本地可读的条目，否则 null）。
+
 ---
 
 ## 五、任务模型
@@ -368,6 +386,8 @@ CREATE TABLE jobs (
 | `wishlist` | 收藏清单 | album_id(UNIQUE), title, author, cover_url, download_status |
 | `album_tags` | 标签 | album_id, tag, source(auto/user) |
 | `album_meta` | 漫画元数据缓存 | album_id, title, author, cover_url, tags_synced_at |
+| `album_update_checks` | 检查新章节（每部漫画一行） | album_id, baseline_ids（下载时记下的上游章节）, new_chapters / new_count（已确认的新章节）, removed_ids, result, last_success_at, error_kind, fail_count, next_check_at |
+| `update_check_log` | 检查记录（只留最近 2000 条） | album_id, trigger（auto/manual）, started_at, outcome, error_kind, requests, upstream_count, new_count |
 
 ### 标签同步策略
 
@@ -588,6 +608,29 @@ Primary(蓝色) / Secondary(暖灰+边框) / Ghost(全透明) / Danger(红色)
 
 - “本地可读”只说明至少有一页能读，不说明整部漫画都在（选章节下载、下载失败或取消、之后又出了新章节、手动删了章节都会只有一部分）。所以下载管理、收藏、资源库、搜索、详情的标记都写“已下载内容 · 可离线阅读”（收藏表格里仍简写“可离线阅读”，完整文字在读屏文字和提示里），提示统一为“本地有已下载的内容，可以离线阅读；不一定是整部漫画”；“阅读”按钮提示“已下载内容：打开本地文件阅读”；资源库统计“可离线阅读”的提示、两处状态筛选项同步改；下载任务完成的 Toast 说“下载任务完成”（任务可能只含部分章节）。任何地方都不再说“本地文件完整”。
 - 详情页在能证明时另加“部分章节已下载 · M/N 话”（`.status-badge-partial`：`--text-primary` 字、`--info-bg` 底、`--info` 边框与 `bi-layers` 图标，与压缩包标记同一组 token，靠图标区分）。只读数据库和磁盘（`/api/local-chapters/<id>`，core/chapter_inventory.py），从不联网、不建下载任务。条件：N 来自详情页刚取到、没过期（1 小时）的章节列表；阅读器看到的每一页都能按章节目录 `<章节名>__<photo_id>` 和其中的章节标记归到一话、页名是连续编号；本地每一话的页号正好是 1..该话页数；本地各话都在章节列表里；且 0 < M < N。任何一条不满足（没有章节列表或已过期、扁平整理、旧版没有标记的目录、别的工具的压缩包、残缺的一话、中断的下载留下的临时文件、上游换了章节、这部漫画还有别的下载目录有内容（按作者整理、上游改了标题）、优先的压缩包暂时打不开）就不显示数量——不猜。只有一话的漫画不显示（也不扫描目录）。M == N 时也不说“全部已下载”。列表页不显示数量：那里没有刚取到的章节列表。
+
+### 检查新章节（2026-09-28）
+
+- 设置页“检查新章节”（`auto_update_check`，默认开，放在“定时下载”与“界面操作”之间）：后台慢慢检查本地有已下载内容的漫画（含只下载了部分章节的、只剩 CBZ / ZIP 的），一次只查一部、每部大约一天一次、两次之间至少 2 分钟，有下载在进行时先等。一次检查只取一次章节列表，**从不下载**；失败后逐渐拉长重试间隔，连不上服务器时暂停。只收藏、没下载的不查。开关下面是只读的状态面板（三行 textContent：后台在做什么 / 统计 / 最近一次）。关闭后详情页的“立即检查”、已有的结果和列表标记照常。
+- “新章节”只指下载之后上游新出的章节：基线是下载时取到的完整章节列表，下载时没选的章节从不算新章节；更新前下载的漫画第一次检查只记下现有章节，不说有新章节。“有新章节”只在一次成功的检查确认了具体章节之后出现；同一次检查里既有新章节、又有以前的章节不见了时是“章节有变动”（只给用户核对）。
+- 标记 `.badge.status-badge-update`：`--text-primary` 字、`--primary-bg` 底、`--primary` 边框与图标（`bi-bell`）；“章节有变动”复用 `.status-badge-warning`（`bi-exclamation-triangle`）。下载管理里它们是链接（`a.badge`，悬停才有下划线）。字号、圆角沿用 `.badge`。
+- 详情页：状态行 `#album-update-status.update-status` 紧跟在“已下载内容 · 可离线阅读”“部分章节已下载 · M/N 话”下面（flex、换行，间距 4px / 8px，上方 8px，14px 字），第一行“徽章或图标 + 文字 ｜ 选中这些章节 ｜ 立即检查”，下面各占一整行的新章节名（`.update-new-list`，最多 5 个，之后“… 等 N 话”）和说明（`.update-status-meta`），两者 12px `--text-secondary`；没检查成功的原因用 `.update-status-warn`（图标 `--warning`）。本地没有已下载的内容时整行不显示。按钮都是 `btn-sm btn-outline-primary`：“立即检查”（`bi-arrow-repeat`，提示“只取一次章节列表核对，不会下载任何内容”，检查中禁用、`aria-busy`、静止的 `bi-hourglass-split` + “检查中…”）；“选中这些章节”（`bi-check2-square`）只勾选章节表里的这些复选框并瞬时定位，下载仍要点“下载选中章节”。章节表里已确认的新章节行在章节名后标“新”（同一个 `.status-badge-update`，提示“{时间} 检查确认的新章节”），不自动勾选。
+
+  | 状态 | 第一行 | 说明（A = 自动检查开 / O = 关） |
+  |------|--------|------|
+  | 还没检查过（下载时记下了基线） | 还没检查过新章节 | A：下载时记下了上游的 B 话；后台会自动检查，每部漫画大约一天一次 · O：下载时记下了上游的 B 话 · 自动检查已关闭，可以点「立即检查」 |
+  | 还没检查过（更新前下载的） | 还没检查过新章节 | A：后台会在一天内自动检查，之后每部漫画大约一天一次 · O：自动检查已关闭，可以点「立即检查」 |
+  | 正在检查 | 正在检查新章节… | 只取一次章节列表核对，不会下载任何内容 |
+  | 记下了基线 | 已记下上游现有的 U 话 | {时间} 检查 · 以后新出的章节会在这里提示 · 下次约 …（O：· 自动检查已关闭） |
+  | 没有新章节 | 没有新章节 | 上次检查：{时间} · 上游共 U 话 · 下次约 …（O：· 自动检查已关闭） |
+  | 有新章节 | 徽章“有新章节 · N 话” + 选中这些章节 | {时间} 检查确认 · 检查不会自动下载 · 下次约 …（O：· 自动检查已关闭） |
+  | 章节有变动 | 徽章“章节列表有变动” + 新出现 N 话，另有 R 话已不在上游 + 选中新出现的章节 | {时间} 检查 · 请先核对下面的章节列表再决定是否下载 |
+  | 没检查成功（没有待下载的新章节） | ⚠ 这次没检查成功：{原因} | A：约 … 自动重试（连不上服务器暂停时：连续几次连不上服务器，自动检查暂停，约 … 再试）· O：自动检查已关闭，可以稍后再点「立即检查」；成功检查过的再加 · 上次成功检查：{时间}（没有新章节 / 已记下 U 话） |
+  | 没检查成功（带着新章节） | 照旧显示有新章节 / 章节有变动 | 最近一次检查没成功（{原因}），约 … 自动重试（O：可以稍后再点「立即检查」）；上面的新章节是 {时间} 确认的 |
+
+  原因：连不上服务器 / 服务器响应太慢 / 上游暂时找不到这部漫画（可能已下架） / 服务器返回的章节列表无法识别。时间写“刚刚 / N 分钟前 / 今天 HH:mm / 昨天 HH:mm / M月D日 HH:mm”，将来的写“约 N 分钟后 / 约 N 小时后 / 今天 HH:mm / 明天 HH:mm”。“立即检查”之后的 Toast：发现 N 话新章节（只提示，不会自动下载）/ 章节列表有变动，请核对 / 没有新章节 / 已记下上游现有的 U 话 / 这次没检查成功：{原因} / 刚刚检查过，结果如上；409 时显示服务端的说明。后台检查不弹 Toast。
+- 列表只显示确认过的事实：资源库、收藏、下载管理只在已确认有新章节（或章节有变动）时显示标记，还没检查、没有新章节、检查失败都不显示；本地不可读的漫画（只收藏的、文件删了的）什么都不显示。资源库卡片“有新章节 · N 话”（窄卡片可在徽章内换行），收藏表格短写“新章节 · N”（“有”“话”只给读屏），下载管理只放在这部漫画最新的已完成任务卡片上、点开详情选择下载。搜索、首页不变。
+- 没有新增动画：沙漏图标静止，唯一的过渡是 Bootstrap `.btn` 自带的；颜色只用上面的 token，没有新的颜色、字体、圆角或间距。
 
 ### 只剩压缩包也能离线阅读（2026-09-27）
 
