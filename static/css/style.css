@@ -1804,3 +1804,85 @@ a.badge.status-badge-warning:hover { text-decoration: underline; }
 /* 收藏表格：短写里给读屏的“有”“话”是绝对定位的 .visually-hidden，让它相对徽章定位（同 .offline-badge），
    否则窄屏时会越过 .table-responsive 把整页撑出横向滚动 */
 .wishlist-status .badge.status-badge-update { position: relative; }
+
+/* ════════════════════════════════════════════════════════════════
+   批量下载确认 · 章节表刷新（2026-09-28 新增，js/batch-download.js、detail.js）
+   只追加、不改动上方规则。确认窗口复用 .modal-content（--radius-xl），没有 fade：打开、关闭都没有动画。
+   颜色只用 eye-care token：说明框 --info-bg / --info，等待定时下载或设置不对时 --warning-bg / --warning；
+   清单 --bg-primary 底、--border 边框、--radius-lg。间距 4/8/16，字号 12/14，字重 400/500；没有过渡和动画。
+   ════════════════════════════════════════════════════════════════ */
+.batch-dialog-status { margin: 0; }
+.batch-dialog-status:not(:empty) { margin-bottom: 16px; }
+.batch-dialog-summary {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.batch-dialog-meta,
+.batch-dialog-skipped {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.batch-dialog-meta { margin: 0 0 8px; }
+.batch-dialog-alert {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 16px;
+  margin: 0 0 16px;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--info-bg);
+  border: 1px solid var(--info);
+  border-radius: var(--radius-lg);
+}
+.batch-dialog-alert .bi { color: var(--info); }
+.batch-dialog-alert--wait {
+  background: var(--warning-bg);
+  border-color: var(--warning);
+}
+.batch-dialog-alert--wait .bi { color: var(--warning); }
+.batch-dialog-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
+}
+.batch-dialog-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 16px;
+}
+.batch-dialog-item + .batch-dialog-item { border-top: 1px solid var(--border-light); }
+.batch-dialog-item .batch-dialog-meta { margin: 0; }
+.batch-dialog-title {
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.batch-dialog-id {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.batch-dialog-sub {
+  margin: 16px 0 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.batch-dialog-skipped {
+  margin: 0;
+  padding-left: 16px;
+}
+/* 详情页章节表刷新后的说明（“章节列表”标题旁，读屏礼貌播报） */
+.chapter-refresh-status {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}

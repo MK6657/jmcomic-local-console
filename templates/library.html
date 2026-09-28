@@ -15,7 +15,12 @@
             <span class="stat-item"><i class="bi bi-tags"></i> 标签 <strong id="stat-tags">-</strong></span>
         </div>
     </div>
-    <div class="d-flex gap-2">
+    <div class="d-flex gap-2 flex-wrap">
+        <!-- 下载检查确认过的新章节：先在确认窗口里列出清单（js/batch-download.js），确认后才加入下载队列 -->
+        <button type="button" class="btn btn-outline-primary btn-sm" id="library-download-new-btn" aria-haspopup="dialog"
+                title="只下载检查确认过的新章节：先列出要下载的漫画和章节，确认后才加入下载队列">
+            <i class="bi bi-bell" aria-hidden="true"></i> 下载新章节
+        </button>
         <button type="button" class="btn btn-outline-info btn-sm" id="library-resync-btn" title="从 18comic 重新同步所有标签">
             <i class="bi bi-arrow-repeat"></i> 同步所有标签
         </button>
@@ -87,5 +92,6 @@
 
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/batch-download.js') }}"></script>
 <script src="{{ asset_url('js/library.js') }}"></script>
 {% endblock %}

@@ -6,6 +6,11 @@
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
     <h4 class="text-nowrap"><i class="bi bi-bookmark-heart"></i> 收藏清单</h4>
     <div>
+        <!-- 下载“未下载”里的收藏（整部）：先在确认窗口里列出清单（js/batch-download.js），确认后才加入下载队列 -->
+        <button type="button" class="btn btn-outline-primary btn-sm" id="wishlist-download-undownloaded-btn" aria-haspopup="dialog"
+                title="只下载“未下载”里的收藏（从未下载过的、下载被取消的），每部下载整部：先列出清单，确认后才加入下载队列">
+            <i class="bi bi-cloud-arrow-down" aria-hidden="true"></i> 下载未下载的收藏
+        </button>
         <button type="button" class="btn btn-outline-info btn-sm" id="wishlist-export-btn" title="导出收藏清单">
             <i class="bi bi-download"></i> 导出
         </button>
@@ -83,8 +88,10 @@
 
 <!-- 批量操作按钮 -->
 <div id="batch-actions" class="d-none mb-3">
-    <button type="button" class="btn btn-success btn-sm" id="batch-download-btn">
-        <i class="bi bi-download"></i> 批量下载
+    <!-- 选中的收藏里只下载“未下载”的（整部）；其余的在确认窗口里列出原因 -->
+    <button type="button" class="btn btn-success btn-sm" id="batch-download-btn" aria-haspopup="dialog"
+            title="只下载选中的收藏里“未下载”的（整部）：先列出清单，确认后才加入下载队列">
+        <i class="bi bi-download" aria-hidden="true"></i> 下载选中的收藏
     </button>
     <button type="button" class="btn btn-danger btn-sm" id="batch-remove-btn">
         <i class="bi bi-trash"></i> 批量移除
@@ -116,5 +123,6 @@
 
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/batch-download.js') }}"></script>
 <script src="{{ asset_url('js/wishlist.js') }}"></script>
 {% endblock %}

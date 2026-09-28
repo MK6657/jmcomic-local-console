@@ -13,7 +13,8 @@ from PIL import Image
 
 
 @pytest.mark.parametrize("route", ["/api/jobs", "/api/wishlist", "/api/wishlist/check",
-    "/api/wishlist/download", "/api/wishlist/import", "/api/settings", "/api/library/123/tags"])
+    "/api/wishlist/download", "/api/wishlist/import", "/api/settings", "/api/library/123/tags",
+    "/api/batch-downloads/preview", "/api/batch-downloads/confirm"])
 @pytest.mark.parametrize("payload", [None, [], 7, "text", True])
 def test_non_object_json_is_400(client, route, payload):
     response = client.post(route, data=json.dumps(payload), content_type="application/json")

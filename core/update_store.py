@@ -584,9 +584,10 @@ def last_check(target_ids) -> dict | None:
         conn.close()
 
 
-def pending_new_chapters(album_ids=None) -> list[dict]:
+def pending_new_chapters(album_ids=None, conn=None) -> list[dict]:
     """PR-B 的输入（不联网、没有副作用）：已确认、可以批量下载的新章节。
     只含 new_count > 0 且没有“章节有变动”（removed_ids 为空）的；调用方再按本地可读过滤。
+    conn 传入时在调用方的连接（事务）里读，不关闭它。
     → [{album_id, title, photo_ids: [上游顺序], chapters: [{photo_id, index, title, confirmed_at}],
         confirmed_at: 最早的确认时间, checked_at: 最近一次成功检查}]"""
     sql = ("SELECT album_id, new_chapters, last_success_at FROM album_update_checks "
@@ -595,12 +596,14 @@ def pending_new_chapters(album_ids=None) -> list[dict]:
     if album_ids is not None:
         sql += " AND album_id IN (SELECT value FROM json_each(?))"
         params = (_ids_param(album_ids),)
-    conn = db.get_db()
+    own = conn is None
+    conn = conn or db.get_db()
     try:
         rows = conn.execute(sql + " ORDER BY album_id", params).fetchall()
         titles = _titles(conn, [row["album_id"] for row in rows]) if rows else {}
     finally:
-        conn.close()
+        if own:
+            conn.close()
     items = []
     for row in rows:
         chapters = [c for c in _loads(row["new_chapters"]) if isinstance(c, dict)]
@@ -616,3 +619,21 @@ def pending_new_chapters(album_ids=None) -> list[dict]:
         })
     items.sort(key=lambda item: (item["confirmed_at"] or "", item["album_id"]))
     return items
+
+
+def changed_albums(conn=None) -> list[dict]:
+    """“章节有变动”的漫画（有已确认的新章节，同一次检查里又有已知章节不见了）：不进批量下载，
+    只列出来请用户到详情页核对。调用方再按本地可读过滤。conn 传入时复用它（不关闭）。
+    → [{album_id, title, new_count, removed_count}]，按 album_id"""
+    own = conn is None
+    conn = conn or db.get_db()
+    try:
+        rows = conn.execute(
+            "SELECT album_id, new_count, removed_ids FROM album_update_checks "
+            "WHERE new_count > 0 AND removed_ids != '[]' ORDER BY album_id").fetchall()
+        titles = _titles(conn, [row["album_id"] for row in rows]) if rows else {}
+    finally:
+        if own:
+            conn.close()
+    return [{"album_id": row["album_id"], "title": titles.get(row["album_id"], ""),
+             "new_count": row["new_count"], "removed_count": len(_loads(row["removed_ids"]))} for row in rows]

@@ -216,6 +216,11 @@ function el(tag) {
       if (c.parentNode) c.parentNode.children.splice(c.parentNode.children.indexOf(c), 1);
       c.parentNode = e; e.children.push(c); e.rawHtml = null; return c;
     },
+    insertBefore(c, ref) {
+      if (!ref) return e.appendChild(c);
+      if (c.parentNode) c.parentNode.children.splice(c.parentNode.children.indexOf(c), 1);
+      c.parentNode = e; e.children.splice(e.children.indexOf(ref), 0, c); e.rawHtml = null; return c;
+    },
     remove() { if (e.parentNode) { e.parentNode.children.splice(e.parentNode.children.indexOf(e), 1); e.parentNode = null; } },
     get textContent() { return e.rawHtml !== null ? e.rawHtml.replace(/<[^>]*>/g, '') : e.children.map(c => c.textContent).join(''); },
     set textContent(v) { e.children.forEach(c => { c.parentNode = null; }); e.children = []; e.rawHtml = null; if (v !== '' && v != null) e.appendChild(textNode(v)); },
@@ -523,16 +528,25 @@ def test_detail_hidden_when_not_eligible():
     assert out["error"][0]["hidden"] is True and out["error"][0]["calls"][0]["url"] == "/api/updates/3001"
 
 
+# name → (row, outcome, toast). The answers are built when a test runs (_outcome_answer), never at collection:
+# _payload imports core, which binds its module-level paths (database, logs) to whatever app root is set then
 OUTCOMES = {
-    "new": (_payload(ROWS["new"], outcome="new"), ["发现 2 话新章节（只提示，不会自动下载）", "success"]),
-    "changed": (_payload(ROWS["changed"], outcome="changed"), ["章节列表有变动，请核对", "warning"]),
-    "no_update": (_payload(ROWS["no_update"], outcome="no_update"), ["没有新章节", "info"]),
-    "baseline": (_payload(ROWS["baseline"], outcome="baseline"), ["已记下上游现有的 12 话", "info"]),
-    "failed": (_payload(ROWS["failed"], outcome="failed"), ["这次没检查成功：连不上服务器", "warning"]),
-    "throttled": (_payload(ROWS["no_update"], outcome="throttled"), ["刚刚检查过，结果如上", "info"]),
-    "coalesced_new": (_payload(ROWS["new"], outcome="coalesced"), ["发现 2 话新章节（只提示，不会自动下载）", "success"]),
-    "coalesced_no_update": (_payload(ROWS["no_update"], outcome="coalesced"), ["没有新章节", "info"]),
+    "new": ("new", "new", ["发现 2 话新章节（只提示，不会自动下载）", "success"]),
+    "changed": ("changed", "changed", ["章节列表有变动，请核对", "warning"]),
+    "no_update": ("no_update", "no_update", ["没有新章节", "info"]),
+    "baseline": ("baseline", "baseline", ["已记下上游现有的 12 话", "info"]),
+    "failed": ("failed", "failed", ["这次没检查成功：连不上服务器", "warning"]),
+    "throttled": ("no_update", "throttled", ["刚刚检查过，结果如上", "info"]),
+    "coalesced_new": ("new", "coalesced", ["发现 2 话新章节（只提示，不会自动下载）", "success"]),
+    "coalesced_no_update": ("no_update", "coalesced", ["没有新章节", "info"]),
 }
+
+
+def _outcome_answer(name):
+    row, outcome, _ = OUTCOMES[name]
+    return _payload(ROWS[row], outcome=outcome)
+
+
 ERRORS = {
     "busy": ({"status": 409, "message": "正在检查别的漫画，请稍后再试"}, ["正在检查别的漫画，请稍后再试", "warning"]),
     "not_target": ({"status": 409, "message": "本地还没有已下载的内容，不检查新章节"},
@@ -546,21 +560,22 @@ ERRORS = {
 @pytest.fixture(scope="module")
 def check_runs():
     before = _payload(ROWS["never_download"])
-    cases = [{"name": name, "steps": [{"load": before}, {"click": "check-updates", "answer": {"ok": answer}}]}
-             for name, (answer, _) in OUTCOMES.items()]
+    cases = [{"name": name, "steps": [{"load": before},
+                                      {"click": "check-updates", "answer": {"ok": _outcome_answer(name)}}]}
+             for name in OUTCOMES]
     cases += [{"name": name, "steps": [{"load": before},
                                        {"click": "check-updates", "answer": {"error": error}, "refresh": before}]}
               for name, (error, _) in ERRORS.items()]
     cases.append({"name": "abort", "steps": [{"load": before}, {"click": "check-updates",
                                                                 "answer": {"error": {"name": "AbortError"}}}]})
     cases.append({"name": "twice", "steps": [{"load": before}, {"click": "check-updates", "again": True,
-                                                                "answer": {"ok": OUTCOMES["no_update"][0]}}]})
+                                                                "answer": {"ok": _outcome_answer("no_update")}}]})
     return _detail(cases)
 
 
 @pytest.mark.parametrize("name", list(OUTCOMES))
 def test_detail_toasts_per_outcome(check_runs, name):
-    answer, toast = OUTCOMES[name]
+    toast = OUTCOMES[name][2]
     loaded, during, after = check_runs[name]
     assert during["toasts"] == [] and after["toasts"] == [toast]
     # while the check runs: 正在检查新章节… and a disabled 检查中… button
@@ -640,11 +655,14 @@ def test_select_new_chapters_only_ticks_checkboxes(select_runs):
     assert changed["checked"] == ["74"] and changed["calls"] == []
 
 
-def test_select_warns_when_the_table_lacks_the_new_chapters(select_runs):
+def test_select_refreshes_the_table_when_it_lacks_the_new_chapters(select_runs):
+    # PR-B: instead of asking for a page reload, the chapter table is fetched again (read-only) and then selected;
+    # tests/test_batch_downloads_ui.py follows the refresh through to the ticked rows
     loaded, clicked = select_runs["missing"]
-    assert clicked["checked"] == ["72"] and clicked["scrolls"] == []   # nothing changed
-    assert clicked["toasts"] == [["章节列表里还没有这些新章节，请刷新页面后再选", "warning"]]
-    assert clicked["calls"] == []
+    assert clicked["checked"] == ["72"] and clicked["scrolls"] == []   # nothing ticked before the table is refreshed
+    assert clicked["toasts"] == [["章节列表里还没有这些新章节，正在刷新章节列表…", "info"]]
+    assert clicked["calls"] == [{"url": "/api/album/3001", "method": "GET", "body": None,
+                                 "abortKey": "detail-chapter-refresh", "timeoutMs": 30000}]
 
 
 def test_detail_marks_only_confirmed_new_rows():
@@ -1158,6 +1176,8 @@ def test_update_css_tokens_only_no_animation():
     css = (ROOT / "static" / "css" / "style.css").read_text(encoding="utf-8")
     block = css[css.index("检查新章节（2026-09-28 新增"):]
     block = block[block.index("*/") + 2:]
+    if "/* ════" in block:                  # up to the next block (PR-B's batch dialog has its own test)
+        block = block[:block.index("/* ════")]
     rules = re.sub(r"/\*.*?\*/", "", block, flags=re.S)
     assert ".badge.status-badge-update {" in rules and ".update-status {" in rules
     for prop, value in re.findall(r"([\w-]+)\s*:\s*([^;{}]+);", rules):

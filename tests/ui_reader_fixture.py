@@ -3,12 +3,49 @@
 Run with the project Python: python tests/ui_reader_fixture.py --port 5010
 检查新章节 never goes online here (an offline stub answers 立即检查; see /test/update-metrics). --fast-updates also runs
 the background check loop against that stub with short delays.
+Nothing downloads here either: every download button only records a queued job that never runs (see
+/test/batch-metrics). --many-favourites adds 60 never-downloaded favourites, so 下载未下载的收藏 shows its 50 cap.
 """
 import argparse
 import json
 import tempfile
 from pathlib import Path
 import sys
+
+
+def add_reader_samples(downloads, db, Image, ImageDraw):
+    """The first samples: 900001 'Reader sample' (45 pages) · 900500 two completed jobs in two folders ·
+    900600 a failed download (not a favourite) · 900700 favourite whose files were deleted · 900701 favourite
+    never downloaded."""
+    output = downloads / "Reader sample"
+    output.mkdir(parents=True)
+    for number in range(1, 46):
+        img = Image.new("RGB", (600, 800), "#eeeae1")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((30, 30, 570, 770), outline="#686256", width=3)
+        draw.text((240, 350), f"TEST PAGE {number}", fill="#2B2A27")
+        img.save(output / f"{number:03d}.png")
+    db.insert_job("job_ui", "900001", "Reader sample", [])
+    db.update_job("job_ui", status="completed", output_path=str(output))
+    # Same album, two distinct completed folders. Preview must use the newest one;
+    # exporting each job must still use that job's own folder.
+    for job_id, folder_name, colour in (
+        ("job_ui_old", "Old title 900500", "#b7791f"),
+        ("job_ui_new", "New title 900500", "#2f855a"),
+    ):
+        folder = downloads / folder_name
+        folder.mkdir()
+        page = Image.new("RGB", (320, 420), "#eeeae1")
+        ImageDraw.Draw(page).text((35, 190), job_id, fill=colour)
+        page.save(folder / f"{job_id}.png")
+        db.insert_job(job_id, "900500", folder_name, [])
+        db.update_job(job_id, status="completed", output_path=str(folder))
+    db.insert_job("job_ui_failed", "900600", "Failed download sample", [])
+    db.update_job("job_ui_failed", status="failed", error_message="Synthetic offline failure")
+    db.add_wishlist("900700", "Deleted files sample")
+    db.insert_job("job_ui_missing", "900700", "Deleted files sample", [])
+    db.update_job("job_ui_missing", status="completed", output_path=str(downloads / "gone"))
+    db.add_wishlist("900701", "Never downloaded sample")
 
 
 def add_archive_samples(downloads, db, Image, ImageDraw):
@@ -125,6 +162,10 @@ UPDATE_UPSTREAM = {
     "900011": _episodes("91101", "91102", "91103", "91104"),             # new: 第4话
     "900013": _episodes("93001", "93002"),                               # slow (3 s) → no_update
     "900500": _episodes("95001", "95002"),                               # new
+    "900020": _episodes("92101", "92102", "92103", "92104"),             # new: 第3话 + 第4话 (CBZ only)
+    "900021": _episodes("92200", "92201"),                               # new, but a job is already queued
+    "900022": _episodes("92301", "92302"),                               # new, organized by author
+    "900040": _episodes("94101", "94102", "94103"),                      # never → new 第3话 (the table refresh)
 }
 SLOW_UPDATE = {"900013": 3.0}
 
@@ -247,11 +288,183 @@ def install_update_stub(update_checker):
     return metrics
 
 
+REFRESH_PHOTOS = [{"photo_id": "94101", "title": "第1话", "page_count": 2},
+                  {"photo_id": "94102", "title": "第2话", "page_count": 2},
+                  {"photo_id": "94103", "title": "第3话", "page_count": 3}]
+
+
+def refresh_detail(update_calls):
+    """What the fixture serves for 900040 'Refresh sample': the 2 downloaded chapters until the offline update stub
+    has been asked about 900040 (立即检查, or the --fast-updates loop), then also 第3话 — as if upstream had
+    published it in between. So 立即检查 finds a chapter the open detail page's table does not have yet."""
+    photos = REFRESH_PHOTOS if "900040" in update_calls else REFRESH_PHOTOS[:2]
+    return {"album_id": "900040", "title": "Refresh sample", "author": "UI fixture",
+            "cover": "/static/images/no-cover.svg", "tags": [], "chapter_count": len(photos),
+            "photos": [dict(photo) for photo in photos]}
+
+
+def add_batch_samples(downloads, db, Image, ImageDraw):
+    """批量下载 samples. Rows are written only through core.database and core.update_store (no check or job runs).
+    下载新章节: 900020 'Batch CBZ new chapters sample' CBZ only, download baseline 92101-92102, 第3话 + 第4话
+    confirmed · 900021 'Batch queued sample' readable, 92201 confirmed, but a job is already queued (skipped:
+    active) · 900022 'Batch organized sample' under downloads/UI author/, 92302 confirmed (skipped: organized).
+    With 900011 (91104) and 900500 (95002) that is 3 comics / 4 话; 900009 is listed for review; 900700 nowhere.
+    下载未下载的收藏 (favourites): 900030 last download canceled (listed) · 900031 last download failed (outside:
+    失败) · 900032 no job records but a download baseline row (skipped: records_cleared) · 900033 a job queued
+    (outside: 排队中). With 900701 and 900008 (never downloaded) that is 3 favourites.
+    900040 'Refresh sample': chapters 94101 + 94102 downloaded, never checked; 立即检查 finds 第3话 (refresh_detail)."""
+    import shutil
+    from datetime import datetime, timedelta
+    from core import update_store
+    from core.packer import CbzPacker
+    now = datetime.now().replace(microsecond=0)
+
+    def chapters(folder, label, photo_ids):
+        """marked chapter folders 第N话__<photo_id>, 2 pages each (like a real download)"""
+        for n, photo_id in enumerate(photo_ids, 1):
+            chapter = folder / f"第{n}话__{photo_id}"
+            chapter.mkdir(parents=True)
+            (chapter / ".jm-chapter.json").write_text(json.dumps({"photo_id": photo_id, "format": 2}),
+                                                     encoding="utf-8")
+            for number in (1, 2):
+                img = Image.new("RGB", (600, 800), "#eeeae1")
+                ImageDraw.Draw(img).text((200, 350), f"{label} ch{n} p{number}", fill="#2B2A27")
+                img.save(chapter / f"{number:05d}.webp")
+
+    def job(job_id, album_id, title, status, folder=None, photo_ids=(), **fields):
+        db.insert_job(job_id, album_id, title, list(photo_ids))
+        if folder is not None:
+            fields["output_path"] = str(folder)
+        db.update_job(job_id, status=status, **fields)
+
+    def downloaded(album_id, photo_ids, at):
+        update_store.note_download_started(album_id, _episodes(*photo_ids), had_local_content=False, now=at,
+                                           next_at=at + timedelta(hours=24))
+
+    def checked(album_id, at):
+        update_store.begin_check(album_id, "auto", at)
+        update_store.record_success(album_id, UPDATE_UPSTREAM[album_id], "auto", at, at, 1, at + timedelta(hours=24))
+
+    # 900020 CBZ only (packed, then the chapter folders deleted): 第3话 + 第4话 confirmed 3 hours ago
+    cbz = downloads / "Batch CBZ new chapters sample"
+    chapters(cbz, "BATCH CBZ", ("92101", "92102"))
+    CbzPacker().pack(cbz, cbz / "Batch CBZ new chapters sample.cbz")
+    for chapter in list(cbz.iterdir()):
+        if chapter.is_dir():
+            shutil.rmtree(chapter)
+    job("job_ui_900020", "900020", "Batch CBZ new chapters sample", "completed", cbz)
+    downloaded("900020", ("92101", "92102"), now - timedelta(days=4))
+    checked("900020", now - timedelta(hours=3))
+    # 900021 new chapter confirmed, and a job for it is already waiting in the queue
+    queued = downloads / "Batch queued sample"
+    chapters(queued, "BATCH QUEUED", ("92200",))
+    job("job_ui_900021", "900021", "Batch queued sample", "completed", queued)
+    downloaded("900021", ("92200",), now - timedelta(days=4))
+    checked("900021", now - timedelta(hours=2))
+    job("job_ui_900021_queued", "900021", "Batch queued sample", "queued", photo_ids=("92201",))
+    # 900022 organized by author: a new-chapter job would write to another folder
+    organized = downloads / "UI author" / "Batch organized sample"
+    chapters(organized, "BATCH ORGANIZED", ("92301",))
+    job("job_ui_900022", "900022", "Batch organized sample", "completed", organized)
+    downloaded("900022", ("92301",), now - timedelta(days=4))
+    checked("900022", now - timedelta(hours=1))
+
+    # favourites outside the 已下载 group
+    for album_id, title, status, wishlist_status, fields in (
+        ("900030", "Batch canceled sample", "canceled", "none", {}),
+        ("900031", "Batch failed sample", "failed", "failed", {"error_message": "Synthetic offline failure"}),
+        ("900033", "Batch queued favourite sample", "queued", "queued", {}),
+    ):
+        db.add_wishlist(album_id, title)
+        job(f"job_ui_{album_id}", album_id, title, status, **fields)
+        db.update_wishlist_download_status(album_id, wishlist_status)
+    db.add_wishlist("900032", "Batch cleared records sample")
+    downloaded("900032", ("93201", "93202"), now - timedelta(days=5))   # its job records were cleared since
+
+    # 900040 Refresh sample: 2 chapters downloaded, never checked since
+    refresh = downloads / "Refresh sample"
+    chapters(refresh, "REFRESH", ("94101", "94102"))
+    job("job_ui_900040", "900040", "Refresh sample", "completed", refresh)
+    downloaded("900040", ("94101", "94102"), now - timedelta(days=2))
+
+
+def add_many_favourites(db, count=60):
+    """--many-favourites: never-downloaded favourites 901000-901059, more than 下载未下载的收藏 takes at once (50)."""
+    for n in range(count):
+        db.add_wishlist(str(901000 + n), f"Many favourites sample {n + 1}")
+
+
+def seed_samples(downloads, db, Image, ImageDraw, many_favourites=False):
+    """Every sample, in the fixture's order. Returns the chapter lists its detail view serves ({album_id: detail};
+    900040 is served by refresh_detail)."""
+    add_reader_samples(downloads, db, Image, ImageDraw)
+    add_archive_samples(downloads, db, Image, ImageDraw)
+    partial_detail = add_partial_sample(downloads, db, Image, ImageDraw)
+    update_detail = add_update_samples(downloads, db, Image, ImageDraw)
+    add_batch_samples(downloads, db, Image, ImageDraw)
+    if many_favourites:
+        add_many_favourites(db)
+    return {"900010": partial_detail, "900011": update_detail}
+
+
+def install_job_stub(manager):
+    """Jobs in this fixture are only recorded, never run: every download entry point (收藏 row 下载, 下载选中的收藏,
+    下载新章节, 下载未下载的收藏, the detail page's /api/jobs, 下载管理 retry) leaves a queued job and nothing more.
+    manager._schedule_next becomes a counter (schedule_next, the 2 s loop and the 定时下载 tick all call it),
+    manager.start does nothing, and both references to download_album_job refuse (counted) in case anything else
+    ever reaches them. Returns the metrics {schedule_calls, download_calls, stub, refuse}."""
+    import threading
+    import core.job_manager as job_module
+    from core import jm_service
+    metrics = {"schedule_calls": 0, "download_calls": 0}
+    lock = threading.Lock()
+
+    def stub():
+        with lock:
+            metrics["schedule_calls"] += 1
+
+    def refuse(*args, **kwargs):
+        with lock:
+            metrics["download_calls"] += 1
+        raise RuntimeError("the UI fixture never downloads")
+
+    manager._schedule_next = stub          # an instance attribute: every self._schedule_next() finds it first
+    manager.start = lambda: None
+    job_module.download_album_job = refuse
+    jm_service.download_album_job = refuse
+    metrics["stub"], metrics["refuse"] = stub, refuse
+    return metrics
+
+
+def batch_metrics(db, manager, metrics, seeded=()):
+    """/test/batch-metrics: whether the job stub is in place, how often scheduling and a download were asked for,
+    every job (new_jobs: those not seeded at start) and any live dl-* download thread."""
+    import threading
+    import core.job_manager as job_module
+    from core import jm_service
+    conn = db.get_db()
+    try:
+        rows = conn.execute("SELECT job_id, album_id, status, selected_photo_ids FROM jobs "
+                            "ORDER BY created_at, id").fetchall()
+    finally:
+        conn.close()
+    jobs = [{"job_id": row["job_id"], "album_id": row["album_id"], "status": row["status"],
+             "selected_photo_ids": json.loads(row["selected_photo_ids"] or "[]")} for row in rows]
+    refused = job_module.download_album_job is metrics["refuse"] and jm_service.download_album_job is metrics["refuse"]
+    return {"schedule": "stub" if manager._schedule_next is metrics["stub"] else "REAL",
+            "download": "refuse" if refused else "REAL",
+            "schedule_calls": metrics["schedule_calls"], "download_calls": metrics["download_calls"],
+            "jobs": jobs, "new_jobs": [job for job in jobs if job["job_id"] not in seeded],
+            "dl_threads": sorted(t.name for t in threading.enumerate() if t.name.startswith("dl-") and t.is_alive())}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=5010)
     parser.add_argument("--fast-updates", action="store_true",
                         help="also start the background 检查新章节 loop with short delays (still the offline stub)")
+    parser.add_argument("--many-favourites", action="store_true",
+                        help="also add 60 never-downloaded favourites (901000-901059): 下载未下载的收藏 takes 50 at once")
     args = parser.parse_args()
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     import core.path_utils as paths
@@ -263,42 +476,15 @@ def main():
     from PIL import Image, ImageDraw
     from waitress import serve
     app = create_app()
-    output = sandbox / "downloads" / "Reader sample"
-    output.mkdir(parents=True)
-    for number in range(1, 46):
-        img = Image.new("RGB", (600, 800), "#eeeae1")
-        draw = ImageDraw.Draw(img)
-        draw.rectangle((30, 30, 570, 770), outline="#686256", width=3)
-        draw.text((240, 350), f"TEST PAGE {number}", fill="#2B2A27")
-        img.save(output / f"{number:03d}.png")
-    db.insert_job("job_ui", "900001", "Reader sample", [])
-    db.update_job("job_ui", status="completed", output_path=str(output))
-    # Same album, two distinct completed folders. Preview must use the newest one;
-    # exporting each job must still use that job's own folder.
-    for job_id, folder_name, colour in (
-        ("job_ui_old", "Old title 900500", "#b7791f"),
-        ("job_ui_new", "New title 900500", "#2f855a"),
-    ):
-        folder = sandbox / "downloads" / folder_name
-        folder.mkdir()
-        page = Image.new("RGB", (320, 420), "#eeeae1")
-        ImageDraw.Draw(page).text((35, 190), job_id, fill=colour)
-        page.save(folder / f"{job_id}.png")
-        db.insert_job(job_id, "900500", folder_name, [])
-        db.update_job(job_id, status="completed", output_path=str(folder))
-    db.insert_job("job_ui_failed", "900600", "Failed download sample", [])
-    db.update_job("job_ui_failed", status="failed", error_message="Synthetic offline failure")
-    db.add_wishlist("900700", "Deleted files sample")
-    db.insert_job("job_ui_missing", "900700", "Deleted files sample", [])
-    db.update_job("job_ui_missing", status="completed", output_path=str(sandbox / "downloads" / "gone"))
-    db.add_wishlist("900701", "Never downloaded sample")
-    add_archive_samples(sandbox / "downloads", db, Image, ImageDraw)
-    partial_detail = add_partial_sample(sandbox / "downloads", db, Image, ImageDraw)
-    update_detail = add_update_samples(sandbox / "downloads", db, Image, ImageDraw)
+    details = seed_samples(sandbox / "downloads", db, Image, ImageDraw, many_favourites=args.many_favourites)
+    seeded_jobs = {job["job_id"] for job in db.get_all_jobs()}
     # 检查新章节: the only network call is replaced by the offline stub; the background loop stays off
     # (create_app never arms it) unless --fast-updates starts it below, after the stub is checked
     from core import update_checker
     update_metrics = install_update_stub(update_checker)
+    # 下载: every download button only records a queued job; nothing ever runs (checked below, before serving)
+    import core.job_manager as job_module
+    job_metrics = install_job_stub(job_module.job_manager)
     calls = {"search": 0}
     def search():
         calls["search"] += 1
@@ -310,7 +496,9 @@ def main():
             "author": "UI fixture", "cover_url": "/static/images/no-cover.svg", "tags": ["sample"],
         } for index in range(start, min(start + page_size, 120))])
     def detail(album_id):
-        served = {"900010": partial_detail, "900011": update_detail}.get(album_id)
+        served = details.get(album_id)
+        if album_id == "900040":
+            served = refresh_detail(update_metrics["calls"])
         if served:
             # like the real /api/album: the detail page leaves a fresh chapter list in album_detail_cache
             db.set_cached_album_detail(album_id, json.dumps(served, ensure_ascii=False))
@@ -335,9 +523,15 @@ def main():
         return jsonify(fetch="stub" if stubbed else "REAL", calls=list(update_metrics["calls"]),
                        max_in_flight=update_metrics["max_in_flight"], jobs=jobs)
     app.add_url_rule("/test/update-metrics", "update_metrics", update_metrics_view)
+    app.add_url_rule("/test/batch-metrics", "batch_metrics",
+                     lambda: jsonify(batch_metrics(db, job_module.job_manager, job_metrics, seeded_jobs)))
     # the fixture's network is NOT blocked: never serve with the real fetch or an armed background loop
     assert update_checker.fetch_upstream_episodes is update_metrics["fake"], "检查新章节 must use the offline stub"
     assert not update_checker.runtime_status()["armed"], "the background check loop must not run in the fixture"
+    # ... nor with a job manager that could start a download
+    assert job_module.job_manager._schedule_next is job_metrics["stub"], "jobs must only be recorded in the fixture"
+    assert job_module.download_album_job is job_metrics["refuse"], "the fixture must never download"
+    assert job_module.job_manager._scheduler_thread is None, "the download scheduler loop must not run in the fixture"
     if args.fast_updates:
         update_checker.STARTUP_DELAY, update_checker.STARTUP_JITTER = 5, 0
         update_checker.GAP, update_checker.GAP_JITTER = 10, 0

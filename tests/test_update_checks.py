@@ -216,7 +216,8 @@ def download(client, downloads, monkeypatch):
         [_Photo(*c) for c in served["chapters"]],
         episode_list=[(pid, str(n), name) for n, (pid, name, _) in enumerate(served["chapters"], 1)])), None))
 
-    def run(job_id, photo_ids, outcome="completed", written=None, pack=False, pack_format="cbz"):
+    def run(job_id, photo_ids, outcome="completed", written=None, pack=False, pack_format="cbz", insert=True):
+        """insert=False runs a job that already exists (e.g. one a batch download queued)."""
         from core.settings import update_settings
         update_settings({"auto_pack": "true" if pack else "false", "delete_originals": "true" if pack else "false",
                          "pack_format": pack_format, "organize_mode": "none"})
@@ -232,7 +233,10 @@ def download(client, downloads, monkeypatch):
             elif outcome == "canceled":
                 db.update_job(job_id, status="canceled")
         monkeypatch.setattr(jm_service, "_download_chapter", chapter)
-        db.insert_job(job_id, "3001", "Name", photo_ids)
+        if insert:
+            db.insert_job(job_id, "3001", "Name", photo_ids)
+        else:
+            assert db.get_job(job_id)["status"] == "queued"
         db.update_job(job_id, status="running")
         progress_manager.create_tracker(job_id)
         try:
@@ -1711,3 +1715,66 @@ def test_manual_success_schedules_the_next_check_a_day_later(client, local_album
     upstream.set("3001", ["71", "72", "73"])
     client.post("/api/updates/3001/check")
     assert datetime.fromisoformat(_row()["next_check_at"]) == checker.now() + timedelta(hours=23)
+
+
+# ─── PR-B: jobs queued by a batch download, run with the real download_album_job ───
+
+
+@pytest.fixture
+def batch(client, monkeypatch):
+    """core.batch_downloads with scheduling recorded (the jobs are run here by hand, never by the manager)."""
+    from core import batch_downloads
+    from core.job_manager import JobManager
+    scheduled = []
+    monkeypatch.setattr(JobManager, "_schedule_next", lambda self: scheduled.append(1))
+    yield batch_downloads
+    assert scheduled == []                      # the store-level confirm never schedules by itself
+
+
+def _batch_photos(batch, kind="new_chapters"):
+    return [(item["album_id"], item["photo_ids"]) for item in batch.preview(kind)["items"]]
+
+
+def _batch_confirm(batch, kind):
+    created = batch.confirm(kind, batch.preview(kind)["token"])["created"]
+    assert len(created) == 1
+    return created[0]
+
+
+def test_batch_new_chapters_job_absorbs_on_completion(client, download, upstream, checker, batch):
+    from core import database as db, update_store
+    _pending_74(download, upstream, checker)
+    db.add_wishlist("3001", "Name")
+    assert _batch_photos(batch) == [("3001", ["74"])]
+    job = _batch_confirm(batch, "new_chapters")
+    assert job["photo_ids"] == ["74"] and db.get_wishlist("3001")["download_status"] == "queued"
+    assert download(job["job_id"], job["photo_ids"], insert=False) == "completed"
+    row = _row()
+    assert row["new_count"] == 0 and "74" in row["baseline_ids"]
+    assert update_store.pending_new_chapters() == [] and _batch_photos(batch) == []
+    assert db.get_wishlist("3001")["download_status"] == "completed"
+    assert _check() == "no_update"
+
+
+@pytest.mark.parametrize("outcome", ["failed", "canceled"])
+def test_batch_job_failed_or_canceled_keeps_pending(client, download, upstream, checker, batch, outcome):
+    confirmed = _pending_74(download, upstream, checker)
+    job = _batch_confirm(batch, "new_chapters")
+    assert download(job["job_id"], job["photo_ids"], outcome=outcome, written=1, insert=False) == outcome
+    assert _new_ids() == ["74"] and _row()["new_chapters"][0]["confirmed_at"] == confirmed
+    assert _batch_photos(batch) == [("3001", ["74"])]           # offered again: nothing was absorbed
+
+
+def test_a2_job_completes_then_leaves_a2(client, download, upstream, checker, batch):
+    from core import database as db
+    db.add_wishlist("3001", "Name")
+    assert _batch_photos(batch, "undownloaded_favourites") == [("3001", [])]
+    job = _batch_confirm(batch, "undownloaded_favourites")
+    assert download(job["job_id"], [], insert=False) == "completed"
+    assert _row()["baseline_ids"] == ["71", "72", "73"]          # the first download sets the baseline
+    assert _batch_photos(batch, "undownloaded_favourites") == []
+    assert _batch_photos(batch) == []                            # not a new-chapters target before a check says so
+    upstream.set("3001", ["71", "72", "73", "74"])
+    assert _check() == "new"
+    assert _batch_photos(batch) == [("3001", ["74"])]
+    assert _batch_photos(batch, "undownloaded_favourites") == []

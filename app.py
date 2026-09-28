@@ -204,6 +204,7 @@ from routes.api_export import api_export_bp
 from routes.api_wishlist import api_wishlist_bp
 from routes.api_library import api_library_bp
 from routes.api_updates import api_updates_bp
+from routes.api_batch_downloads import api_batch_downloads_bp
 from routes.api_system import api_system_bp
 
 
@@ -289,6 +290,7 @@ def create_app() -> Flask:
     app.register_blueprint(api_wishlist_bp)
     app.register_blueprint(api_library_bp)
     app.register_blueprint(api_updates_bp)
+    app.register_blueprint(api_batch_downloads_bp)  # 批量下载：先列清单，确认后才加入下载队列
     # 系统自检
     app.register_blueprint(api_system_bp)
 

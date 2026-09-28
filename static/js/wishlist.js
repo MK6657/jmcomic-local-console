@@ -233,7 +233,13 @@
 
     // 下载 / 详情 / 移除 / 阅读 每行都有，位置固定；“阅读”已下载时打开本地文件，否则在线阅读（utils.js readLink）
     var actions = el('div', 'wishlist-actions');
-    actions.appendChild(actionButton('btn-outline-success', 'bi-download', '下载', 'download'));
+    var download = actionButton('btn-outline-success', 'bi-download', '下载', 'download');
+    if (item.readable === true) {
+      // 已有已下载内容（可能只是部分章节）：整部下载前先确认（downloadSingle）
+      download.title = '下载（已有已下载内容：整部下载前会先确认）';
+      download.setAttribute('aria-label', download.title);
+    }
+    actions.appendChild(download);
     var info = el('a', 'btn btn-sm btn-outline-info');
     info.href = detailUrl;
     info.target = '_blank';
@@ -328,7 +334,31 @@
   }
 
   // ── 单个操作 ──
+  function findItem(albumId) {
+    for (var i = 0; i < allItems.length; i++) {
+      if (String(allItems[i].album_id) === String(albumId)) return allItems[i];
+    }
+    return null;
+  }
+
+  // 定时下载开着、现在不在时间段内时，任务什么时候开始：“今天 23:00” / “明天 08:00”；否则 ''
+  function scheduledStart(w) {
+    if (!w || !w.enabled || w.open || w.never || w.invalid) return '';
+    var h = Number(w.start);
+    return (w.opens_tomorrow ? '明天' : '今天') + ' ' + (h < 10 ? '0' : '') + h + ':00';
+  }
+
+  // 一行的「下载」：整部下载（服务端不会给已在下载队列中的漫画重复建任务）。
+  // 已有已下载内容的先确认：整部下载会按上游现在的全部章节下载，只要新章节应该用资源库的「下载新章节」
   async function downloadSingle(albumId) {
+    var item = findItem(albumId);
+    if (item && item.readable === true) {
+      var name = item.title || albumId;
+      if (!window.confirm('「' + name + '」已有已下载的内容（可能只是部分章节）。\n'
+        + '整部下载会按上游现在的全部章节下载：开启了「跳过已存在的文件」、漫画还在原来的下载文件夹里时，已有的散图会跳过；'
+        + '关闭了这个设置、按作者或扁平化整理过、或只剩压缩包的漫画，会重新下载全部图片。\n'
+        + '只要新章节请用资源库的「下载新章节」。确定整部下载吗？')) return;
+    }
     try {
       var data = await window.apiFetch('/api/wishlist/download', {
         method: 'POST',
@@ -337,7 +367,17 @@
         timeoutMs: 60000,
       });
       if (data.status === 'ok') {
-        toast('已创建下载任务', 'success');
+        var w = data.window || {};
+        var start = scheduledStart(w);
+        if (!(data.job_ids || []).length && (data.skipped || []).length) {
+          toast('这部漫画已在下载队列中，没有重复创建任务', 'info');
+        } else if (w.enabled && (w.never || w.invalid)) {
+          toast('已加入下载队列；定时下载的时间段设置不对，任务不会自动开始', 'warning');
+        } else if (start) {
+          toast('已加入下载队列，' + start + ' 起开始（定时下载）', 'info');
+        } else {
+          toast('已加入下载队列', 'success');
+        }
         loadWishlist(currentPage);
       } else {
         toast(data.message || '下载失败', 'danger');
@@ -397,26 +437,27 @@
     selectAll.indeterminate = ids.length > 0 && ids.length < boxes;
   }
 
-  async function batchDownload() {
+  // 批量下载的确认窗口（js/batch-download.js）：先列出清单，确认后才加入下载队列；
+  // 加入之后按原来的页码、筛选刷新列表（只重建表格，位置和勾选不变）
+  function openBatchDialog(kind, albumIds, opener) {
+    if (!window.batchDownloadDialog) return;
+    window.batchDownloadDialog.open(kind, {
+      albumIds: albumIds,
+      opener: opener,
+      onDone: function () { loadWishlist(currentPage); }
+    });
+  }
+
+  // 下载选中的收藏：选中的里只下载“未下载”的（整部），其余的在窗口里列出原因
+  function batchDownload() {
     var ids = getSelectedIds();
     if (ids.length === 0) return;
-    try {
-      var data = await window.apiFetch('/api/wishlist/download', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ids: ids}),
-        timeoutMs: 120000,
-      });
-      if (data.status === 'ok') {
-        toast('已创建 ' + data.job_ids.length + ' 个下载任务', 'success');
-        loadWishlist(currentPage);
-      } else {
-        toast(data.message || '批量下载失败', 'danger');
-      }
-    } catch (e) {
-      if (e && e.name === 'AbortError') return; // pagehide 中止，静默
-      toast((e && e.status) ? (e.message || '批量下载失败') : ('网络错误: ' + e.message), 'danger');
-    }
+    openBatchDialog('selected_favourites', ids, document.getElementById('batch-download-btn'));
+  }
+
+  // 下载未下载的收藏：收藏页“未下载”里的（从未下载过的、下载被取消的），每部整部
+  function downloadUndownloaded() {
+    openBatchDialog('undownloaded_favourites', null, document.getElementById('wishlist-download-undownloaded-btn'));
   }
 
   async function batchRemove() {
@@ -557,9 +598,10 @@
   }
 
   // ── 自动刷新定时器（每 10 秒检查一次下载状态变化） ──
-  // 页面隐藏或正用键盘操作表格按钮时跳过，免得重建表格把焦点弄丢
+  // 页面隐藏或正用键盘操作表格按钮时跳过，免得重建表格把焦点弄丢；批量下载的确认窗口开着时也跳过
   function canRefreshNow() {
-    return !document.hidden && !tbody.contains(document.activeElement);
+    return !document.hidden && !tbody.contains(document.activeElement)
+      && !(window.batchDownloadDialog && window.batchDownloadDialog.isOpen());
   }
 
   function startAutoRefresh() {
@@ -613,6 +655,7 @@
   });
   document.getElementById('wishlist-batch-import-btn').addEventListener('click', showImportModal);
   document.getElementById('wishlist-refresh-btn').addEventListener('click', refreshList);
+  document.getElementById('wishlist-download-undownloaded-btn').addEventListener('click', downloadUndownloaded);
   document.getElementById('batch-download-btn').addEventListener('click', batchDownload);
   document.getElementById('batch-remove-btn').addEventListener('click', batchRemove);
   document.getElementById('import-submit-btn').addEventListener('click', doImport);

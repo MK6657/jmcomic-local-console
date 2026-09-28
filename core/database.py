@@ -4,6 +4,8 @@ SQLite 数据库操作模块
 import json
 import os
 import sqlite3
+import uuid
+from contextlib import contextmanager
 from datetime import datetime
 
 from .path_utils import get_app_root
@@ -24,6 +26,23 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+@contextmanager
+def transaction():
+    """一个 BEGIN IMMEDIATE 事务（写锁一开始就拿到，读到的就是提交时的状态）；出任何异常都回滚。"""
+    conn = get_db()
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -184,6 +203,11 @@ def _run_migrations(conn):
 
 # ─── Jobs 操作 ───
 
+def new_job_id() -> str:
+    """新任务的 job_id（job_manager.create_job 与批量下载共用）"""
+    return f"job_{uuid.uuid4().hex[:12]}"
+
+
 def insert_job(job_id: str, album_id: str, title: str, photo_ids: list):
     """插入一条新任务记录"""
     now = datetime.now().isoformat()
@@ -197,6 +221,68 @@ def insert_job(job_id: str, album_id: str, title: str, photo_ids: list):
         conn.commit()
     finally:
         conn.close()
+
+
+_GUARD_COMPLETED = {
+    "any": "",
+    "required": " AND EXISTS (SELECT 1 FROM jobs c WHERE c.album_id = ? AND c.status = 'completed')",
+    "forbidden": " AND NOT EXISTS (SELECT 1 FROM jobs c WHERE c.album_id = ? AND c.status = 'completed')",
+}
+
+
+def insert_job_guarded(conn, job_id: str, album_id: str, title: str, photo_ids: list, completed: str = "any") -> bool:
+    """在调用方的事务（conn）里插入一条 queued 任务，条件在同一条语句里判断：
+    这部漫画没有排队 / 下载中 / 已暂停的任务；completed='required' 时还必须完成过下载（下载新章节），
+    'forbidden' 时必须从没完成过（整部下载“未下载”的收藏），'any' 不看。返回是否插入（不满足条件时什么都不写）。"""
+    if completed not in _GUARD_COMPLETED:
+        raise ValueError(f"completed 取值无效: {completed}")
+    now = datetime.now().isoformat()
+    params = [job_id, album_id, title, _json(list(photo_ids)), now, now, album_id]
+    if _GUARD_COMPLETED[completed]:
+        params.append(album_id)
+    cur = conn.execute(
+        "INSERT INTO jobs (job_id, album_id, title, selected_photo_ids, status, created_at, updated_at) "
+        "SELECT ?, ?, ?, ?, 'queued', ?, ? "
+        "WHERE NOT EXISTS (SELECT 1 FROM jobs a WHERE a.album_id = ? AND a.status IN ('queued', 'running', 'paused'))"
+        + _GUARD_COMPLETED[completed],
+        params,
+    )
+    return cur.rowcount == 1
+
+
+def active_album_ids(conn, album_ids) -> set[str]:
+    """其中有排队 / 下载中 / 已暂停任务的 album_id"""
+    rows = conn.execute(
+        "SELECT DISTINCT album_id FROM jobs WHERE status IN ('queued', 'running', 'paused') "
+        "AND album_id IN (SELECT value FROM json_each(?))",
+        (json.dumps([str(a) for a in album_ids]),),
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def newest_completed_outputs(conn, album_ids) -> dict[str, str]:
+    """各 album_id 最近一次完成的任务的输出目录（与 core.local_availability 判断本地可读看的是同一个任务）"""
+    rows = conn.execute(
+        "SELECT album_id, output_path FROM jobs WHERE status='completed' "
+        "AND album_id IN (SELECT value FROM json_each(?)) ORDER BY created_at DESC, id DESC",
+        (json.dumps([str(a) for a in album_ids]),),
+    ).fetchall()
+    outputs: dict[str, str] = {}
+    for row in rows:
+        outputs.setdefault(row["album_id"], row["output_path"] or "")
+    return outputs
+
+
+def queue_ahead(conn=None) -> int:
+    """排队 / 下载中 / 已暂停的任务数"""
+    own = conn is None
+    conn = conn or get_db()
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status IN ('queued', 'running', 'paused')").fetchone()[0]
+    finally:
+        if own:
+            conn.close()
 
 
 _ALLOWED_JOB_COLUMNS = frozenset({
@@ -692,6 +778,39 @@ def get_all_wishlist(
     }
 
 
+# 批量下载「下载未下载的收藏」（core/batch_downloads.py）：收藏页“未下载”（filter_group none）里的，
+# 另外明写：没有进行中的任务、从没完成过、最近一次任务是取消（或一条任务都没有）。readable_ids 传 '[]' 是精确的：
+# none 分组本来就要求没下载过（had_download），能读的一定完成过。had_check_row：检查新章节表里有这一行
+# （只有下载开始或检查过才会有）——没有任务记录却有这一行，说明下载记录被清理过。
+_UNDOWNLOADED_SELECT = """
+    SELECT album_id, title, filter_group, latest_job,
+           EXISTS (SELECT 1 FROM album_update_checks u WHERE u.album_id = items.album_id) AS had_check_row
+    FROM items"""
+
+
+def undownloaded_favourites(conn) -> list[dict]:
+    """“未下载”的收藏（从未下载过的、下载被取消的），收藏页默认顺序（最新添加的在前）。"""
+    rows = conn.execute(
+        f"""{_WISHLIST_ITEMS_CTE} {_UNDOWNLOADED_SELECT}
+            WHERE filter_group = 'none' AND active_job IS NULL AND NOT has_completed
+              AND (latest_job IS NULL OR latest_job = 'canceled')
+            ORDER BY {WISHLIST_SORTS['added_at']}""",
+        ("[]",),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def favourite_rows(conn, album_ids, readable_ids) -> dict[str, dict]:
+    """这些 album_id 里在收藏中的：{album_id: {album_id, title, filter_group, latest_job, had_check_row}}，
+    filter_group 与收藏页的筛选同一规则（readable_ids 是本地可读的集合）。"""
+    rows = conn.execute(
+        f"""{_WISHLIST_ITEMS_CTE} {_UNDOWNLOADED_SELECT}
+            WHERE album_id IN (SELECT value FROM json_each(?))""",
+        (json.dumps(sorted({str(a) for a in readable_ids})), json.dumps([str(a) for a in album_ids])),
+    ).fetchall()
+    return {row["album_id"]: dict(row) for row in rows}
+
+
 def get_completed_album_ids(wishlist_only: bool = False) -> list[str]:
     """有已完成下载任务的 album_id —— 本地可读判定的候选（是否真能读由 core.local_availability 决定）。"""
     sql = "SELECT DISTINCT album_id FROM jobs WHERE status='completed'"
@@ -730,17 +849,20 @@ def batch_check_wishlist(album_ids: list[str]) -> dict[str, str]:
         conn.close()
 
 
-def update_wishlist_download_status(album_id: str, status: str):
-    """更新收藏的下载状态"""
-    conn = get_db()
+def update_wishlist_download_status(album_id: str, status: str, conn=None):
+    """更新收藏的下载状态（不在收藏里时什么都不做）。conn 传入时在调用方的事务里写（不提交、不关闭）。"""
+    own = conn is None
+    conn = conn or get_db()
     try:
         conn.execute(
             "UPDATE wishlist SET download_status=? WHERE album_id=?",
             (status, album_id),
         )
-        conn.commit()
+        if own:
+            conn.commit()
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
 def update_wishlist_title(album_id: str, title: str = "", author: str = "", cover_url: str = ""):
