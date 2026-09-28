@@ -26,9 +26,10 @@ from .settings import get_settings, build_jmcomic_option
 from .validation import safe_dirname as _safe_dirname
 from .path_guard import DOWNLOAD_ROOT, is_safe_path
 from .packer import CbzPacker
+from .file_tree import is_link
 from . import archive_pages
 from . import update_store
-from .local_availability import forget as forget_local_state, has_local_pages, is_readable
+from .local_availability import forget as forget_local_state, has_local_pages, is_readable, readable_folder
 
 
 # ── 全局复用客户端（搜索/详情用，避免每次新建 client + 连接池）──
@@ -601,6 +602,25 @@ def get_album_detail_cached(album_id: str, ttl: int = 3600) -> dict:
         return deepcopy(data)
 
 
+def _same_dir(a, b) -> bool:
+    return os.path.normcase(os.path.realpath(str(a))) == os.path.normcase(os.path.realpath(str(b)))
+
+
+def _reusable_album_dir(album_id: str) -> Path | None:
+    """这部漫画阅读器现在打开的目录（最近一次完成、本地可读的下载，core.local_availability 同一规则）：
+    在下载目录里面（不是下载目录本身）、不是链接的目录时返回；否则 None（照常按上游现在的名字建目录）"""
+    folder = readable_folder(album_id)
+    if not folder:
+        return None
+    path = Path(folder)
+    try:
+        if _same_dir(path, DOWNLOAD_ROOT) or not is_safe_path(path) or is_link(path) or not path.is_dir():
+            return None
+    except OSError:
+        return None
+    return path
+
+
 def organize_download(output_path: str, mode: str, album) -> str | None:
     """整理下载目录结构。
 
@@ -887,6 +907,15 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
         os.makedirs(dl_root, exist_ok=True)
 
         album_dir = Path(dl_root) / f"{_safe_dirname(album.name)}_{album_id}"
+        if photo_ids:
+            # 列出了章节的任务（新章节、详情页选中的或“下载全部”发来的全部章节 id）：写进阅读器现在打开的目录，
+            # 不按上游现在的名字另建。上游改了标题、按作者整理过、旧版本的目录名时，另建的目录里只有这次的章节，
+            # 而阅读器只打开最新的目录，更早的章节就看不到了。photo_ids 为 [] 的整部下载照旧按上游现在的名字建目录
+            existing = _reusable_album_dir(album_id)
+            if existing is not None:
+                if not _same_dir(existing, album_dir):
+                    log.info(f"部分章节写进已有的下载目录 job_id={job_id} album_id={album_id} dir={existing}")
+                album_dir = existing
         if not is_safe_path(album_dir):
             raise ValueError("专辑输出路径越权")
         # 目录不在（被删除了）或只剩没有图片的空壳（例如“打开文件夹”替排队中的重试建出的）：更早完成、写到这里的
@@ -989,7 +1018,12 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
 
         # -- 以下为 CBZ 打包、元数据写入、完成标记等（不变）--
         organize_mode = get_settings().get("organize_mode", "none")
-        if not failed_pages and organize_mode and organize_mode != "none":
+        if (not failed_pages and organize_mode == "by_author"
+                and not _same_dir(Path(output_path).parent, dl_root)):
+            # 写进的是已经按作者整理过的目录（不在下载目录第一层）：不再移动，否则会套进 <作者>/<作者>/ 里。
+            # 扁平化只在目录里面挪文件，照常做
+            log.info(f"下载目录已按作者整理过，不再移动 job_id={job_id} path={output_path}")
+        elif not failed_pages and organize_mode and organize_mode != "none":
             new_path = organize_download(output_path, organize_mode, album)
             if new_path:
                 output_path = new_path

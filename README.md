@@ -83,6 +83,16 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   check. Confirmed new chapters show as "有新章节 · N 话" in the library, favourites and 下载管理; the detail page shows
   the status, marks the new chapters, has **立即检查** (works even with the setting off) and **选中这些章节**, which only
   ticks those chapters — downloading still needs **下载选中章节**.
+- **Batch downloads**, always user-started and confirmed first: **下载新章节** (library) queues only the confirmed new
+  chapters of comics that already have downloaded content, favourites or not — never the whole comic; **下载未下载的收藏**
+  (favourites) queues whole comics for favourites never downloaded or whose download was cancelled. Failed downloads
+  stay in 下载管理 → 失败 for retry, and comics with downloaded content (including partial ones) are never included.
+  Both open a list of the exact comics, chapters and scope, with the reason for every comic left out; nothing is queued
+  until you confirm. The server re-checks the list when you confirm, never adds a second job for a comic that is
+  already queued, and, when 定时下载 is on, queued jobs still start only inside its window. The favourites
+  selection bar's **下载选中的收藏** applies the same rule to the selected rows. On the detail page, when **立即检查**
+  confirms new chapters that the chapter table does not show yet, the table is refreshed in place, keeping ticks and
+  the scroll position.
 - Every comic in search results, the library, favourites and 下载管理 (completed and failed tasks) has a **阅读**
   button: a downloaded comic opens its local files (filled button, book icon), anything else opens online reading
   (outlined button, globe icon). The choice is made when you click, so it is right even if the files changed after

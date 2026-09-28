@@ -5,10 +5,11 @@ import threading
 
 from flask import Blueprint, jsonify, request, Response
 
-from core import database as db
+from core import batch_downloads, database as db
 from core.jm_service import get_album_detail, get_album_detail_cached
 from core.job_manager import job_manager
 from core.logger import bind_request_id, log
+from core.scheduler import window_state
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 from routes.api_library import mark_local_details, readable_among  # 本地可读：与资源库共用同一分批判断
 
@@ -197,7 +198,9 @@ def batch_check_wishlist():
 
 @api_wishlist_bp.post("/api/wishlist/download")
 def batch_download_wishlist():
-    """批量下载收藏"""
+    """收藏单行的「下载」：整部下载（core.batch_downloads.enqueue_single，一个事务）。
+    已有排队 / 下载中 / 已暂停任务的漫画不重复建任务，列在 skipped 里。有新任务时 201，否则 200；
+    window 是定时下载时间段现在的状态（任务照常只在时间段内开始）。"""
     body = request.get_json(force=True)
     ids = body.get("ids", [])
 
@@ -216,25 +219,22 @@ def batch_download_wishlist():
                 "message": f"album_id '{aid}' 不是合法的纯数字格式",
             }), 400
 
-    job_ids = []
-    for album_id in ids:
-        album_id = str(album_id).strip()
-        # 获取标题
-        item = db.get_wishlist(album_id)
-        title = item.get("title", album_id) if item else album_id
+    try:
+        result = batch_downloads.enqueue_single(str(aid).strip() for aid in ids)
+    except batch_downloads.Busy:
+        return jsonify({"status": "error", "reason": "busy", "message": "上一次确认还在处理，请稍后再试"}), 409
+    except Exception as e:
+        log.error(f"收藏下载 加入下载队列失败 count={len(ids)} error={e}")
+        return jsonify({"status": "error", "message": "没能加入下载队列，没有创建任何任务"}), 500
 
-        # 创建下载任务（下载全部章节）
-        job_id = job_manager.create_job(album_id, title, [])
-        job_ids.append({"album_id": album_id, "job_id": job_id})
+    if result["job_ids"]:
+        # 立即触发调度，不需要等 2 秒循环（照常受定时下载时间段限制）
+        try:
+            job_manager.schedule_next()
+        except Exception as e:
+            log.error(f"收藏下载后调度失败（任务仍在队列中）error={e}")
 
-        # 同步更新 wishlist 状态
-        db.update_wishlist_download_status(album_id, "queued")
-        log.info(f"收藏批量下载 创建任务 album_id={album_id} job_id={job_id}")
-
-    # 立即触发调度，不需要等 2 秒循环
-    job_manager.schedule_next()
-
-    return jsonify({"status": "ok", "job_ids": job_ids}), 201
+    return jsonify({"status": "ok", **result, "window": window_state()}), 201 if result["job_ids"] else 200
 
 
 @api_wishlist_bp.post("/api/wishlist/import")

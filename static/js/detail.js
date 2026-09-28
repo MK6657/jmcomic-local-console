@@ -148,26 +148,16 @@
         // 章节列表（整行）
         html += '<div class="card">';
         html += '<div class="card-header d-flex justify-content-between align-items-center">';
-        html += '<span><i class="bi bi-list-ol"></i> 章节列表 <span class="badge bg-secondary">' + (album.photos ? album.photos.length : 0) + '</span></span>';
+        // 章节数与刷新说明：“立即检查”发现章节表里还没有的新章节时，refreshChapterTable 只重建表格行并更新这两处
+        html += '<span><i class="bi bi-list-ol"></i> 章节列表 <span class="badge bg-secondary" id="chapter-count">' + (album.photos ? album.photos.length : 0) + '</span><span id="chapter-refresh-status" class="chapter-refresh-status" role="status" aria-live="polite"></span></span>';
         html += '<div class="form-check"><input type="checkbox" id="select-all-chapters" class="form-check-input"><label class="form-check-label" for="select-all-chapters">全选</label></div>';
         html += '</div>';
 
         html += '<div class="card-body p-0">';
         if (album.photos && album.photos.length > 0) {
-            html += '<table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" title="全选"></th><th style="width:60px">序号</th><th>章节名</th><th style="width:80px">页数</th><th class="chapter-online"><span class="visually-hidden">在线观看</span></th></tr></thead><tbody>';
-
-            album.photos.forEach(function (photo, idx) {
-                html += '<tr>';
-                html += '<td class="chapter-checkbox"><input type="checkbox" name="chapters" value="' + window.escapeHtmlAttr(photo.photo_id) + '" class="form-check-input chapter-checkbox-item"></td>';
-                html += '<td>' + (idx + 1) + '</td>';
-                html += '<td>' + window.escapeHtml(photo.title || '-') + '</td>';
-                html += '<td>' + window.escapeHtml(String(photo.page_count || '?')) + '</td>';
-                // 从本章第一页开始在线阅读（同一阅读页，可继续往后读其他章节）
-                html += '<td class="chapter-online"><a class="btn btn-sm btn-outline-primary" href="' + onlineUrl + '?chapter=' + encodeURIComponent(photo.photo_id) + '" title="在线观看本章" aria-label="在线观看第 ' + (idx + 1) + ' 章"><i class="bi bi-globe2" aria-hidden="true"></i></a></td>';
-                html += '</tr>';
-            });
-
-            html += '</tbody></table>';
+            html += '<table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" title="全选"></th><th style="width:60px">序号</th><th>章节名</th><th style="width:80px">页数</th><th class="chapter-online"><span class="visually-hidden">在线观看</span></th></tr></thead>';
+            // 章节行由 fillChapterRows 用 DOM 建（章节更新块里的 chapterRow），刷新章节表时只重建这些行
+            html += '<tbody id="chapter-rows"></tbody></table>';
         } else {
             html += '<div class="text-center text-muted py-4"><i class="bi bi-journal-text" style="font-size:2rem;"></i><p class="mt-2 mb-0">暂无章节信息</p></div>';
         }
@@ -186,6 +176,7 @@
         html += '</div>'; // 章节卡片结束
 
         container.innerHTML = html;
+        fillChapterRows(album.photos || [], {});
 
         var cover = container.querySelector('img.detail-cover');
         if (cover) cover.addEventListener('error', function () { cover.outerHTML = COVER_PLACEHOLDER; }, { once: true });
@@ -290,10 +281,10 @@
     function bindEvents(album) {
         var selectAllMain = document.getElementById('select-all-chapters');
         var selectAllInline = document.getElementById('select-all-inline');
-        var chapterCheckboxes = document.querySelectorAll('.chapter-checkbox-item');
 
+        // 章节行可能被刷新（refreshChapterTable）：每次都重新取复选框
         function toggleAll(checked) {
-            chapterCheckboxes.forEach(function (cb) { cb.checked = checked; });
+            document.querySelectorAll('.chapter-checkbox-item').forEach(function (cb) { cb.checked = checked; });
             if (selectAllMain) selectAllMain.checked = checked;
             if (selectAllInline) selectAllInline.checked = checked;
         }
@@ -304,15 +295,9 @@
         if (selectAllInline) {
             selectAllInline.addEventListener('change', function () { toggleAll(this.checked); });
         }
-        chapterCheckboxes.forEach(function (cb) {
-            cb.addEventListener('change', function () {
-                var all = chapterCheckboxes.length;
-                var checked = document.querySelectorAll('.chapter-checkbox-item:checked').length;
-                var state = all > 0 && checked === all;
-                if (selectAllMain) selectAllMain.checked = state;
-                if (selectAllInline) selectAllInline.checked = state;
-            });
-        });
+        // 一个委托监听器：刷新后新建的行同样生效
+        var chapterRows = document.getElementById('chapter-rows');
+        if (chapterRows) chapterRows.addEventListener('change', syncSelectAll);
 
         // 下载选中章节
         document.getElementById('download-selected-btn').addEventListener('click', function () {
@@ -355,6 +340,8 @@
     //   “立即检查”只 POST /api/updates/<id>/check：只取一次章节列表核对，从不下载；
     //   “选中这些章节”只勾选章节表里的复选框，下载仍要点“下载选中章节”；
     //   章节表里已确认的新章节行标“新”（渲染后按复选框的 photo_id 加上，不自动勾选）。
+    //   章节表是打开页面时取的：“立即检查”确认的新章节不在表里时，重新取一次详情（GET /api/album/<id>，
+    //   不建任务），只重建表格行——已勾选的保持勾选，新行不勾选，滚动位置和焦点不变；只在用户点了之后做，打开页面、轮询都不做。
     // 上游的章节标题只经 textContent / title 进入 DOM。后台检查不弹 Toast。
     var updateData = null;        // 最近一次读到 / 检查后的回答
     var updateChecking = false;   // “立即检查”正在进行
@@ -362,6 +349,8 @@
     var updatePolls = 0;
     var UPDATE_POLL_MS = 3000;    // 后台正在检查这一部时每 3 秒再读一次……
     var UPDATE_POLL_MAX = 40;     // ……最多 40 次
+    var chapterRefreshing = false;   // 正在重新取章节列表
+    var chapterRefreshKey = '';      // 上一次为哪些缺少的新章节刷新过（同一组只自动刷新一次）
 
     function updateToast(message, type) {
         if (typeof showToast === 'function') showToast(message, type);
@@ -378,6 +367,138 @@
         var i = updateNode('i', 'bi ' + name);
         i.setAttribute('aria-hidden', 'true');
         return i;
+    }
+
+    // 章节表的一行：复选框（值是 photo_id）｜序号｜章节名｜页数｜从本章第一页开始在线阅读
+    function chapterRow(photo, idx, checked) {
+        var pid = photo && photo.photo_id != null ? String(photo.photo_id) : '';
+        var tr = document.createElement('tr');
+        var pick = updateNode('td', 'chapter-checkbox');
+        var cb = updateNode('input', 'form-check-input chapter-checkbox-item');
+        cb.type = 'checkbox';
+        cb.setAttribute('name', 'chapters');
+        cb.value = pid;
+        cb.checked = !!checked;
+        pick.appendChild(cb);
+        tr.appendChild(pick);
+        tr.appendChild(updateNode('td', null, String(idx + 1)));
+        tr.appendChild(updateNode('td', null, (photo && photo.title) || '-'));
+        tr.appendChild(updateNode('td', null, String((photo && photo.page_count) || '?')));
+        var online = updateNode('td', 'chapter-online');
+        var link = updateNode('a', 'btn btn-sm btn-outline-primary');
+        link.href = '/online/' + encodeURIComponent(String(albumId)) + '?chapter=' + encodeURIComponent(pid);
+        link.title = '在线观看本章';
+        link.setAttribute('aria-label', '在线观看第 ' + (idx + 1) + ' 章');
+        link.appendChild(updateIcon('bi-globe2'));
+        online.appendChild(link);
+        tr.appendChild(online);
+        return tr;
+    }
+
+    // 重建章节表的行；keep：{photo_id: true} 这些保持勾选。没有章节表（暂无章节信息）时返回 false
+    function fillChapterRows(photos, keep) {
+        var rows = document.getElementById('chapter-rows');
+        if (!rows) return false;
+        var frag = document.createDocumentFragment();
+        (photos || []).forEach(function (photo, idx) {
+            frag.appendChild(chapterRow(photo, idx, photo && keep[String(photo.photo_id)]));
+        });
+        rows.textContent = '';
+        rows.appendChild(frag);
+        return true;
+    }
+
+    // 两个“全选”跟着章节表：全部勾选时勾上
+    function syncSelectAll() {
+        var boxes = document.querySelectorAll('.chapter-checkbox-item');
+        var checked = 0;
+        Array.prototype.forEach.call(boxes, function (cb) { if (cb.checked) checked++; });
+        var all = boxes.length > 0 && checked === boxes.length;
+        ['select-all-chapters', 'select-all-inline'].forEach(function (id) {
+            var b = document.getElementById(id);
+            if (b) b.checked = all;
+        });
+    }
+
+    // 已确认、但章节表里还没有的新章节（photo_id，上游顺序）
+    function missingNewChapterIds() {
+        var u = updateData && updateData.eligible ? (updateData.update || {}) : {};
+        var have = {};
+        Array.prototype.forEach.call(document.querySelectorAll('.chapter-checkbox-item'), function (cb) {
+            have[String(cb.value)] = true;
+        });
+        var missing = [];
+        (u.new_chapters || []).forEach(function (c) {
+            var id = c && c.photo_id != null ? String(c.photo_id) : '';
+            if (id && !have[id] && missing.indexOf(id) < 0) missing.push(id);
+        });
+        return missing;
+    }
+
+    function setChapterRefreshStatus(text) {
+        var status = document.getElementById('chapter-refresh-status');
+        if (status) status.textContent = text;
+    }
+
+    // 重新取一次详情（只读：GET /api/album/<id>，确认新章节时服务端已丢掉这部漫画的详情缓存，这里取到的是新的章节列表），
+    // 只重建章节表的行：已勾选的保持勾选、新行不勾选，重新标“新”；滚动位置和复选框上的焦点不变。thenSelect：之后勾选新章节
+    function refreshChapterTable(thenSelect) {
+        if (chapterRefreshing) return;
+        chapterRefreshing = true;
+        setChapterRefreshStatus('正在刷新章节列表…');
+        window.apiFetch('/api/album/' + encodeURIComponent(String(albumId)),
+            { timeoutMs: 30000, abortKey: 'detail-chapter-refresh' })
+        .then(function (data) {
+            chapterRefreshing = false;
+            var album = data && data.status === 'ok' ? data.data : null;
+            if (!album || !document.getElementById('chapter-rows')) throw new Error('章节列表没能刷新');
+            var y = window.scrollY;
+            var active = document.activeElement;
+            var keep = {}, before = {}, focused = null;
+            Array.prototype.forEach.call(document.querySelectorAll('.chapter-checkbox-item'), function (cb) {
+                var id = String(cb.value);
+                before[id] = true;
+                if (cb.checked) keep[id] = true;
+                if (cb === active) focused = id;
+            });
+            var photos = album.photos || [];
+            fillChapterRows(photos, keep);
+            var count = document.getElementById('chapter-count');
+            if (count) count.textContent = String(photos.length);
+            syncSelectAll();
+            if (window.updateBadges) markNewChapters(updateData && updateData.eligible && updateData.update ? updateData.update.new_chapters : []);
+            if (focused !== null) {
+                Array.prototype.forEach.call(document.querySelectorAll('.chapter-checkbox-item'), function (cb) {
+                    if (focused !== null && String(cb.value) === focused && typeof cb.focus === 'function') {
+                        cb.focus();
+                        focused = null;
+                    }
+                });
+            }
+            if (typeof y === 'number' && typeof window.scrollTo === 'function') window.scrollTo({ top: y, behavior: 'instant' });
+            // “部分章节已下载 · M/N 话”按新的章节列表重新核对
+            if (typeof refreshChapterClaim === 'function') refreshChapterClaim();
+            var added = photos.filter(function (p) { return p && !before[String(p.photo_id)]; }).length;
+            setChapterRefreshStatus('章节列表已更新，新增 ' + added + ' 话');
+            if (thenSelect) selectNewChapters(true);
+        })
+        .catch(function (err) {
+            chapterRefreshing = false;
+            setChapterRefreshStatus('');
+            if (err && err.name === 'AbortError') return;   // 离开页面：不提示
+            updateToast('章节列表没能刷新，请稍后刷新页面再选', 'warning');   // 章节表保持原样
+        });
+    }
+
+    // “立即检查”之后：确认的新章节有不在章节表里的，刷新一次（同一组缺少的只刷新一次）
+    function refreshChaptersIfMissing() {
+        if (!updateData || !updateData.eligible || chapterRefreshing) return;
+        var missing = missingNewChapterIds();
+        if (!missing.length) return;
+        var key = missing.join(',');
+        if (key === chapterRefreshKey) return;
+        chapterRefreshKey = key;
+        refreshChapterTable(false);
     }
 
     // 章节名：上游标题，没有时“第 N 话”
@@ -621,6 +742,7 @@
             refocusCheckButton(refocus);
             var toast = checkOutcomeToast(data);
             if (toast) updateToast(toast[0], toast[1]);
+            refreshChaptersIfMissing();   // 新确认的章节不在章节表里：只刷新表格行，不重新加载页面
         })
         .catch(function (err) {
             updateChecking = false;
@@ -642,8 +764,9 @@
         });
     }
 
-    // 选中这些章节：只勾选章节表里这些新章节的复选框（其余取消勾选），不创建下载任务
-    function selectNewChapters() {
+    // 选中这些章节：只勾选章节表里这些新章节的复选框（其余取消勾选），不创建下载任务。
+    // 章节表里还没有这些新章节（表是检查之前取的）：先刷新章节表再勾选；afterRefresh：刚刷新过，还缺就请用户稍后刷新页面
+    function selectNewChapters(afterRefresh) {
         var u = updateData && updateData.eligible ? (updateData.update || {}) : {};
         var wanted = {};
         (u.new_chapters || []).forEach(function (c) { if (c && c.photo_id != null) wanted[String(c.photo_id)] = true; });
@@ -652,16 +775,22 @@
         var boxes = Array.prototype.slice.call(document.querySelectorAll('.chapter-checkbox-item'));
         var present = boxes.filter(function (cb) { return wanted[String(cb.value)]; });
         if (present.length < total) {
-            // 章节表是检查之前取的：刷新页面会重新取章节列表（确认新章节时服务端已丢掉这部漫画的详情缓存）
-            updateToast('章节列表里还没有这些新章节，请刷新页面后再选', 'warning');
+            if (chapterRefreshing) {
+                updateToast('正在刷新章节列表，请稍候', 'info');
+                return;
+            }
+            var key = missingNewChapterIds().join(',');
+            if (afterRefresh === true || key === chapterRefreshKey) {
+                updateToast('章节列表里还没有这些新章节，请稍后刷新页面再选', 'warning');
+                return;
+            }
+            chapterRefreshKey = key;
+            updateToast('章节列表里还没有这些新章节，正在刷新章节列表…', 'info');
+            refreshChapterTable(true);
             return;
         }
         boxes.forEach(function (cb) { cb.checked = !!wanted[String(cb.value)]; });
-        var all = boxes.length > 0 && present.length === boxes.length;
-        ['select-all-chapters', 'select-all-inline'].forEach(function (id) {
-            var b = document.getElementById(id);
-            if (b) b.checked = all;
-        });
+        syncSelectAll();
         // 瞬时定位到第一话新章节（Bootstrap 的 :root { scroll-behavior: smooth } 会让它慢慢滑过去）
         var row = present[0].closest('tr');
         if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'center', behavior: 'instant' });

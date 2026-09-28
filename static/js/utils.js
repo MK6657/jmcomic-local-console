@@ -83,7 +83,8 @@ window.escapeHtmlAttr = function (str) {
    *
    * 对调用方的行为约定：
    *   - 成功（2xx）→ resolve 解析后的 JSON 对象（与旧版一致）
-   *   - HTTP 错误 → reject Error（err.message 为服务端 message 或通用文案，err.status 为状态码）
+   *   - HTTP 错误 → reject Error（err.message 为服务端 message 或通用文案，err.status 为状态码，
+   *     err.data 为服务端返回的 JSON（body 不是 JSON 时没有））
    *   - 主动超时 → reject Error('请求超时，请稍后重试')，且 err.isTimeout === true
    *   - pagehide / 调用方 abort → reject 原始 AbortError（err.name === 'AbortError'），
    *     调用方 .catch 应以 `if (err && err.name === 'AbortError') return;` 静默处理
@@ -153,6 +154,7 @@ window.escapeHtmlAttr = function (str) {
         return r.json().then(function (data) {
           var e = new Error(data.message || '请求失败 (HTTP ' + r.status + ')');
           e.status = r.status;
+          e.data = data; // 服务端的完整回答（如批量下载 409 stale 带的最新清单）
           throw e;
         }, function () {
           var e = new Error('请求失败 (HTTP ' + r.status + ')');

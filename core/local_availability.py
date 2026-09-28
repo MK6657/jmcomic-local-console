@@ -224,6 +224,16 @@ def readable_album_ids(album_ids) -> set[str]:
     return {album_id for album_id, state in local_states(album_ids).items() if state.readable}
 
 
+def readable_among(album_ids) -> set[str]:
+    """本地可读的 album_id —— 各页面共用上面的同一规则。
+    该规则单次最多判断 MAX_IDS 个，这里分批，供“可离线阅读”筛选、统计和批量下载判断整个资源库/收藏。"""
+    ids = list(dict.fromkeys(str(a) for a in album_ids))
+    readable: set[str] = set()
+    for start in range(0, len(ids), MAX_IDS):
+        readable |= readable_album_ids(ids[start:start + MAX_IDS])
+    return readable
+
+
 def local_state(album_id: str) -> LocalState | None:
     """一部漫画的本地状态；从未完成过下载时为 None"""
     return local_states([album_id]).get(str(album_id))
@@ -232,3 +242,23 @@ def local_state(album_id: str) -> LocalState | None:
 def is_readable(album_id: str) -> bool:
     state = local_state(album_id)
     return bool(state and state.readable)
+
+
+def readable_folder(album_id: str) -> str | None:
+    """阅读器现在打开的目录：最近一次完成（没被取代）的任务的输出目录，本地可读时；否则 None。与 local_states 同一规则"""
+    album_id = str(album_id)
+    if not validate_numeric(album_id):
+        return None
+    conn = db.get_db()
+    try:
+        row = conn.execute(
+            "SELECT job_id, output_path, superseded_at FROM jobs WHERE status='completed' AND album_id=? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (album_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or row["superseded_at"] or not row["output_path"]:
+        return None
+    state = _folder_state(row["output_path"], row["job_id"], time.monotonic(), [])
+    return row["output_path"] if state.readable else None

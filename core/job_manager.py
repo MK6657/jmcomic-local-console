@@ -4,7 +4,6 @@
 import json
 import os
 import threading
-import uuid
 from datetime import datetime
 from typing import Optional
 
@@ -56,7 +55,7 @@ class JobManager:
 
     def create_job(self, album_id: str, title: str, photo_ids: list[str]) -> str:
         """创建下载任务，返回 job_id"""
-        job_id = f"job_{uuid.uuid4().hex[:12]}"
+        job_id = db.new_job_id()
         log.info(f"创建任务 job_id={job_id} album_id={album_id} title={title} photo_count={len(photo_ids)}")
         db.insert_job(job_id, album_id, title, photo_ids)
         return job_id

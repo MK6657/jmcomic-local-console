@@ -10,7 +10,7 @@ from flask import Blueprint, jsonify, request
 import core.database as db
 from core import update_store
 from core.jm_service import get_album_detail, get_album_detail_cached
-from core.local_availability import MAX_IDS, local_states, readable_album_ids
+from core.local_availability import MAX_IDS, local_states, readable_among  # readable_among 供其他路由沿用这里的导入
 from core.logger import bind_request_id, log
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 
@@ -21,16 +21,6 @@ _bulk_sync_lock = threading.Lock()
 def _sanitize_tag(tag: str) -> str:
     """清洗标签：去空格、小写、截断"""
     return tag.strip().lower()[:50]
-
-
-def readable_among(album_ids) -> set[str]:
-    """本地可读的 album_id —— 各页面共用 core.local_availability 的同一规则。
-    该规则单次最多判断 MAX_IDS 个，这里分批，供“可离线阅读”筛选与统计判断整个资源库/收藏。"""
-    ids = list(dict.fromkeys(str(a) for a in album_ids))
-    readable: set[str] = set()
-    for start in range(0, len(ids), MAX_IDS):
-        readable |= readable_album_ids(ids[start:start + MAX_IDS])
-    return readable
 
 
 def mark_local_details(items):

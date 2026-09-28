@@ -18,25 +18,52 @@ _stop_event = threading.Event()
 _scheduler_lock = threading.Lock()
 
 
-def is_schedule_time() -> bool:
-    """检查当前是否在设定的下载时间段内"""
-    start_str = db.get_setting("schedule_start", "23")
-    end_str = db.get_setting("schedule_end", "7")
-
+def _schedule_hours() -> tuple[int, int] | None:
+    """设定的开始 / 结束时（0-23）；不是整数或超出范围时为 None（这时永远不在时间段内）"""
     try:
-        start_hour = int(start_str)
-        end_hour = int(end_str)
+        start_hour = int(db.get_setting("schedule_start", "23"))
+        end_hour = int(db.get_setting("schedule_end", "7"))
     except (ValueError, TypeError):
-        return False
+        return None
+    if not (0 <= start_hour <= 23 and 0 <= end_hour <= 23):
+        return None
+    return start_hour, end_hour
 
-    current_hour = datetime.now().hour
+
+def is_schedule_time(now: datetime | None = None) -> bool:
+    """检查当前（或 now）是否在设定的下载时间段内"""
+    hours = _schedule_hours()
+    if hours is None:
+        return False
+    start_hour, end_hour = hours
+
+    current_hour = (now or datetime.now()).hour
 
     if start_hour <= end_hour:
-        # 同一天内（例如 8:00 ~ 22:00）
+        # 同一天内（例如 8:00 ~ 22:00）；开始 = 结束时永远不在时间段内
         return start_hour <= current_hour < end_hour
     else:
         # 跨天（例如 23:00 ~ 7:00）
         return current_hour >= start_hour or current_hour < end_hour
+
+
+def window_state(now: datetime | None = None) -> dict:
+    """定时下载时间段现在的状态（批量下载的确认窗口据此如实说明任务什么时候开始）：
+    enabled 开了定时下载；open 现在排队的任务能开始（没开定时下载也算）；start / end 开始 / 结束时（设置无效时为 None）；
+    invalid 时间段设置无效；never 开了定时下载但时间段永远不会到（无效或开始 = 结束）；
+    opens_tomorrow 现在关着、下一次要到明天的 start 才开始。与 can_auto_schedule 同一个判断。"""
+    now = now or datetime.now()
+    enabled = db.get_setting("schedule_enabled", "false") == "true"
+    hours = _schedule_hours()
+    invalid = hours is None
+    start, end = hours if hours else (None, None)
+    never = enabled and (invalid or start == end)
+    is_open = not enabled or (not invalid and is_schedule_time(now))
+    return {
+        "enabled": enabled, "open": is_open, "start": start, "end": end,
+        "never": never, "invalid": invalid,
+        "opens_tomorrow": enabled and not is_open and not never and now.hour >= start,
+    }
 
 
 def can_auto_schedule() -> bool:

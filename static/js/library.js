@@ -795,12 +795,14 @@
     //  8. 自动刷新
     // ══════════════════════════════════════════════════════════════
 
-    // 页面隐藏，或正用键盘操作卡片 / 作者筛选 / 分页按钮时跳过这一轮，免得重建把焦点弄丢
+    // 页面隐藏，或正用键盘操作卡片 / 作者筛选 / 分页按钮时跳过这一轮，免得重建把焦点弄丢；
+    // 批量下载的确认窗口开着时也跳过（js/batch-download.js）
     function canRefreshNow() {
         return !document.hidden
             && !grid.contains(document.activeElement)
             && !activeFilters.contains(document.activeElement)
-            && !pagination.contains(document.activeElement);
+            && !pagination.contains(document.activeElement)
+            && !(window.batchDownloadDialog && window.batchDownloadDialog.isOpen());
     }
 
     function startAutoRefresh() {
@@ -820,6 +822,19 @@
     function refreshLibrary() {
         loadLibrary(currentPage, { showSpinner: true });
         loadStats();
+    }
+
+    // 下载新章节：确认窗口先列出检查确认过的新章节（js/batch-download.js），确认后才加入下载队列；
+    // 加入之后按原来的页码、筛选刷新卡片（不显示加载中，位置不变）和统计
+    function downloadNewChapters() {
+        if (!window.batchDownloadDialog) return;
+        window.batchDownloadDialog.open('new_chapters', {
+            opener: document.getElementById('library-download-new-btn'),
+            onDone: function () {
+                loadLibrary(currentPage, { showSpinner: false });
+                loadStats();
+            }
+        });
     }
 
     // 设置页改了“点击卡片空白处打开详情”：切回本页或从往返缓存回来时重新读一次（失败则保持现状）
@@ -917,6 +932,7 @@
     document.getElementById('clear-filters-btn').addEventListener('click', clearFilters);
     document.getElementById('library-resync-btn').addEventListener('click', reSyncAll);
     document.getElementById('library-refresh-btn').addEventListener('click', refreshLibrary);
+    document.getElementById('library-download-new-btn').addEventListener('click', downloadNewChapters);
 
     // ── 供控制台/其他脚本调用（页面本身不再依赖这些全局函数） ──
     window.refreshLibrary = refreshLibrary;
