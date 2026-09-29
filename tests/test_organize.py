@@ -1,6 +1,7 @@
 """整理下载目录（organize_mode）：按作者整理只把整个目录改名（被占用时短暂重试，从不复制再删除）；扁平化只改名不复制，
 页名 <章节前缀>_p<页号>，永远不会和旧版本按累加序号起的页名（<章节前缀>_NNNNN）重名；skip_existing 认得已经扁平化的页
 （新页名的散图和压缩包里的页；旧页名只按整章认：正好是这一章的页数时），旧文件从不改名、覆盖或删除。
+上游改了标题（章节 ID 不变）的章节沿用它原来的章节目录（Codex 14 F1），三种整理方式都不会再下载一遍。
 
 Everything runs the REAL download_album_job → _download_chapter → _download_image_single_attempt → organize_download
 (→ auto-pack) in pytest's tmp folders; only the client is fake (its download_image writes a small valid WebP and
@@ -61,11 +62,13 @@ class FakeClient:
         self.run = 0
         self.gif = set()
         self.pages = {}  # photo_id → page count upstream lists now (default: CHAPTERS)
+        self.names = {}  # photo_id → the title upstream lists now (default: CHAPTERS; same id, same images)
         self.fail = set()
         self.same = {}
 
     def get_album_detail(self, album_id):
-        return _Album(_Photo(pid, name, self.pages.get(pid, pages), {n for p, n in self.gif if p == pid})
+        return _Album(_Photo(pid, self.names.get(pid, name), self.pages.get(pid, pages),
+                             {n for p, n in self.gif if p == pid})
                       for pid, name, pages in CHAPTERS)
 
     def check_photo(self, photo):
@@ -1558,4 +1561,288 @@ def test_comic_folder_is_listed_once_per_job_not_once_per_chapter(client, downlo
         assert checks == ["_AlbumRoot.__init__", "candidates"]                  # its entries once, its archives once
         counts.append(len(listings))
     assert counts[0] == counts[1]
+    assert _reader_pages(client) == TOTAL
+
+
+# ─── Codex 14 F1. a chapter renamed upstream is found by its chapter ID ───────
+
+
+RENAMED = "第1话 改名"                                                          # chapter 71's new upstream title
+
+
+def _album_folder(downloads, organize):
+    return downloads / "someone" / "Name_3001" if organize == "by_author" else downloads / "Name_3001"
+
+
+@pytest.mark.parametrize("again", ["all", "one"])
+@pytest.mark.parametrize("organize", ["none", "by_author", "flat"])
+def test_renamed_chapter_is_not_downloaded_again(client, download, downloads, organize, again):
+    """Codex 14 F1: upstream renames chapter 71 (same chapter ID, same images). Downloading it again — 下载全部 or
+    only that chapter — finds its folder by the chapter ID: nothing is fetched, no folder is added, nothing changes on
+    disk (the folder keeps its old title, so flattened pages keep their names) and the reader still shows every page
+    once (before: all of 71 fetched again into a new 第1话 改名__71 folder, the reader showed 12 pages for 9)."""
+    job = download(ALL_IDS, organize=organize)
+    assert job["status"] == "completed", job["error_message"]
+    folder = _album_folder(downloads, organize)
+    assert job["output_path"] == str(folder)
+    before = _snapshot(folder)
+    assert _reader_pages(client) == TOTAL
+    download.fake.names["71"] = RENAMED
+    photo_ids = ALL_IDS if again == "all" else ["71"]
+    job = download(photo_ids, organize=organize)
+    assert job["status"] == "completed", job["error_message"]
+    assert job["output_path"] == str(folder)
+    assert download.fake.fetched == []
+    assert job["done_pages"] == (TOTAL if again == "all" else 3)
+    assert sorted(_chapter_contents(folder)) == sorted(_chapter_dirs())       # no 第1话 改名__71
+    assert _snapshot(folder) == before
+    assert _reader_pages(client) == TOTAL
+
+
+@pytest.mark.parametrize("organize", ["none", "by_author", "flat"])
+def test_renamed_chapter_that_grew_fetches_only_the_new_page_into_its_old_folder(client, download, downloads,
+                                                                                 organize):
+    """Renamed upstream and one page added: only that page is fetched, into the chapter's old folder (flattened under
+    the old folder's prefix); no folder is added."""
+    assert download(ALL_IDS, organize=organize)["status"] == "completed"
+    folder = _album_folder(downloads, organize)
+    download.fake.names["71"] = RENAMED
+    download.fake.pages["71"] = 4
+    job = download(ALL_IDS, organize=organize)
+    assert job["status"] == "completed", job["error_message"]
+    assert download.fake.fetched == ["71/00004.webp"]
+    assert sorted(_chapter_contents(folder)) == sorted(_chapter_dirs())
+    if organize == "flat":
+        assert _root_files(folder) == _stable_names({"71": 4})
+    else:
+        assert _chapter_contents(folder)["第1话__71"] == [MARKER] + [f"{n:05d}.webp" for n in range(1, 5)]
+    assert _reader_pages(client) == TOTAL + 1
+
+
+@pytest.mark.parametrize("organize", ["none", "flat"])
+def test_renamed_chapter_of_an_archive_only_comic_is_packed_under_its_old_path(client, download, downloads,
+                                                                               organize):
+    """Auto-pack + delete originals: the renamed chapter's pages go back into its old folder (none mode fetches an
+    archive-only comic again, as before; flat recognises its pages in the archive) — never packed a second time under
+    a new chapter path next to the old one."""
+    assert download(ALL_IDS, organize=organize, auto_pack=True, delete_originals=True)["status"] == "completed"
+    folder = downloads / "Name_3001"
+    names = _archive_names(folder)
+    download.fake.names["71"] = RENAMED
+    job = download(ALL_IDS, organize=organize, auto_pack=True, delete_originals=True)
+    assert job["status"] == "completed", job["error_message"]
+    assert len(download.fake.fetched) == (TOTAL if organize == "none" else 0)
+    assert _archive_names(folder) == names
+    assert sorted(_chapter_contents(folder)) == sorted(_chapter_dirs())
+    assert _root_files(folder) == [ARCHIVE]
+    assert _reader_pages(client) == TOTAL
+
+
+def test_chapter_renamed_twice_uses_its_fullest_folder_and_adds_none(client, download, downloads):
+    """An older version already split chapter 71 over two marked folders (upstream renamed it once; that download was
+    interrupted after one page). Renamed again: the folder with the most pages is used — not the first or smallest
+    name (第0话__71) — by the page check and by the marker upgrade alike; nothing is fetched, no third folder, the other
+    folder is left as it is (its page still shows, as before)."""
+    assert download(ALL_IDS, organize="none")["status"] == "completed"
+    folder = downloads / "Name_3001"
+    full, partial = folder / "第1话__71", folder / "第0话__71"
+    (full / MARKER).write_text(json.dumps({"photo_id": "71"}), encoding="utf-8")     # old format: upgraded at the end
+    partial.mkdir()
+    (partial / MARKER).write_text(json.dumps({"photo_id": "71"}), encoding="utf-8")
+    _image(partial / "00001.webp")
+    _forget_local()
+    assert _reader_pages(client) == TOTAL + 1
+    download.fake.names["71"] = RENAMED
+    job = download(ALL_IDS, organize="none")
+    assert job["status"] == "completed", job["error_message"]
+    assert download.fake.fetched == []
+    assert sorted(_chapter_contents(folder)) == sorted(_chapter_dirs() + ["第0话__71"])
+    assert json.loads((full / MARKER).read_text(encoding="utf-8")) == {"photo_id": "71", "format": 2}
+    assert json.loads((partial / MARKER).read_text(encoding="utf-8")) == {"photo_id": "71"}
+    assert _chapter_contents(folder)["第0话__71"] == [MARKER, "00001.webp"]
+    assert _reader_pages(client) == TOTAL + 1
+
+
+def _list_in_reverse(monkeypatch, folder):
+    """os.scandir(folder) returns its entries in the reverse of the file system's order."""
+    real = os.scandir
+
+    class Listing(list):
+        def __enter__(self):
+            return iter(self)
+
+        def __exit__(self, *exc):
+            return False
+
+    def scandir(path=".", *args, **kwargs):
+        if Path(path) == folder:
+            with real(path) as entries:
+                return Listing(reversed(list(entries)))
+        return real(path, *args, **kwargs)
+    monkeypatch.setattr(os, "scandir", scandir)
+
+
+def _marked_folder(folder, name, photo_id="71", pages=0, empty_pages=0):
+    chapter = folder / name
+    chapter.mkdir(parents=True)
+    (chapter / MARKER).write_text(json.dumps({"photo_id": photo_id, "format": 2}), encoding="utf-8")
+    for n in range(1, pages + 1):
+        _image(chapter / f"{n:05d}.webp")
+    for n in range(pages + 1, pages + empty_pages + 1):
+        (chapter / f"{n:05d}.webp").write_bytes(b"")
+    return chapter
+
+
+@pytest.mark.parametrize("order", ["listed", "reversed"])
+def test_several_old_folders_of_a_renamed_chapter_resolve_the_same_way_every_time(downloads, monkeypatch, order):
+    """Most non-empty page files first (empty page files do not count), ties → smallest name: whatever order the
+    folder is listed in, every call gives the same folder, and none is created."""
+    from core.jm_service import _chapter_output_dir
+    folder = downloads / "Name_3001"
+    stray = _marked_folder(folder, "A__71", empty_pages=5)                      # smallest name, no real page
+    for name in ("cover.webp", "abcde.webp", "extra.jpg", "00001.png.bak"):
+        _image(stray / name)                                                    # images, but not page files
+    for name in ("00001.part", "00002.txt", "00003.bak"):
+        (stray / name).write_bytes(b"not a page")
+    _marked_folder(folder, "旧名__71", pages=1)
+    _marked_folder(folder, "第1话__71", pages=3)
+    _marked_folder(folder, "第1话__71_2", pages=3)                              # same count, larger name
+    _marked_folder(folder, "第2话__72", photo_id="72", pages=9)
+    if order == "reversed":
+        _list_in_reverse(monkeypatch, folder)
+    listed = sorted(p.name for p in folder.iterdir())
+    photo = _Photo("71", RENAMED, 3)
+    assert [_chapter_output_dir(folder, photo) for _ in range(3)] == [folder / "第1话__71"] * 3
+    _image(folder / "第1话__71_2" / "00004.webp")
+    assert _chapter_output_dir(folder, photo) == folder / "第1话__71_2"
+    assert sorted(p.name for p in folder.iterdir()) == listed
+
+
+@pytest.mark.parametrize("kind", ["unmarked", "other chapter", "link", "not an object"])
+def test_folder_named_after_the_chapter_is_never_adopted_without_its_marker(client, download, downloads,
+                                                                           monkeypatch, kind):
+    """Only a folder whose marker names this chapter ID is reused: a folder merely named <title>__71 (no marker — an
+    old version's or another tool's —, a marker for another chapter, or a link, simulated here) is never adopted
+    or touched; chapter 71 gets its own folder."""
+    from core import jm_service
+    assert download(["72", "73"], organize="none")["status"] == "completed"
+    folder = downloads / "Name_3001"
+    decoy = _marked_folder(folder, "X__71", photo_id="72" if kind == "other chapter" else "71", pages=3)
+    if kind == "unmarked":
+        (decoy / MARKER).unlink()
+    elif kind == "not an object":
+        (decoy / MARKER).write_text("[]", encoding="utf-8")                # valid JSON, not a marker
+    elif kind == "link":
+        real = jm_service.is_link
+        monkeypatch.setattr(jm_service, "is_link", lambda path: Path(path) == decoy or real(path))
+    before = _snapshot(decoy)
+    job = download(["71"], organize="none")
+    assert job["status"] == "completed", job["error_message"]
+    assert sorted(download.fake.fetched) == [f"71/{n:05d}.webp" for n in range(1, 4)]
+    assert sorted(_chapter_contents(folder)) == sorted(_chapter_dirs() + ["X__71"])
+    assert json.loads((folder / "第1话__71" / MARKER).read_text(encoding="utf-8"))["photo_id"] == "71"
+    assert _snapshot(decoy) == before
+
+
+def test_real_junction_named_after_the_chapter_is_never_adopted(client, download, downloads):
+    """A real Windows directory junction to a marked chapter folder elsewhere in the downloads folder (so the path
+    check alone would let it through) is not reused."""
+    _winapi = pytest.importorskip("_winapi")
+    if not hasattr(_winapi, "CreateJunction"):
+        pytest.skip("no directory junctions on this platform")
+    from core.path_guard import is_safe_path
+    assert download(["72", "73"], organize="none")["status"] == "completed"
+    folder = downloads / "Name_3001"
+    target = _marked_folder(downloads / "elsewhere", "第1话__71", pages=3)
+    junction = folder / "X__71"
+    try:
+        _winapi.CreateJunction(str(target), str(junction))
+    except OSError:
+        pytest.skip("this account cannot create directory junctions")
+    assert is_safe_path(junction) and (junction / MARKER).is_file()
+    job = download(["71"], organize="none")
+    assert job["status"] == "completed", job["error_message"]
+    assert sorted(download.fake.fetched) == [f"71/{n:05d}.webp" for n in range(1, 4)]
+    assert _chapter_contents(target) == {}                                      # nothing written through it
+    assert sorted(p.name for p in target.iterdir()) == [MARKER] + [f"{n:05d}.webp" for n in range(1, 4)]
+    assert (folder / "第1话__71" / "00003.webp").is_file()
+
+
+def test_renamed_folder_is_looked_for_only_when_the_title_finds_none(downloads, monkeypatch):
+    """Cheap: an unchanged title never lists the comic folder; a renamed chapter lists it once and reads only the
+    markers of folders named <anything>__71 or __71_<n> (not 第1话__710, not a marked folder named otherwise)."""
+    from core import jm_service
+    folder = downloads / "Name_3001"
+    old = _marked_folder(folder, "第1话__71", pages=3)
+    _marked_folder(folder, "第2话__72", photo_id="72", pages=2)
+    _marked_folder(folder, "第9话__710", photo_id="710")
+    _marked_folder(folder, "第9话__171", photo_id="171")
+    _marked_folder(folder, "X_71", photo_id="71")                                # one underscore: not a chapter folder name
+    _marked_folder(folder, "no id here", photo_id="71")
+    _image(folder / "第1话__71_p00001.webp")
+    listings, markers = [], []
+    real_scandir, real_read = os.scandir, Path.read_text
+
+    def scandir(path=".", *args, **kwargs):
+        if Path(path) == folder:
+            listings.append(path)
+        return real_scandir(path, *args, **kwargs)
+
+    def read_text(self, *args, **kwargs):
+        if self.name == MARKER:
+            markers.append(self.parent.name)
+        return real_read(self, *args, **kwargs)
+    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    assert jm_service._chapter_output_dir(folder, _Photo("71", "第1话", 3)) == old
+    assert listings == [] and markers == ["第1话__71"]
+    markers.clear()
+    assert jm_service._chapter_output_dir(folder, _Photo("71", RENAMED, 3)) == old
+    assert len(listings) == 1 and markers == ["第1话__71"]
+
+
+def _chapter_list(chapters):
+    """What the detail page leaves in album_detail_cache (chapter_inventory's only source of N)."""
+    from core import database as db
+    detail = {"album_id": "3001", "title": "Name", "chapter_count": len(chapters),
+              "photos": [{"photo_id": pid, "title": name, "page_count": pages} for pid, name, pages in chapters]}
+    db.set_cached_album_detail("3001", json.dumps(detail, ensure_ascii=False))
+
+
+@pytest.mark.parametrize("organize", ["none", "by_author"])
+def test_partial_chapter_count_still_holds_for_a_renamed_chapter(client, download, organize):
+    """“部分章节已下载 · 2/3 话” after chapter 71 was renamed upstream and downloaded again: one folder per chapter, so
+    the count is still proven (before: 71 in two folders, no count)."""
+    assert download(["71", "72"], organize=organize)["status"] == "completed"
+    download.fake.names["71"] = RENAMED
+    job = download(["71"], organize=organize)
+    assert job["status"] == "completed", job["error_message"]
+    assert download.fake.fetched == []
+    _chapter_list([(pid, download.fake.names.get(pid, name), pages) for pid, name, pages in CHAPTERS])
+    _forget_local()
+    data = client.get("/api/local-chapters/3001").get_json()
+    assert (data["partial"], data["reason"]) == ({"downloaded": 2, "total": 3}, "partial")
+
+
+
+def test_old_folder_with_a_multi_digit_suffix_is_found(downloads):
+    """Older versions numbered colliding folders _2, _3 … _10: the lookup accepts any number of digits (F6)."""
+    from core.jm_service import _chapter_output_dir
+    folder = downloads / "Name_3001"
+    old = _marked_folder(folder, "旧名__71_10", pages=3)
+    assert _chapter_output_dir(folder, _Photo("71", RENAMED, 3)) == old
+    assert sorted(p.name for p in folder.iterdir()) == ["旧名__71_10"]
+
+
+def test_unusable_current_title_folder_still_finds_the_renamed_one(client, download, downloads):
+    """A folder with the current title but no marker (a job killed between mkdir and the marker, in an older
+    version) is skipped like any unmarked folder, and the search for the pre-rename folder still runs (F5)."""
+    assert download(ALL_IDS, organize="none")["status"] == "completed"
+    folder = downloads / "Name_3001"
+    (folder / f"{RENAMED}__71").mkdir()
+    download.fake.names["71"] = RENAMED
+    job = download(ALL_IDS, organize="none")
+    assert job["status"] == "completed", job["error_message"]
+    assert download.fake.fetched == []
+    assert not (folder / f"{RENAMED}__71_2").exists()
     assert _reader_pages(client) == TOTAL

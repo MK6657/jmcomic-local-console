@@ -115,6 +115,14 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   local reader keeps the animation; PDF export uses the first frame. Chapters downloaded by earlier versions (whose
   GIF pages may be sliced or reduced to one frame) get only their GIF pages fetched again the next time the album
   is downloaded, even with "skip existing" on.
+- Chapters are recognised by their chapter ID, not their title: when upstream renames a chapter but keeps its ID,
+  downloading it again (all chapters or just that one, in every organize mode) reuses its existing folder, which
+  keeps the old title, so "skip existing" fetches nothing again (except, as before, a comic kept only as an archive
+  while not organized, which is downloaded again in full) and the reader does not show the chapter twice; a page
+  added upstream is fetched into that folder. A second folder that earlier versions created after such a rename is
+  left as it is and its pages still show. The folder named after the current title keeps being used, and pages it
+  lacks are fetched into it, so that chapter shows twice; the folder with more pages is chosen only when neither
+  folder has the current title.
 - Organizing downloads never copies then deletes: 按作者 moves the whole comic folder in one rename, retried for a
   few seconds while another program (antivirus, Explorer preview, an image viewer) holds a file in it; if it still
   fails, the complete folder stays where it is and is organized after the comic's next download.
@@ -221,7 +229,8 @@ There is no `package.json`, so npm lint/typecheck/build scripts are not provided
 ### Chapter, cleanup and PDF correctness
 
 - Chapter folders include the chapter ID and an ownership marker, preventing identical,
-  sanitized or case-insensitive titles from sharing images. Retries reuse marked folders.
+  sanitized or case-insensitive titles from sharing images. Retries reuse marked folders, and so does a
+  chapter renamed upstream (same chapter ID): its folder keeps the old title.
   Legacy folders remain untouched and are not automatically migrated; re-downloading can
   leave both legacy and new folders, which should be reviewed before manual cleanup.
 - Clearing or deleting job records recomputes bookmark status from remaining jobs in the

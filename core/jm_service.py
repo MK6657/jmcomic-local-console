@@ -1104,8 +1104,60 @@ def _mark_chapter_current(album_dir, photo) -> None:
                 pass
 
 
+def _page_file_count(directory) -> int:
+    """章节目录第一层的页文件（NNNNN.<图片后缀>，普通文件、非空）有几个；列不出来的部分不算"""
+    count = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                stem, suffix = os.path.splitext(entry.name)
+                if (suffix.lower() in _FLAT_IMAGE_SUFFIXES and _PAGE_NUMBER.fullmatch(stem)
+                        and entry.is_file(follow_symlinks=False) and entry.stat(follow_symlinks=False).st_size > 0):
+                    count += 1
+    except OSError:
+        pass
+    return count
+
+
+def _renamed_chapter_dir(album_dir, photo_id: str):
+    """上游给这一章改了标题（章节 ID 和图片没变）之前建的章节目录：漫画目录第一层名字是“<任意标题>__<photo_id>”
+    （或再加 _N）、标记（.jm-chapter.json）写的正是这个 photo_id 的目录，不是链接、在下载目录里。没有标记或标记是
+    别的章节的目录从不认领。只列一次漫画目录，先按名字筛，筛出来的才读标记。
+    有几个（更早的版本在上游改标题后另建过一个）：页文件（_page_file_count）最多的那个，一样多取名字最小的——
+    结果是确定的，一个任务里各处（_download_chapter、_mark_chapter_current）都认同一个目录（这期间只有它会多出页）。
+    没有 → None"""
+    import json
+    pattern = re.compile(rf".*__{re.escape(photo_id)}(?:_[0-9]+)?", re.DOTALL)
+    try:
+        with os.scandir(album_dir) as entries:
+            named = [Path(entry.path) for entry in entries if pattern.fullmatch(entry.name)]
+    except OSError as e:
+        log.warning(f"列不出漫画目录，不找改标题前的章节目录（按现在的标题建目录）dir={album_dir} error={e}")
+        return None
+    found = []
+    for directory in named:
+        try:
+            marker = directory / _CHAPTER_MARKER
+            if (is_link(directory) or not directory.is_dir() or not is_safe_path(directory)
+                    or not is_safe_path(marker)):
+                continue
+            record = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("photo_id") == photo_id:
+            found.append(directory)
+    if len(found) <= 1:
+        return found[0] if found else None
+    return min(found, key=lambda directory: (-_page_file_count(directory), directory.name))
+
+
 def _chapter_output_dir(album_dir, photo):
-    """Identify folders by chapter ID; never adopt or overwrite an unmarked old folder."""
+    """章节目录按章节 ID（photo_id）认，不按标题认；从不认领、覆盖没有标记的旧目录（或标记是别的章节的目录）。
+      1. 按上游现在的标题起的名字“<标题>__<photo_id>”（重名时再加 _2、_3…）里、标记是这个 photo_id 的目录（标题没变）；
+      2. 没有：上游改过这一章的标题（章节 ID 和图片没变）时，改标题前建的目录（_renamed_chapter_dir）——否则整章会
+         再下载一遍、放进按新标题另建的目录，阅读器里出现两次。目录不改名、保留旧标题：扁平化的页名前缀
+         （_flat_prefix，来自目录名）也不变，已经扁平化的页照样认得；
+      3. 都没有：按现在的标题建新目录，写标记。"""
     import json
     from .validation import validate_numeric
     photo_id = str(photo.photo_id)
@@ -1113,6 +1165,7 @@ def _chapter_output_dir(album_dir, photo):
         raise ValueError("章节 ID 无效")
     base_name = f"{_safe_dirname(photo.name or photo_id, max_len=100)}__{photo_id}"
     suffix = 1
+    looked_for_renamed = False
     while True:
         name = base_name if suffix == 1 else f"{base_name}_{suffix}"
         directory = Path(album_dir) / name
@@ -1128,6 +1181,14 @@ def _chapter_output_dir(album_dir, photo):
                 pass
             suffix += 1
             continue
+        if not looked_for_renamed:
+            # 按现在的标题没找到（只有这时才找，标题没变时不多列目录）
+            looked_for_renamed = True
+            renamed = _renamed_chapter_dir(album_dir, photo_id)
+            if renamed is not None:
+                log.info(f"章节标题在上游改过，沿用改标题前的章节目录 photo_id={photo_id} dir={renamed.name} "
+                         f"title={photo.name}")
+                return renamed
         try:
             directory.mkdir()
         except FileExistsError:
