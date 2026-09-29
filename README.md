@@ -115,6 +115,40 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   local reader keeps the animation; PDF export uses the first frame. Chapters downloaded by earlier versions (whose
   GIF pages may be sliced or reduced to one frame) get only their GIF pages fetched again the next time the album
   is downloaded, even with "skip existing" on.
+- Chapters are recognised by their chapter ID, not their title: when upstream renames a chapter but keeps its ID,
+  downloading it again (all chapters or just that one, in every organize mode) reuses its existing folder, which
+  keeps the old title, so "skip existing" fetches nothing again (except, as before, a comic kept only as an archive
+  while not organized, which is downloaded again in full) and the reader does not show the chapter twice; a page
+  added upstream is fetched into that folder. A second folder that earlier versions created after such a rename is
+  left as it is and its pages still show. The folder named after the current title keeps being used, and pages it
+  lacks are fetched into it, so that chapter shows twice; the folder with more pages is chosen only when neither
+  folder has the current title.
+- Organizing downloads never copies then deletes: 按作者 moves the whole comic folder in one rename, retried for a
+  few seconds while another program (antivirus, Explorer preview, an image viewer) holds a file in it; if it still
+  fails, the complete folder stays where it is and is organized after the comic's next download.
+  扁平化 names every page `<chapter folder>_p<page number>` (e.g. `第1话__71_p00001.webp`), a name earlier versions
+  never used, so a re-downloaded page replaces its own flattened copy and never another page; "skip existing"
+  recognises these pages, loose or inside the comic's archive, whichever organize mode is selected now (a loose copy
+  always stands in for the archived one, so a damaged loose copy does not count: the page is fetched again and still
+  has a good copy after automatic packing). Chapters flattened by earlier versions (counter names) are recognised
+  only as whole, complete chapters. Otherwise they are downloaded again: a downloaded page that is byte for byte one
+  of the chapter's old pages is dropped (each old page stands in for one downloaded page only; the old file stays;
+  the page may be fetched again on later downloads, not shown twice while the old copy can be read; a page whose own
+  new-named copy is damaged replaces that copy instead); if the old page cannot be read while organizing (the
+  archive or file is held by another program, or damaged), the downloaded page is kept under its new name instead,
+  so that page shows twice (after automatic packing, for good). Pages that differ (such as old sliced GIF pages) are
+  kept under the new names next to the old files, so those show twice. Organizing never renames, overwrites or
+  deletes those old files or the archive. A page that stays locked is left in its chapter folder until the comic's
+  next download: meanwhile it is listed before its chapter's flattened pages (and shows twice while the comic folder
+  already has a copy of it: the flattened copy it could not replace, or the old page it duplicates), and automatic
+  packing waits until it is flattened. A damaged page (`NNNNN.webp`) in a chapter folder is fetched again whenever
+  its chapter is downloaded. Known narrow limits: old duplicate counter names that happen to add up to a chapter's
+  current page count make it count as complete; archived pages count as present from the archive's index without
+  re-reading each one; if another program holds the archive while the folder is organized (and, for complete old
+  chapters with "skip existing" on, also when the chapters are checked), old pages are downloaded again and packed
+  next to their old copies; in a chapter that still has old counter-named pages, those are listed before its
+  new-named pages, so a page kept only under its old name can come before an earlier page that got a new name (an
+  old page missing, a page inserted upstream, or a re-fetched GIF page that is not the chapter's last).
 - Bookmarks, a downloaded library and local image reader.
 - ZIP/PDF export and optional automatic CBZ/ZIP packaging.
 - Scheduling, concurrency, timeout, retries and proxy configuration.
@@ -195,7 +229,8 @@ There is no `package.json`, so npm lint/typecheck/build scripts are not provided
 ### Chapter, cleanup and PDF correctness
 
 - Chapter folders include the chapter ID and an ownership marker, preventing identical,
-  sanitized or case-insensitive titles from sharing images. Retries reuse marked folders.
+  sanitized or case-insensitive titles from sharing images. Retries reuse marked folders, and so does a
+  chapter renamed upstream (same chapter ID): its folder keeps the old title.
   Legacy folders remain untouched and are not automatically migrated; re-downloading can
   leave both legacy and new folders, which should be reviewed before manual cleanup.
 - Clearing or deleting job records recomputes bookmark status from remaining jobs in the
