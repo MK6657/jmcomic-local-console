@@ -916,8 +916,8 @@ WISHLIST_BLOCKS = ["function toast(", "function el(", "function icon(", "functio
                    "function openBatchDialog(", "function batchDownload(", "function downloadUndownloaded(",
                    "function canRefreshNow("]
 READABLE_CONFIRM = ("「Readable」已有已下载的内容（可能只是部分章节）。\n"
-                    "整部下载会按上游现在的全部章节下载：开启了「跳过已存在的文件」、漫画还在原来的下载文件夹里时，已有的散图会跳过；"
-                    "关闭了这个设置、按作者或扁平化整理过、或只剩压缩包的漫画，会重新下载全部图片。\n"
+                    "整部下载会按上游现在的全部章节下载：开启了「跳过已存在的文件」、漫画还在原来的下载文件夹里时，已下载的页通常会跳过；"
+                    "关闭了这个设置、按作者整理过、或只剩压缩包的漫画，可能会重新下载全部图片。\n"
                     "只要新章节请用资源库的「下载新章节」。确定整部下载吗？")
 
 
