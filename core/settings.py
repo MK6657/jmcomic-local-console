@@ -156,14 +156,8 @@ def build_jmcomic_option() -> dict:
             "impl": "html",
             "retry_times": int(s.get("retry_times", 2)),  # 降为 2，网络稳定时减少重试等待
             "timeout": int(s.get("timeout", 30)),
-            # ⭐ 当前可用的 API 域名（jmcomic 内部默认域名可能已过期）
-            "domain": [
-                "https://www.cdnhth.club",
-                "https://www.cdnmhwscc.vip",
-                "https://www.jmapiproxyxxx.vip",
-                "https://www.cdnxxx-proxy.xyz",
-                "https://www.jmeadpoolcdn.life",
-            ],
+            # 由 jmcomic 按 impl 选择其维护的域名；API 地址不能用于 HTML 客户端。
+            # 不覆盖 domain，升级依赖时即可同步 API 分流地址和协议版本。
             # ⭐ 启用 session 模式，复用 TCP 连接，消除每次请求的 TLS 握手
             "postman": {
                 "type": "curl_cffi_session",

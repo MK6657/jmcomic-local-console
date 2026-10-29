@@ -1015,6 +1015,7 @@ def test_fetch_calls_only_album_detail_one_per_mirror(client, checker, monkeypat
 
 @pytest.mark.parametrize("client_type", ["api", "html"])
 def test_real_check_client_fresh_uncached_no_retry(client, client_type):
+    from jmcomic import JmModuleConfig
     from core import jm_service, update_checker
     from core.settings import update_settings
     update_settings({"timeout": "30", "retry_times": "5", "client_type": client_type})
@@ -1024,7 +1025,9 @@ def test_real_check_client_fresh_uncached_no_retry(client, client_type):
     try:
         assert real.get_cache_dict() is None and real.retry_times == 0
         assert 0 < real.get_meta_data("timeout") <= 20
-        assert len(real.get_domain_list()) == 5
+        expected = (JmModuleConfig.DOMAIN_API_LIST if client_type == "api"
+                    else JmModuleConfig.DOMAIN_HTML_LIST)
+        assert real.get_domain_list() == expected
         assert jm_service.get_active_client_count() == before + 1
     finally:
         jm_service.close_client(real)
@@ -1033,6 +1036,7 @@ def test_real_check_client_fresh_uncached_no_retry(client, client_type):
 
 def test_real_client_at_most_one_request_per_mirror(client, local_album, checker, monkeypatch):
     from curl_cffi.curl import Curl
+    from jmcomic import JmModuleConfig
     from core import jm_service, update_checker
     jm_service.invalidate_option_cache()
     performed = []
@@ -1044,10 +1048,11 @@ def test_real_client_at_most_one_request_per_mirror(client, local_album, checker
     local_album()
     before = jm_service.get_active_client_count()
     assert update_checker.check_album("3001", "manual", lock_wait=0)["outcome"] == "failed"
-    assert len(performed) == 5                                   # each configured mirror once, never more
+    domain_count = len(JmModuleConfig.DOMAIN_API_LIST)
+    assert len(performed) == domain_count                        # each configured mirror once, never more
     assert jm_service.get_active_client_count() == before       # the client was closed
     assert _row()["error_kind"] == "network"
-    assert _log_rows()[-1]["requests"] == 5
+    assert _log_rows()[-1]["requests"] == domain_count
     assert _state(client)["update"]["state"] == "failed"
 
 

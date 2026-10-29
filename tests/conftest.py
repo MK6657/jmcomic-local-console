@@ -82,6 +82,9 @@ def offline(monkeypatch):
     # jmcomic's HTTP goes through curl_cffi (libcurl), which never touches Python sockets
     from curl_cffi.curl import Curl
     monkeypatch.setattr(Curl, "perform", blocked)
+    # HTML 域名的默认发现会联网；离线测试使用独立的网页端域名。
+    from jmcomic import JmModuleConfig
+    monkeypatch.setattr(JmModuleConfig, "DOMAIN_HTML_LIST", ["html-mirror.invalid"])
 
 
 @pytest.fixture
