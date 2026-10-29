@@ -122,6 +122,11 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
   importing an exported file preserves the destination's proxy. A manually prepared
   import can still contain a proxy; treat such files as private.
 
+Network clients use the domains and APP protocol version maintained by `jmcomic 2.7.10`,
+without overriding them with the old API hosts. API and HTML select their own domains;
+a working browser page does not prove APP API availability, and HTML hosts can reject
+programmatic requests with 403.
+
 Configure a proxy on the Settings page if needed. Its credentials remain in the
 local SQLite database; never share that database. Download output is fixed to
 `downloads/`. Optional "delete originals after packing" removes source images;

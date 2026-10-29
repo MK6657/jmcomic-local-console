@@ -116,14 +116,21 @@ def diagnose():
         jm_reachable = False
         try:
             opt = build_jmcomic_option()
-            domain_list = opt.get("client", {}).get("domain", [])
-            if domain_list:
-                jm_domain = domain_list[0]
-            else:
+            client_config = opt.get("client", {})
+            client_type = client_config.get("impl", "api")
+            domain_list = client_config.get("domain", [])
+            if isinstance(domain_list, dict):
+                domain_list = domain_list.get(client_type, [])
+            if not domain_list:
                 from jmcomic import JmModuleConfig
-                defaults = JmModuleConfig.default_dict()
-                domain_list = defaults.get("client", {}).get("domain", [])
-                jm_domain = domain_list[0] if domain_list else ""
+                if client_type == "api":
+                    domain_list = JmModuleConfig.DOMAIN_API_LIST
+                else:
+                    # 复用已经发现的网页域名，不在诊断请求中触发额外的域名发现。
+                    domain_list = JmModuleConfig.DOMAIN_HTML_LIST or (
+                        [JmModuleConfig.DOMAIN_HTML] if JmModuleConfig.DOMAIN_HTML else []
+                    )
+            jm_domain = domain_list[0] if domain_list else ""
             if jm_domain:
                 parsed = urlparse(jm_domain)
                 host = parsed.hostname or jm_domain

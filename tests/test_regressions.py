@@ -46,6 +46,47 @@ def test_proxy_option_constructs(client, proxy):
         close_client(instance)
 
 
+@pytest.mark.parametrize("client_type", ["api", "html"])
+def test_client_uses_matching_upstream_domains(client, monkeypatch, client_type):
+    from jmcomic import JmModuleConfig
+    from core.settings import update_settings
+    from core.jm_service import get_client, close_client, invalidate_option_cache
+
+    domains = {
+        "api": ["api-a.invalid", "api-b.invalid"],
+        "html": ["html-a.invalid", "html-b.invalid"],
+    }
+    monkeypatch.setattr(JmModuleConfig, "DOMAIN_API_LIST", domains["api"])
+    monkeypatch.setattr(JmModuleConfig, "DOMAIN_HTML_LIST", domains["html"])
+    update_settings({"client_type": client_type})
+    invalidate_option_cache()
+    instance, _ = get_client(shared=False)
+    try:
+        assert instance.client_key == client_type
+        assert instance.get_domain_list() == domains[client_type]
+    finally:
+        close_client(instance)
+
+
+@pytest.mark.parametrize("client_type", ["api", "html"])
+def test_diagnose_uses_matching_upstream_domain(client, monkeypatch, client_type):
+    from jmcomic import JmModuleConfig
+    from core.settings import update_settings
+    from routes import api_system
+
+    domains = {"api": ["api-mirror.invalid"], "html": ["html-mirror.invalid"]}
+    monkeypatch.setattr(JmModuleConfig, "DOMAIN_API_LIST", domains["api"])
+    monkeypatch.setattr(JmModuleConfig, "DOMAIN_HTML_LIST", domains["html"])
+    connect = Mock(return_value=Mock())
+    monkeypatch.setattr(api_system.socket, "create_connection", connect)
+    update_settings({"client_type": client_type})
+    response = client.get("/api/system/diagnose")
+    assert response.status_code == 200
+    assert response.json["jmcomic"]["domain"] == domains[client_type][0]
+    assert response.json["jmcomic"]["reachable"] is True
+    connect.assert_called_once_with((domains[client_type][0], 443), timeout=3)
+
+
 def test_export_omits_private_fields_and_import_preserves_proxy(client):
     from core.settings import update_settings, get_settings
     from core.database import set_setting
