@@ -264,6 +264,7 @@ def entry(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "create_app", lambda: events.append("create_app") or "application")
     monkeypatch.setattr(app, "install_process_hooks", lambda: None)
     monkeypatch.setattr(app, "create_shutdown_control", lambda token: None)
+    monkeypatch.setattr(app, "background_services", ())
     monkeypatch.setattr(app, "start_log_maintenance", lambda: events.append("maintenance"))
     monkeypatch.setattr(app, "shutdown_logging", lambda: events.append("shutdown_logging"))
     monkeypatch.setattr(app, "_acquire_lock", lambda: events.append("lock"))
@@ -288,7 +289,7 @@ def entry(monkeypatch, tmp_path):
             self.application, self.listener = application, listener
         def run(self):
             waitress.serve(self.application, sockets=[self.listener], threads=128)
-        def stop(self):
+        def stop(self, timeout=3):
             return True
     monkeypatch.setattr(app, "ManagedHTTPServer", HTTP)
     handlers = {signal.SIGINT: "original-int", signal.SIGTERM: "original-term"}
@@ -380,7 +381,7 @@ def test_entry_http_workers_still_running_keeps_instance_lock(entry, monkeypatch
             pass
         def run(self):
             pass
-        def stop(self):
+        def stop(self, timeout=3):
             return False
     monkeypatch.setattr(entry.app, "ManagedHTTPServer", HTTP)
     assert entry.app.main() == 1
@@ -399,6 +400,29 @@ def test_entry_stops_control_before_restoring_signal_handlers(entry, monkeypatch
     assert entry.app.main() == 0
     assert entry.events.index("control.stop") < entry.events.index("stop:jobs")
     assert entry.app._shutdown_control is None
+
+
+def test_entry_confirms_last_http_lease_cleanup_before_declaring_success(entry, monkeypatch):
+    pending, attempts = [False], []
+    def stop(timeout):
+        attempts.append(timeout)
+        return not pending[0]
+    requests = SimpleNamespace(start=lambda: None, request_stop=lambda: None, stop=stop)
+    monkeypatch.setattr(entry.app, "background_services", (("requests", requests),))
+    class HTTP:
+        def __init__(self, *args):
+            pass
+        def run(self):
+            pass
+        def stop(self, timeout=3):
+            # A finally block released its last retired lease but closing the
+            # session failed: the second service drain must observe this.
+            pending[0] = True
+            return True
+    monkeypatch.setattr(entry.app, "ManagedHTTPServer", HTTP)
+    assert entry.app.main() == 1
+    assert len(attempts) == 2
+    assert "release" not in entry.events and entry.marker.exists()
 
 
 def test_entry_listener_close_failure_still_releases_ownership(entry):

@@ -30,6 +30,7 @@ from .file_tree import is_link
 from . import archive_pages
 from . import update_store
 from . import sdk_adapter
+from . import background_calls
 from .upstream import classify_failure
 from .storage import staged_file
 from . import image_download
@@ -53,6 +54,7 @@ _JM_SHARED_ATTR = "_jm_downloader_shared"
 _JM_CLOSED_ATTR = "_jm_downloader_closed"
 # invalidate_option_cache() 每调用一次加 1：长期持有 client 的一方（在线阅读的取图连接池）据此丢弃按旧设置建的 client
 _option_generation = 0
+_retired_clients = {}  # Strong ownership until a retired transport really closes.
 
 
 def _get_or_create_option():
@@ -66,7 +68,7 @@ def _get_or_create_option():
     return _global_option
 
 
-def invalidate_option_cache():
+def invalidate_option_cache(*, _owned_cleanup=False):
     """Retire the old shared client; close it only after its last request releases it."""
     global _global_option, _global_client, _option_generation
     with _option_lock:
@@ -76,14 +78,22 @@ def invalidate_option_cache():
         _global_client = None
         if previous is not None:
             previous._jm_retired = True
-            if getattr(previous, "_jm_users", 0) == 0:
-                _dispose_client(previous)
+            _retired_clients[id(previous)] = previous
+        safe = True
+        for retired in list(_retired_clients.values()):
+            if getattr(retired, "_jm_users", 0) == 0 and not _dispose_client(retired):
+                safe = False
+    if not safe and not _owned_cleanup:
+        background_calls.request_cleanup()
+    return safe
 
 
 def get_client(shared=True):
     """Acquire a client. Every acquisition must be balanced by close_client()."""
     global _global_client, _active_independent_clients
     with _option_lock:
+        if shared:
+            background_calls.require_accepting()
         option = _get_or_create_option()
         if shared:
             if _global_client is None:
@@ -147,8 +157,8 @@ def get_active_client_count() -> int:
 def _dispose_client(client):
     """Close the transport once; callers serialize lifetime transitions."""
     if getattr(client, _JM_CLOSED_ATTR, False):
-        return
-    setattr(client, _JM_CLOSED_ATTR, True)
+        _retired_clients.pop(id(client), None)
+        return True
     try:
         root = client.get_root_postman()
         if hasattr(root, "session") and hasattr(root.session, "close"):
@@ -159,24 +169,41 @@ def _dispose_client(client):
             client.close()
     except Exception as exc:
         log.warning(f"关闭 client 异常: {exc}")
+        return False
+    setattr(client, _JM_CLOSED_ATTR, True)
+    _retired_clients.pop(id(client), None)
+    return True
 
 
-def close_client(client) -> None:
+def close_client(client) -> bool:
     global _active_independent_clients
     if client is None:
-        return
+        return True
     with _option_lock:
         if getattr(client, _JM_SHARED_ATTR, False):
             client._jm_users = max(0, getattr(client, "_jm_users", 0) - 1)
             if getattr(client, "_jm_retired", False) and client._jm_users == 0:
-                _dispose_client(client)
-            return
+                _retired_clients[id(client)] = client
+                safe = _dispose_client(client)
+                if not safe:
+                    background_calls.request_cleanup()
+                return safe
+            return True
         if getattr(client, _JM_CLOSED_ATTR, False):
-            return
-        _dispose_client(client)
+            return True
+        if not _dispose_client(client):
+            return False
         if getattr(client, "_jm_counted", False):
             with _clients_lock:
                 _active_independent_clients -= 1
+        return True
+
+
+def _shutdown_client_cache():
+    return invalidate_option_cache(_owned_cleanup=True)
+
+
+background_calls.set_shutdown_cleanup(_shutdown_client_cache)
 
 
 
@@ -374,18 +401,12 @@ def _submit_client_call(pool, client, fn, *args, **kwargs):
     """Keep a shared transport leased until the future actually finishes/cancels.
     The worker thread inherits the caller's request_id, so jmcomic's retry/failure records join its trace."""
     shared = client is not None and getattr(client, _JM_SHARED_ATTR, False)
-    if shared:
+    def acquire():
         with _option_lock:
             client._jm_users += 1
-    try:
-        future = pool.submit(bind_request_id(fn), *args, **kwargs)
-    except Exception:
-        if shared:
-            close_client(client)
-        raise
-    if shared:
-        future.add_done_callback(lambda _: close_client(client))
-    return future
+    return background_calls.submit(pool, bind_request_id(fn), *args,
+        acquire=acquire if shared else None,
+        release=(lambda: close_client(client)) if shared else None, **kwargs)
 
 
 def _call_with_timeout(label: str, timeout: float, timeout_msg: str, fn, *args, **kwargs):
@@ -396,8 +417,8 @@ def _call_with_timeout(label: str, timeout: float, timeout_msg: str, fn, *args, 
     请求返回后，仍在执行的调用继续持有客户端租约，直到实际结束。
     """
     pool = ThreadPoolExecutor(max_workers=1)
-    fut = _submit_client_call(pool, getattr(fn, "__self__", None), fn, *args, **kwargs)
     try:
+        fut = _submit_client_call(pool, getattr(fn, "__self__", None), fn, *args, **kwargs)
         result = fut.result(timeout=timeout)
     except Exception as e:
         pool.shutdown(wait=False)  # 不阻塞请求线程；挂起的工作线程由其自身超时终结

@@ -19,6 +19,7 @@ from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.validation import validate_numeric, validate_job_id, require_job_id
 from core.packer import CbzPacker
 from core import archive_pages
+from core import desktop_platform
 # ── 模块级压缩包检查缓存（避免 N+1 文件系统扫描）：值是压缩包格式 'cbz' / 'zip'，没有为 None ──
 _cbz_cache: dict[str, tuple[str | None, float]] = {}
 _CBZ_CACHE_TTL = 60  # 缓存有效期（秒）
@@ -301,6 +302,9 @@ def open_folder(job_id: str):
     if not is_safe_path(output_path):
         return jsonify({"status": "error", "message": "路径安全校验失败"}), 403
 
+    if not desktop_platform.supports_open_folder():
+        return jsonify({"status": "error", "message": "当前系统不支持直接打开文件夹，请手动前往下载目录"}), 501
+
     if not os.path.isdir(output_path):
         # 还没结束的任务（排队中 / 下载中 / 已暂停，含“重试”沿用旧路径的新任务）：目录马上就会写入，先建出来再打开。
         # 已结束的任务（已完成 / 失败 / 已取消）不再写入这个目录：文件被删了就如实报告，
@@ -318,9 +322,11 @@ def open_folder(job_id: str):
             return jsonify({"status": "error", "message": "打开文件夹失败"}), 500
 
     try:
-        os.startfile(output_path)
+        desktop_platform.open_folder(output_path)
         log.info(f"API打开目录 job_id={job_id} path={output_path}")
         return jsonify({"status": "ok", "message": "已打开文件夹"})
+    except desktop_platform.UnsupportedDesktopOperation:
+        return jsonify({"status": "error", "message": "当前系统不支持直接打开文件夹，请手动前往下载目录"}), 501
     except Exception as e:
         log.warning(f"API打开目录失败 job_id={job_id} path={output_path} error={e}")
         return jsonify({"status": "error", "message": "打开文件夹失败"}), 500

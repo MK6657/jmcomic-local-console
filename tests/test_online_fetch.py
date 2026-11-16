@@ -181,7 +181,8 @@ def env(client, tmp_path, monkeypatch):
                             created=created, closed=closed)
     yield state
     online_reader.clear_cache()
-    assert wait_until(lambda: not online_reader._prefetch_active and online_reader._prefetch_threads == 0)
+    assert wait_until(lambda: not online_reader._prefetch_active
+                      and not any(thread.is_alive() for thread in online_reader._prefetch_threads))
     assert wait_until(lambda: not online_reader._photo_lookups)
 
 

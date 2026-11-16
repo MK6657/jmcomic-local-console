@@ -16,7 +16,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_PATTERNS = ("app.py", "desktop.py", "launcher.py", "jmcomic_cli.py", "core/*.py", "routes/*.py",
                    "templates/**/*.html", "static/**/*", "requirements*.txt", "build.spec", "tools/*.py",
-                   "docs/WINDOWS_RELEASE.md", "LICENSE", "THIRD_PARTY_NOTICES.md")
+                   "docs/WINDOWS_RELEASE.md", "docs/BACKEND_REVIEW.md", "docs/DATA_MAINTENANCE.md",
+                   "LICENSE", "THIRD_PARTY_NOTICES.md")
 
 
 def source_fingerprint(root=ROOT):
@@ -101,6 +102,8 @@ def build(output=None):
     (bundle / "SELF_CHECK.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     (bundle / "LIFECYCLE_CHECK.json").write_text(json.dumps(lifecycle, indent=2) + "\n", encoding="utf-8")
     shutil.copyfile(ROOT / "docs" / "WINDOWS_RELEASE.md", bundle / "README-Windows.md")
+    for name in ("BACKEND_REVIEW.md", "DATA_MAINTENANCE.md"):
+        shutil.copyfile(ROOT / "docs" / name, bundle / name)
     for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
         if (ROOT / name).is_file():
             shutil.copyfile(ROOT / name, bundle / name)

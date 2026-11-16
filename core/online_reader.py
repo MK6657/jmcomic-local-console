@@ -32,6 +32,7 @@ import time
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -68,6 +69,142 @@ _PAGE_NAME = re.compile(r"\d{5,}\.webp")
 _TEMP_MARK = ".tmp-"
 _clock = time.monotonic      # 测试替换为假时钟
 
+# Import/create_app remain lazy-compatible. Once stopping begins only an
+# explicit start after complete draining may reopen admission.
+_lifecycle_cond = threading.Condition(threading.RLock())
+_stop_event = threading.Event()
+_active_operations = 0
+_lookup_callbacks = 0
+_lifecycle_generation = 0
+_failed_clients = {}         # id -> client; a failed close retains ownership
+_client_closers = {}         # actual Thread -> client, reaped only after exit
+
+
+def _require_running():
+    if _stop_event.is_set():
+        raise TimeoutError("在线阅读服务正在停止")
+
+
+@contextmanager
+def _operation():
+    global _active_operations
+    with _lifecycle_cond:
+        _require_running()
+        _active_operations += 1
+    try:
+        yield
+    finally:
+        with _lifecycle_cond:
+            _active_operations -= 1
+            _lifecycle_cond.notify_all()
+
+
+def _tracked(fn):
+    @wraps(fn)
+    def tracked(*args, **kwargs):
+        with _operation():
+            return fn(*args, **kwargs)
+    return tracked
+
+
+def _reap_threads_locked():
+    _prefetch_threads.difference_update(thread for thread in list(_prefetch_threads) if not thread.is_alive())
+    for thread in list(_client_closers):
+        if not thread.is_alive():
+            del _client_closers[thread]
+
+
+def start():
+    """Open reader admission, refusing to overlap an incompletely stopped run."""
+    global _lifecycle_generation
+    with _lifecycle_cond:
+        if not _stop_event.is_set():
+            return
+        _reap_threads_locked()
+        if (_active_operations or _lookup_callbacks or _prefetch_threads or _client_closers
+                or _failed_clients or _idle_clients):
+            raise RuntimeError("在线阅读仍有在途操作或未关闭连接")
+        _lifecycle_generation += 1
+        _stop_event.clear()
+
+
+def request_stop():
+    """Stop admission and wake waiters without closing any in-use transport."""
+    with _lifecycle_cond:
+        _stop_event.set()
+        _prefetch_queue.clear()
+        _lifecycle_cond.notify_all()
+
+
+def _close_reader_client(client):
+    try:
+        closed = jm_service.close_client(client) is not False
+    except BaseException as exc:
+        closed = False
+        log.warning(f"在线阅读 关闭连接失败 error_type={type(exc).__name__}")
+    with _lifecycle_cond:
+        if closed:
+            _failed_clients.pop(id(client), None)
+        else:
+            _failed_clients[id(client)] = client
+        _lifecycle_cond.notify_all()
+    return closed
+
+
+def stop(timeout=5) -> bool:
+    """Drain actual reader owners within one budget; failures remain retryable."""
+    request_stop()
+    deadline = time.monotonic() + max(0.0, timeout)
+    attempted = set()
+    with _lifecycle_cond:
+        while True:
+            _reap_threads_locked()
+            candidates = [client for _, client in _idle_clients]
+            _idle_clients.clear()
+            candidates.extend(_failed_clients.values())
+            closing = {id(client) for client in _client_closers.values()}
+            for client in candidates:
+                identity = id(client)
+                if identity in attempted or identity in closing:
+                    continue
+                attempted.add(identity)
+                thread = threading.Thread(target=_close_reader_client, args=(client,),
+                                          name="online-client-close", daemon=True)
+                _client_closers[thread] = client
+                try:
+                    thread.start()
+                except BaseException:
+                    # A wrapper can raise after the OS thread really started.
+                    # Keep its owner until actual exit; otherwise retain the
+                    # unclosed client so a later stop can try again.
+                    if not thread.is_alive():
+                        del _client_closers[thread]
+                        _failed_clients[identity] = client
+                    raise
+            active = _active_operations or _lookup_callbacks or _prefetch_threads or _client_closers
+            if not active:
+                return not _failed_clients
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            # A worker notifies before its Thread has quite returned; polling
+            # also reaps that final interval without forgetting its ownership.
+            _lifecycle_cond.wait(min(remaining, 0.05))
+
+
+def _acquire(lock, timeout):
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        _require_running()
+        remaining = max(0.0, deadline - time.monotonic())
+        if lock.acquire(timeout=min(remaining, 0.05)):
+            if _stop_event.is_set():
+                lock.release()
+                _require_running()
+            return True
+        if remaining <= 0:
+            return False
+
 _photos = OrderedDict()      # photo_id -> JmPhotoDetail，最近用过的在后
 _photos_lock = threading.Lock()
 _photo_lookups = {}          # photo_id -> _Lookup：正在向上游查的章节
@@ -92,9 +229,11 @@ def _remember_locked(photo_id: str, photo) -> None:
 
 
 def _remember_photos(photos) -> None:
-    with _photos_lock:
-        for photo in photos:
-            _remember_locked(str(photo.photo_id), photo)
+    with _lifecycle_cond:
+        _require_running()
+        with _photos_lock:
+            for photo in photos:
+                _remember_locked(str(photo.photo_id), photo)
 
 
 def _cached_photo(photo_id: str):
@@ -115,8 +254,11 @@ class _Lookup:
         self.photo = None
         self.error = None
         self.late_logged = False
+        self.generation = _lifecycle_generation
+        self.owns_callback = False
 
 
+@_tracked
 def _get_photo(photo_id: str, deadline: float):
     """章节图片列表：优先用内存里的；没有时向上游查，同一章节同时只查一次。最多等到 deadline，等不到或查询失败抛
     TimeoutError；等不到时查询在后台继续，之后的请求接着等它，不会再发起一次。"""
@@ -140,7 +282,15 @@ def _get_photo(photo_id: str, deadline: float):
         log.warning(f"在线阅读 获取章节 photo_id={photo_id} 超过 {int(_LOOKUP_MAX_AGE)} 秒仍未完成，重新获取")
     if start:
         _start_lookup(photo_id, lookup)
-    if not lookup.done.wait(max(0.0, deadline - _clock())):
+    wait_until = time.monotonic() + max(0.0, deadline - _clock())
+    while not lookup.done.is_set():
+        _require_running()
+        remaining = min(deadline - _clock(), wait_until - time.monotonic())
+        if remaining <= 0:
+            break
+        lookup.done.wait(min(remaining, 0.05))
+    _require_running()
+    if not lookup.done.is_set():
         with _photos_lock:
             first, lookup.late_logged = not lookup.late_logged, True
         if first:
@@ -154,6 +304,13 @@ def _get_photo(photo_id: str, deadline: float):
 def _start_lookup(photo_id: str, lookup: _Lookup) -> None:
     """在单独的线程里查章节，和 jm_service._call_with_timeout 一样把共享 client 借到查询真正结束为止；
     结果由 _finish_lookup 记下并通知所有等待的请求。"""
+    global _lookup_callbacks
+    with _lifecycle_cond:
+        if _stop_event.is_set():
+            _finish_lookup(photo_id, lookup, None, TimeoutError(_FAILED))
+            return
+        lookup.owns_callback = True
+        _lookup_callbacks += 1
     log.info(f"在线阅读 获取章节 photo_id={photo_id}")
     try:
         client, _ = jm_service.get_client()
@@ -179,24 +336,35 @@ def _outcome(future):
 
 
 def _finish_lookup(photo_id: str, lookup: _Lookup, photo, error) -> None:
-    if error is None and photo is None:
-        error = ValueError("上游没有返回章节")
-    if error is not None:
-        # 先记日志再通知等待的请求：请求返回 504 时原因已经在日志里；一次查询只记这一条
-        log.warning(f"在线阅读 获取章节 photo_id={photo_id} 超时或失败 error={type(error).__name__}: {error}")
-    with _photos_lock:
-        if error is None:
-            _photo_failed_at.pop(photo_id, None)
-            if getattr(photo, "page_arr", None):
-                _remember_locked(photo_id, photo)  # 没有页的章节不记，下次再查
-        else:
-            _photo_failed_at[photo_id] = _clock()
-        if _photo_lookups.get(photo_id) is lookup:
-            del _photo_lookups[photo_id]
-        lookup.photo, lookup.error = photo, error
-    lookup.done.set()
+    global _lookup_callbacks
+    try:
+        if error is None and photo is None:
+            error = ValueError("上游没有返回章节")
+        if error is not None:
+            log.warning(f"在线阅读 获取章节 photo_id={photo_id} 超时或失败 error={type(error).__name__}: {error}")
+        with _lifecycle_cond:
+            publish = not _stop_event.is_set() and lookup.generation == _lifecycle_generation
+            with _photos_lock:
+                if publish:
+                    if error is None:
+                        _photo_failed_at.pop(photo_id, None)
+                        if getattr(photo, "page_arr", None):
+                            _remember_locked(photo_id, photo)
+                    else:
+                        _photo_failed_at[photo_id] = _clock()
+                if _photo_lookups.get(photo_id) is lookup:
+                    del _photo_lookups[photo_id]
+                lookup.photo, lookup.error = photo, error
+    finally:
+        lookup.done.set()
+        with _lifecycle_cond:
+            if lookup.owns_callback:
+                lookup.owns_callback = False
+                _lookup_callbacks -= 1
+            _lifecycle_cond.notify_all()
 
 
+@_tracked
 def album_pages(album_id: str) -> dict:
     """整本漫画的在线页列表，结构与本地 /api/preview/<id> 一致，另附 photo_id 便于按章节定位。"""
     log.info(f"在线阅读 获取页面列表 album_id={album_id}")
@@ -206,6 +374,7 @@ def album_pages(album_id: str) -> dict:
             f"在线阅读 获取专辑 album_id={album_id}", 20, _FAILED,
             client.get_album_detail, album_id,
         )
+        _require_running()
         failed = []
         photos = jm_service.check_album_photos(client, album, failed=failed)
     finally:
@@ -247,7 +416,7 @@ def _page_lock(key, wait: float = 0.0):
         entry[1] += 1
     acquired = False
     try:
-        acquired = entry[0].acquire(True, wait) if wait > 0 else entry[0].acquire(False)
+        acquired = _acquire(entry[0], wait) if wait > 0 else entry[0].acquire(False)
         yield acquired
     finally:
         if acquired:
@@ -267,6 +436,7 @@ def _page_budget() -> float:
     return max(_PAGE_BUDGET, setting)
 
 
+@_tracked
 def image_file(photo_id: str, index: int) -> Path:
     """返回单页图片的缓存路径；未缓存时从上游取。索引越界抛 IndexError，上游失败或到了每页时限抛 TimeoutError。
     时限从这里算起：等同一页的预取、等取图名额、查章节列表都算在内，不会等完再重新计时。
@@ -285,12 +455,14 @@ def image_file(photo_id: str, index: int) -> Path:
             photo = _get_photo(photo_id, deadline)
             if index >= len(photo.page_arr or ()):
                 raise IndexError(f"photo {photo_id} has no page {index + 1}")
-            _fetch_page(photo, index, target, deadline)
+            if not _fetch_page(photo, index, target, deadline):
+                raise TimeoutError(_FAILED)
     _schedule_prefetch(photo_id, index)
     _trim_cache()
     return target
 
 
+@_tracked
 def _fetch_page(photo, index: int, target: Path, deadline: float, epoch=None, background=False) -> bool:
     """取一页、按需解扰、写入缓存，到 deadline 为止。上游失败或结果不是有效图片抛 TimeoutError。
     epoch 不为 None 时（预取），clear_cache() 之后不再写入，返回 False。"""
@@ -300,13 +472,14 @@ def _fetch_page(photo, index: int, target: Path, deadline: float, epoch=None, ba
     if background:
         data = _download(url, photo_id, index + 1, deadline, background=True)
     else:
-        if not _fetch_slots.acquire(timeout=max(0.0, deadline - _clock())):
+        if not _acquire(_fetch_slots, max(0.0, deadline - _clock())):
             log.warning(f"在线阅读 取图失败 photo_id={photo_id} page={index + 1} error=等待取图名额超时")
             raise TimeoutError(_FAILED)
         try:
             data = _download(url, photo_id, index + 1, deadline)
         finally:
             _fetch_slots.release()
+    _require_running()
     try:
         content = _page_content(image, url, data)
     except Exception as e:
@@ -385,36 +558,51 @@ def _require_image(data: bytes) -> None:
 
 # ── 取图：连接池 + 换域名 ────────────────────────────────
 
-_pool_lock = threading.Lock()
+_pool_lock = _lifecycle_cond
 _idle_clients = []           # [(设置版本, client)]，后进先出：最近用过的连接最热
 _pool_epoch = 0              # clear_cache() 加 1：之前借出的 client 归还时直接关闭
 
 
 @contextmanager
 def _pooled_client():
+    with _operation():
+        with _borrowed_client() as client:
+            yield client
+
+
+@contextmanager
+def _borrowed_client():
     """借一个取图 client，独占到用完为止；设置变化后旧 client 不再复用。"""
     global _idle_clients
     generation = jm_service.option_generation()
     with _pool_lock:
+        _require_running()
         epoch = _pool_epoch
         stale = [client for gen, client in _idle_clients if gen != generation]
         _idle_clients = [(gen, client) for gen, client in _idle_clients if gen == generation]
         client = _idle_clients.pop()[1] if _idle_clients else None
     for old in stale:
-        jm_service.close_client(old)
-    if client is None:
+        _close_reader_client(old)
+    created = client is None
+    if created:
+        _require_running()
         client = jm_service.new_image_client()
-        _limit_stalls(client)
+    usable = False
     try:
+        _require_running()
+        if created:
+            _limit_stalls(client)
+        usable = True
         yield client
     finally:
         with _pool_lock:
-            keep = (epoch == _pool_epoch and generation == jm_service.option_generation()
+            keep = (usable and not _stop_event.is_set() and epoch == _pool_epoch
+                    and generation == jm_service.option_generation()
                     and len(_idle_clients) < _POOL_SIZE)
             if keep:
                 _idle_clients.append((generation, client))
         if not keep:
-            jm_service.close_client(client)
+            _close_reader_client(client)
 
 
 def _limit_stalls(client) -> None:
@@ -517,15 +705,18 @@ def _download(url: str, photo_id: str, page: int, deadline: float, background: b
     label = "在线阅读 预取" if background else "在线阅读"
     with _pooled_client() as client:
         for host in _host_order(own):
+            _require_running()
             host_url = url if host == own else urlunsplit(parts._replace(netloc=host))
             error = None
             while deadline - _clock() >= _MIN_ATTEMPT:
+                _require_running()
                 total = deadline - _clock()
                 connect = min(_CONNECT_TIMEOUT, total)
                 started = _clock()
                 try:
                     data = _request(client, host_url, (connect, total - connect))
                 except Exception as e:
+                    _require_running()
                     error = e
                     status = getattr(e, "status", None)
                     quick = _clock() - started < _QUICK_FAILURE
@@ -533,6 +724,7 @@ def _download(url: str, photo_id: str, page: int, deadline: float, background: b
                         quick_retry = False
                         continue
                     break
+                _require_running()
                 _host_result(host, True)
                 for failed in server_errors:  # 这一页是存在的，它们回的 5xx 是它们自己的问题
                     _host_result(failed, False)
@@ -567,10 +759,10 @@ def _describe(error) -> str:
 
 # ── 预取 ──────────────────────────────────────────────
 
-_prefetch_cond = threading.Condition()
+_prefetch_cond = _lifecycle_cond
 _prefetch_queue = deque()    # ((photo_id, index), epoch)，队首先取
 _prefetch_active = set()
-_prefetch_threads = 0
+_prefetch_threads = set()    # Actual owners; only reap a Thread after it exits.
 
 
 def _schedule_prefetch(photo_id: str, index: int) -> None:
@@ -584,8 +776,10 @@ def _schedule_prefetch(photo_id: str, index: int) -> None:
     keys = [key for key in keys if not _page_path(*key).is_file()]
     if not keys:
         return
-    global _prefetch_threads
     with _prefetch_cond:
+        if _stop_event.is_set():
+            return
+        _reap_threads_locked()
         epoch = _cache_epoch
         keys = [key for key in keys if key not in _prefetch_active]
         if not keys:
@@ -596,40 +790,51 @@ def _schedule_prefetch(photo_id: str, index: int) -> None:
         _prefetch_queue.extend([(key, epoch) for key in keys] + rest)
         while len(_prefetch_queue) > _PREFETCH_QUEUE:
             _prefetch_queue.pop()
-        while _prefetch_threads < _PREFETCH_WORKERS:
-            _prefetch_threads += 1
-            threading.Thread(target=_prefetch_worker, name="online-prefetch", daemon=True).start()
+        while len(_prefetch_threads) < _PREFETCH_WORKERS:
+            thread = threading.Thread(target=_prefetch_worker, name="online-prefetch", daemon=True)
+            _prefetch_threads.add(thread)
+            try:
+                thread.start()
+            except BaseException:
+                if not thread.is_alive():
+                    _prefetch_threads.discard(thread)
+                raise
         _prefetch_cond.notify(len(keys))
 
 
 def _prefetch_worker() -> None:
-    global _prefetch_threads
-    while True:
-        with _prefetch_cond:
-            idle_until = time.monotonic() + _PREFETCH_IDLE
-            while not _prefetch_queue:
-                remaining = idle_until - time.monotonic()
-                if remaining <= 0:
-                    _prefetch_threads -= 1
-                    return
-                _prefetch_cond.wait(remaining)
-            key, epoch = _prefetch_queue.popleft()
-            _prefetch_active.add(key)
-        try:
-            _prefetch(key, epoch)
-        except TimeoutError:
-            pass  # _download 已记录原因
-        except Exception as e:
-            log.info(f"在线阅读 预取失败 photo_id={key[0]} page={key[1] + 1} error={type(e).__name__}: {e}")
-        finally:
+    try:
+        while True:
             with _prefetch_cond:
-                _prefetch_active.discard(key)
+                idle_until = time.monotonic() + _PREFETCH_IDLE
+                while not _prefetch_queue and not _stop_event.is_set():
+                    remaining = idle_until - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    _prefetch_cond.wait(remaining)
+                if _stop_event.is_set():
+                    return
+                key, epoch = _prefetch_queue.popleft()
+                _prefetch_active.add(key)
+            try:
+                _prefetch(key, epoch)
+            except TimeoutError:
+                pass  # _download 已记录原因
+            except Exception as e:
+                log.info(f"在线阅读 预取失败 photo_id={key[0]} page={key[1] + 1} error={type(e).__name__}: {e}")
+            finally:
+                with _prefetch_cond:
+                    _prefetch_active.discard(key)
+                    _prefetch_cond.notify_all()
+    finally:
+        with _prefetch_cond:
+            _prefetch_cond.notify_all()
 
 
 def _prefetch(key, epoch: int) -> None:
     photo_id, index = key
     target = _page_path(photo_id, index)
-    if epoch != _cache_epoch or target.is_file():
+    if _stop_event.is_set() or epoch != _cache_epoch or target.is_file():
         return
     photo = _cached_photo(photo_id)
     if photo is None or index >= len(photo.page_arr or ()):
@@ -647,10 +852,11 @@ def _prefetch(key, epoch: int) -> None:
 
 # ── 缓存 ──────────────────────────────────────────────
 
+@_tracked
 def _store(target: Path, content: bytes, epoch=None) -> bool:
     """先写临时文件再改名，缓存里不会出现半张图；epoch 已过期（clear_cache 之后）则不写。"""
     with _store_lock:
-        if epoch is not None and epoch != _cache_epoch:
+        if _stop_event.is_set() or (epoch is not None and epoch != _cache_epoch):
             return False
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix=target.stem + _TEMP_MARK, suffix=target.suffix, dir=target.parent)
@@ -658,13 +864,15 @@ def _store(target: Path, content: bytes, epoch=None) -> bool:
         try:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(content)
-            os.replace(tmp, target)
-        except BaseException:
+            with _lifecycle_cond:
+                if _stop_event.is_set() or (epoch is not None and epoch != _cache_epoch):
+                    return False
+                os.replace(tmp, target)
+        finally:
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass  # Windows 上被占用的临时文件由 _trim_cache 过期清理
-            raise
     return True
 
 
@@ -675,6 +883,7 @@ def image_mime(path: Path) -> str:
     return _sniff(head) or "application/octet-stream"
 
 
+@_tracked
 def clear_cache() -> None:
     """删除缓存的页面，并停止预取、关闭取图连接、忘掉域名失败记录（设置页“清除缓存”）。"""
     global _cache_epoch, _pool_epoch, _idle_clients, _last_good_host
@@ -691,7 +900,7 @@ def clear_cache() -> None:
         _pool_epoch += 1
         idle, _idle_clients = [client for _, client in _idle_clients], []
     for client in idle:
-        jm_service.close_client(client)
+        _close_reader_client(client)
     with _hosts_lock:
         _host_failed_at.clear()
         _last_good_host = None
@@ -712,6 +921,8 @@ def _is_cached_page(path: Path) -> bool:
 
 def _trim_cache(force: bool = False) -> None:
     global _last_trim
+    if _stop_event.is_set():
+        return
     now = time.monotonic()
     if not force and now - _last_trim < _TRIM_INTERVAL:
         return

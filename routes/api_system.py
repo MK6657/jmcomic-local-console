@@ -15,6 +15,7 @@ from core.logger import log, LOG_DIR, MAX_TOTAL_SIZE_MB, MAX_LOG_AGE_DAYS
 from core.validation import validate_numeric
 from core.jm_service import get_active_client_count, invalidate_option_cache, clear_album_detail_cache
 from core import online_reader
+from core import desktop_platform
 from core.settings import build_jmcomic_option
 from urllib.parse import urlparse
 import re as _re
@@ -571,15 +572,16 @@ def flush_logs():
 @api_system_bp.post("/api/system/logs/open-folder")
 def open_log_folder():
     """在资源管理器中打开日志目录（仅 Windows）。"""
-    startfile = getattr(os, "startfile", None)
-    if startfile is None:
+    if not desktop_platform.supports_open_folder():
         return jsonify({"status": "error", "message": "当前系统不支持直接打开文件夹，请手动前往日志目录"}), 501
     log_dir = _log_dir()
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        startfile(str(log_dir))
+        desktop_platform.open_folder(log_dir)
         log.info("API打开日志文件夹")
         return jsonify({"status": "ok", "message": "已打开日志文件夹"})
+    except desktop_platform.UnsupportedDesktopOperation:
+        return jsonify({"status": "error", "message": "当前系统不支持直接打开文件夹，请手动前往日志目录"}), 501
     except Exception as e:
         log.warning(f"API打开日志文件夹失败 error={e}")
         return jsonify({"status": "error", "message": "打开日志文件夹失败"}), 500

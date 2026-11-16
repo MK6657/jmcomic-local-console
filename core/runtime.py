@@ -10,12 +10,14 @@ import time
 
 
 class ApplicationRuntime:
-    def __init__(self, job_manager, scheduler, update_checker, *, logger=None, shutdown_timeout=10):
+    def __init__(self, job_manager, scheduler, update_checker, *, logger=None, shutdown_timeout=10,
+                 additional_services=()):
         self.job_manager = job_manager
         self.scheduler = scheduler
         self.update_checker = update_checker
         self.logger = logger
         self.shutdown_timeout = shutdown_timeout
+        self.additional_services = tuple(additional_services)
         self._services = []
         self._lock = threading.RLock()
         self._stop_requested = threading.Event()
@@ -35,8 +37,9 @@ class ApplicationRuntime:
                 recovered = self.job_manager.recover_interrupted()
                 if recovered and self.logger:
                     self.logger.info(f"已恢复 {recovered} 个中断的下载任务，暂停任务保持暂停")
-                for name, service in (("jobs", self.job_manager), ("scheduler", self.scheduler),
-                                      ("updates", self.update_checker)):
+                components = (*self.additional_services, ("jobs", self.job_manager),
+                              ("scheduler", self.scheduler), ("updates", self.update_checker))
+                for name, service in components:
                     self._check_start_allowed()
                     # A start() that raises may already own a thread; include it
                     # in rollback before invoking it, not only on success.
@@ -51,6 +54,15 @@ class ApplicationRuntime:
     def _check_start_allowed(self):
         if self._stop_requested.is_set():
             raise RuntimeError("后台运行时启动已被停机请求中止")
+
+    def _close_admission(self, errors):
+        # Producers can be waiting on shared request work. Close every admission
+        # gate before draining any service, without holding a service's lock.
+        for name, service in (*reversed(self.additional_services), ("jobs", self.job_manager)):
+            try:
+                service.request_stop()
+            except Exception as exc:
+                errors.append(f"{name}.request_stop: {type(exc).__name__}")
 
     def stop(self, timeout=None) -> bool:
         """Request no more downloads, then stop producers and drain jobs in one budget.
@@ -69,19 +81,13 @@ class ApplicationRuntime:
             # lifecycle call currently owns the lock. During startup the separate
             # event instead prevents start() from reviving admission afterwards.
             requested = True
-            try:
-                self.job_manager.request_stop()
-            except Exception as exc:
-                errors.append(f"jobs.request_stop: {type(exc).__name__}")
+            self._close_admission(errors)
         if not self._lock.acquire(timeout=max(0, deadline - time.monotonic())):
             self.stop_errors = tuple(errors + ["runtime: lifecycle lock timeout"])
             return False
         try:
             if self._services and not requested:
-                try:
-                    self.job_manager.request_stop()
-                except Exception as exc:
-                    errors.append(f"jobs.request_stop: {type(exc).__name__}")
+                self._close_admission(errors)
             remaining = []
             for name, service in reversed(self._services):
                 try:

@@ -183,6 +183,9 @@ from core.runtime import ApplicationRuntime
 from core.http_server import ManagedHTTPServer
 from core.process_control import create_shutdown_control, SHUTDOWN_PROTOCOL
 from core.progress import progress_manager
+from core import background_calls, online_reader
+
+background_services = (("requests", background_calls), ("reader", online_reader))
 
 # ── jmcomic 库全局优化（必须在任何 client 创建前设置）──
 from core.sdk_adapter import configure_sdk
@@ -257,6 +260,11 @@ def create_app() -> Flask:
         from urllib.parse import urlsplit
         set_request_id()
         request._request_start_time = _time.time()
+        if app.config.get("SHUTTING_DOWN"):
+            response = jsonify(status="error", message="服务正在关闭，请稍后重试")
+            response.status_code = 503
+            response.headers["Retry-After"] = "1"
+            return response
         # Loopback binding alone does not prevent browser-origin attacks/DNS rebinding.
         try:
             host = urlsplit("http://" + request.host).hostname
@@ -371,7 +379,9 @@ def main():
     import signal
     global _shutdown_control
     install_process_hooks()
-    runtime = ApplicationRuntime(job_manager, scheduler, update_checker, logger=log)
+    runtime = ApplicationRuntime(job_manager, scheduler, update_checker, logger=log,
+                                 additional_services=background_services)
+    application = None
     sock = None
     http = None
     acquired = False
@@ -419,6 +429,9 @@ def main():
         pass
     finally:
         closing = True
+        shutdown_deadline = time.monotonic() + runtime.shutdown_timeout + 3
+        if application is not None:
+            getattr(application, "config", {})["SHUTTING_DOWN"] = True
         control_stopped = True
         if _shutdown_control is not None:
             try:
@@ -431,19 +444,36 @@ def main():
                 log.error("停机控制线程未排空或关闭失败，保留实例所有权")
         drained = False
         try:
-            safe = runtime.stop()
+            safe = runtime.stop(timeout=min(runtime.shutdown_timeout,
+                                            max(0, shutdown_deadline - time.monotonic())))
             safe = safe and control_stopped
         except Exception as exc:
             safe = False
             log.error(f"后台运行时关闭失败: {type(exc).__name__}")
         finally:
+            http_drained = True
             if http is not None:
                 try:
                     progress_manager.close_all()
-                    safe = http.stop() and safe
+                    http_drained = http.stop(timeout=min(3, max(0, shutdown_deadline - time.monotonic())))
+                except Exception as exc:
+                    http_drained = False
+                    log.error(f"HTTP服务未排空: {type(exc).__name__}")
+            if not safe and control_stopped:
+                try:
+                    safe = runtime.stop(timeout=max(0, shutdown_deadline - time.monotonic()))
+                except Exception:
+                    safe = False
+            # HTTP finally blocks can return the last lease after Runtime's
+            # first drain. Confirm any late connection cleanup in the same
+            # overall budget, including failures registered by that release.
+            for name, service in reversed(background_services):
+                try:
+                    safe = service.stop(timeout=max(0, shutdown_deadline - time.monotonic())) and safe
                 except Exception as exc:
                     safe = False
-                    log.error(f"HTTP服务未排空: {type(exc).__name__}")
+                    log.error(f"HTTP排空后的连接清理失败 component={name} error_type={type(exc).__name__}")
+            safe = safe and http_drained
             drained = safe
             if sock is not None:
                 try:
@@ -453,10 +483,8 @@ def main():
                     log.error(f"监听端口关闭失败: {type(exc).__name__}")
             if acquired and drained:
                 try:
-                    # Shared metadata futures can outlive their HTTP request,
-                    # and online prefetch is not yet part of Runtime. Even after
-                    # the owned services drain, retain the OS mutex until this
-                    # process really exits so maintenance cannot overlap them.
+                    # Retain the OS lease until the process really exits, even
+                    # after all owned services and HTTP workers report drained.
                     _release_lock(keep_process_lock=True)
                 except Exception as exc:
                     safe = False
