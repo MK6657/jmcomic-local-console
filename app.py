@@ -1,5 +1,4 @@
 """Flask 应用入口 - 含 PID 单实例锁 + 防僵尸端口"""
-import ctypes
 import json
 import os
 import socket
@@ -12,7 +11,8 @@ _MUTEX_NAME = "Local\\JMComicDownloader_AppInstance"
 
 # 确保项目根目录在 sys.path 中
 # 打包后：sys._MEIPASS，开发时：项目根目录
-from core.path_utils import get_resource_root, get_app_root, ensure_dirs
+from core.path_utils import get_resource_root, get_data_dir, get_download_root, ensure_dirs
+from core.instance_lock import acquire_instance_lock, InstanceBusyError
 _root = get_resource_root()
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
@@ -30,8 +30,8 @@ except Exception:
     _CODE_FINGERPRINT = ""  # 缺失时 launcher 回退为比较修改时间
 
 # ── PID 锁文件：防止多实例冲突 ──────────────────────────────────
-_PID_FILE = get_app_root() / "runtime" / "data" / "flask.pid"
-_PORT_FILE = get_app_root() / "runtime" / "data" / "flask.json"
+_PID_FILE = get_data_dir() / "flask.pid"
+_PORT_FILE = get_data_dir() / "flask.json"
 _DEFAULT_PORT = 5000
 _FALLBACK_PORTS = [5001, 5002, 5003]
 
@@ -42,22 +42,18 @@ _mutex_handle = None
 def _acquire_lock():
     """A live named mutex cannot be stale; protect startup before any port is bound."""
     global _mutex_handle
-    from ctypes import wintypes
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
-    kernel32.CreateMutexW.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    mutex = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
-    error = ctypes.get_last_error()
-    if not mutex:
-        raise ctypes.WinError(error)
-    if error == 183:
-        kernel32.CloseHandle(mutex)
+    try:
+        mutex = acquire_instance_lock(_MUTEX_NAME)
+    except InstanceBusyError:
         raise SystemExit("Another JMComic instance is already running or starting.")
     _mutex_handle = mutex
-    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _PID_FILE.write_text(str(os.getpid()))
+    try:
+        _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PID_FILE.write_text(str(os.getpid()))
+    except BaseException:
+        mutex.close()
+        _mutex_handle = None
+        raise
     return mutex
 
 
@@ -164,7 +160,7 @@ def _release_lock():
     except Exception:
         pass
     if _mutex_handle is not None:
-        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(_mutex_handle))
+        _mutex_handle.close()
         _mutex_handle = None
 
 from flask import Flask
@@ -405,7 +401,7 @@ def main():
         start_log_maintenance()
         log.info(
             f"启动配置 PORT={actual_port} PID={os.getpid()} "
-            f"DOWNLOAD_ROOT={db.get_setting('download_root', 'downloads/')} "
+            f"DOWNLOAD_ROOT={get_download_root()} "
             f"MAX_LOG_AGE={MAX_LOG_AGE_DAYS}d MAX_LOG_SIZE={MAX_TOTAL_SIZE_MB}MB"
         )
         runtime.start()

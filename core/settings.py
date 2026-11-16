@@ -54,6 +54,8 @@ def get_settings() -> dict:
         stored = db.get_all_settings()
         merged = dict(DEFAULT_SETTINGS)
         merged.update(stored)
+        # A legacy database/import cannot relocate the process's storage roots.
+        merged["download_root"] = str(DOWNLOAD_ROOT)
         _settings_cache = merged
         _settings_cache_time = now
         return dict(merged)
@@ -68,6 +70,8 @@ def invalidate_settings_cache():
 
 def get_setting(key: str) -> str:
     """获取单个设置"""
+    if key == "download_root":
+        return str(DOWNLOAD_ROOT)
     return db.get_setting(key, DEFAULT_SETTINGS.get(key, ""))
 
 

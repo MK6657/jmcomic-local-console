@@ -4,17 +4,39 @@ SQLite 数据库操作模块
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
 
-from .path_utils import get_app_root
+from .path_utils import get_data_dir, get_backup_dir, get_download_root
+from .instance_lock import maintenance_lock
 
 # 资源库最大条目安全上限（防止全表扫描 OOM）
 _LIBRARY_MAX_ITEMS = 10000
 
-DB_DIR = get_app_root() / "runtime" / "data"
+CURRENT_SCHEMA_VERSION = 3
+DB_DIR = get_data_dir()
 DB_PATH = DB_DIR / "app.db"
+_initialization_lock = threading.RLock()
+
+
+def _migration_lock():
+    """Share startup ownership, or exclude an older running app before migration."""
+    return maintenance_lock()
+
+
+def _existing_schema() -> int | None:
+    if not DB_PATH.exists() or DB_PATH.stat().st_size == 0:
+        return None
+    source = sqlite3.connect(DB_PATH.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        version = source.execute("PRAGMA user_version").fetchone()[0]
+        if version > CURRENT_SCHEMA_VERSION:
+            raise RuntimeError("数据库版本高于当前程序，已停止初始化，请使用匹配版本")
+        return version
+    finally:
+        source.close()
 
 
 def get_db() -> sqlite3.Connection:
@@ -46,7 +68,29 @@ def transaction():
 
 
 def init_db():
-    """初始化数据库表"""
+    """Initialize or migrate only after preserving the original database snapshot."""
+    with _initialization_lock:
+        version = _existing_schema()
+        if version is not None and version < CURRENT_SCHEMA_VERSION:
+            with _migration_lock():
+                # Another initializer may have finished while ownership was acquired.
+                version = _existing_schema()
+                if version is not None and version < CURRENT_SCHEMA_VERSION:
+                    from .backup import create_backup
+                    destination = get_backup_dir() / (
+                        f"pre-migration-v{version}-to-v{CURRENT_SCHEMA_VERSION}-"
+                        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.zip")
+                    # Before get_db(), WAL configuration, tables, indexes or any DDL.
+                    # A migration snapshot is DB-only: never traverse a large library
+                    # or imply that it contains resources. Backup failure aborts startup.
+                    create_backup(DB_PATH, None, destination, timeout=30,
+                                  source_download_root=get_download_root())
+                _initialize_db()
+        else:
+            _initialize_db()
+
+
+def _initialize_db():
     conn = get_db()
     try:
         cursor = conn.cursor()

@@ -10,9 +10,53 @@ JMComic 命令行工具
 """
 
 import argparse
+from datetime import datetime
+from pathlib import Path
+import uuid
 from jmcomic import JmMagicConstants
 from core import database as db, sdk_adapter
 from core.jm_service import close_client
+
+
+def cmd_backup(args):
+    """Offline maintenance never initializes or migrates the source database."""
+    from core.backup import create_backup
+    from core.instance_lock import maintenance_lock
+    from core.path_utils import get_backup_dir, get_download_root
+    destination = Path(args.output) if args.output else get_backup_dir() / (
+        f"backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.zip")
+    with maintenance_lock():
+        result = create_backup(db.DB_PATH, get_download_root(), destination,
+                               include_downloads=args.include_downloads,
+                               service_stopped=True, timeout=args.timeout)
+    resources = result.manifest["resources"]
+    print(f"备份已验证并保存：{result.path}")
+    print("包含资源文件" if resources["included"] else "仅数据库与资源清单，不含资源文件")
+    print(f"数据库版本：{result.manifest['schema_version']}；资源文件数：{len(resources['files'])}")
+    return 0
+
+
+def cmd_backup_info(args):
+    from core.backup import inspect_backup
+    result = inspect_backup(Path(args.archive), timeout=args.timeout)
+    resources = result.manifest["resources"]
+    print(f"备份校验通过；数据库版本：{result.manifest['schema_version']}")
+    print(f"包含资源文件：{resources['included']}；资源文件数：{len(resources['files'])}")
+    return 0
+
+
+def cmd_restore(args):
+    from core.instance_lock import maintenance_lock
+    from core.restore import restore_backup
+    with maintenance_lock():
+        result = restore_backup(Path(args.archive), Path(args.target), timeout=args.timeout)
+    print(f"已恢复到新实例：{result.target}")
+    print(f"恢复资源文件数：{result.restored_files}")
+    for warning in result.warnings:
+        print(f"提示：{warning}")
+    print("启动该实例前，请将 JMCONSOLE_HOME 设置为上述目录；不会自动移动原目录的数据。")
+    print("同时清除或更新 JMCONSOLE_DOWNLOAD_DIR、JMCONSOLE_CACHE_DIR、JMCONSOLE_BACKUP_DIR，避免继续使用旧目录。")
+    return 0
 
 
 def get_client():
@@ -175,7 +219,7 @@ def cmd_batch(args):
         close_client(client)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="JMComic 命令行工具 - 搜索/浏览/下载禁漫漫画",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -207,21 +251,50 @@ def main():
     p_batch = sub.add_parser("batch", help="批量下载")
     p_batch.add_argument("ids", help="车号列表，逗号分隔 (如 123,456,789)")
 
-    args = parser.parse_args()
+    p_backup = sub.add_parser("backup", help="停止程序后备份数据库及资源清单，可选包含资源文件")
+    p_backup.add_argument("--output", help="备份ZIP路径，默认写入配置的备份目录")
+    p_backup.add_argument("--include-downloads", action="store_true", help="备份中包含下载文件")
+    p_backup.add_argument("--timeout", type=float, default=120, help="总时间预算（秒）")
+    p_info = sub.add_parser("backup-info", help="验证备份完整性并显示摘要")
+    p_info.add_argument("archive", help="备份ZIP路径")
+    p_info.add_argument("--timeout", type=float, default=120)
+    p_restore = sub.add_parser("restore", help="验证并恢复到全新实例目录，不覆盖现有实例")
+    p_restore.add_argument("archive", help="备份ZIP路径")
+    p_restore.add_argument("--to", dest="target", required=True, help="不存在的绝对目标目录")
+    p_restore.add_argument("--timeout", type=float, default=120)
+
+    args = parser.parse_args(argv)
+
+    if args.command in {"backup", "backup-info", "restore"}:
+        from core.backup import BackupError
+        from core.restore import RestoreError
+        from core.instance_lock import InstanceBusyError
+        try:
+            return {"backup": cmd_backup, "backup-info": cmd_backup_info,
+                    "restore": cmd_restore}[args.command](args)
+        except (BackupError, RestoreError, InstanceBusyError) as error:
+            print(f"操作未完成：{error}")
+            return 1
 
     if args.command == "search":
         cmd_search(args)
     elif args.command == "info":
         cmd_info(args)
-    elif args.command == "download":
-        cmd_download(args)
+    elif args.command in {"download", "batch"}:
+        # SDK top-level downloads also write resource files, even though they do
+        # not create Web queue rows. Exclude them during maintenance/serving too.
+        from core.instance_lock import maintenance_lock, InstanceBusyError
+        try:
+            with maintenance_lock():
+                {"download": cmd_download, "batch": cmd_batch}[args.command](args)
+        except InstanceBusyError as error:
+            print(f"操作未完成：{error}")
+            return 1
     elif args.command == "browse":
         cmd_browse(args)
-    elif args.command == "batch":
-        cmd_batch(args)
     else:
         parser.print_help()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

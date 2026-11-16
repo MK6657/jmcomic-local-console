@@ -1,6 +1,8 @@
 """Offline regression fixtures. Never use the user's runtime directory."""
 import atexit
+from contextlib import nullcontext
 import logging
+import os
 import shutil
 import socket
 import sys
@@ -24,7 +26,11 @@ collect_ignore = [
 # log files, core.online_reader CACHE_ROOT, app._PID_FILE / _PORT_FILE), so whatever imports core first — a test
 # module at collection, a helper, a fixture — binds them to this temporary root, never to the real runtime/ or
 # downloads/. The session `app` fixture checks that before create_app() runs db.init_db().
-import core.path_utils as _paths  # noqa: E402  (only sys / pathlib: importing it binds nothing)
+# Ignore a developer's instance paths before the startup configuration is captured.
+# Dedicated path tests use explicit mappings or disposable child environments.
+for _name in ("JMCONSOLE_HOME", "JMCONSOLE_DOWNLOAD_DIR", "JMCONSOLE_CACHE_DIR", "JMCONSOLE_BACKUP_DIR"):
+    os.environ.pop(_name, None)
+import core.path_utils as _paths  # noqa: E402
 
 if any(name == "app" or name.startswith(("core.", "routes.")) for name in sys.modules if name != "core.path_utils"):
     raise RuntimeError("core was imported before tests/conftest.py redirected the app root")
@@ -85,6 +91,15 @@ def offline(monkeypatch):
     # HTML 域名的默认发现会联网；离线测试使用独立的网页端域名。
     from jmcomic import JmModuleConfig
     monkeypatch.setattr(JmModuleConfig, "DOMAIN_HTML_LIST", ["html-mirror.invalid"])
+    # Migration snapshots in disposable databases must not contend with the
+    # person's running Windows app. Only this DB-specific ownership hook is
+    # replaced: native instance-lock tests continue to exercise the real mutex.
+    from core import database as db
+    def isolated_migration():
+        assert Path(db.DB_PATH).resolve().is_relative_to(Path(tempfile.gettempdir()).resolve())
+        assert not any(Path(db.DB_PATH).resolve().is_relative_to(path.resolve()) for path in REAL_RUNTIME_DIRS)
+        return nullcontext()
+    monkeypatch.setattr(db, "_migration_lock", isolated_migration)
 
 
 @pytest.fixture

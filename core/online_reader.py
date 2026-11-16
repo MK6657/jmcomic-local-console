@@ -37,10 +37,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 from . import jm_service
 from .logger import log
-from .path_utils import get_app_root
+from .path_utils import get_cache_dir
 from .settings import get_settings
 
-CACHE_ROOT = get_app_root() / "runtime" / "cache" / "online"
+CACHE_ROOT = get_cache_dir() / "online"
 CACHE_LIMIT_BYTES = 512 * 1024 * 1024
 _TRIM_INTERVAL = 30          # 秒；写入新图片后最多每 30 秒检查一次缓存大小
 _PHOTO_CACHE_SIZE = 512      # 内存里最多记这么多个章节的图片列表，最久没用的先忘

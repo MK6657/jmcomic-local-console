@@ -45,10 +45,10 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from .path_utils import get_app_root
+from .path_utils import get_log_dir
 
 # ── 路径 ──────────────────────────────────────────────
-LOG_DIR = get_app_root() / "runtime" / "logs"
+LOG_DIR = get_log_dir()
 LOG_FILE = LOG_DIR / "app.log"
 ERROR_LOG_FILE = LOG_DIR / "error.log"
 LAUNCHER_LOG_NAME = "launcher.log"

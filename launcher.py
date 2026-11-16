@@ -15,9 +15,11 @@ import uuid
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
+from core.path_utils import get_data_dir, get_log_dir, get_path_config
+
 HOST = "127.0.0.1"
 ROOT = Path(__file__).resolve().parent
-FLASK_JSON = ROOT / "runtime" / "data" / "flask.json"
+FLASK_JSON = get_data_dir() / "flask.json"
 MAX_WAIT = 30
 POLL_INTERVAL = 0.5
 # Changes here only take effect after a restart; static files are cache-busted on every page load.
@@ -200,11 +202,13 @@ def rotate_launcher_log(log_dir, now=None):
             pass
 
 
-def launch_flask(root=ROOT):
+def launch_flask(root=None):
     """Use the project interpreter and a file, never undrained PIPEs."""
+    paths = get_path_config(default_home=Path(root) if root is not None else None)
+    root = ROOT if root is None else Path(root)
     venv_python = root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     executable = str(venv_python) if venv_python.is_file() else sys.executable
-    log_dir = root / "runtime" / "logs"
+    log_dir = paths.logs
     log_dir.mkdir(parents=True, exist_ok=True)
     try:
         rotate_launcher_log(log_dir)
@@ -213,6 +217,7 @@ def launch_flask(root=ROOT):
     kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     token = uuid.uuid4().hex
     environment = dict(os.environ, JMCONSOLE_LAUNCH_TOKEN=token)
+    environment.update(paths.as_environment())
     # Child output lands in launcher.log: keep it UTF-8 (not the console code page) so it stays readable.
     environment["PYTHONIOENCODING"] = "utf-8:backslashreplace"
     with (log_dir / LAUNCHER_LOG).open("ab") as output:
@@ -255,14 +260,14 @@ def wait_until_ready(proc, timeout=MAX_WAIT):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError("Server exited during startup. See runtime/logs/launcher.log.")
+            raise RuntimeError(f"Server exited during startup. See {get_log_dir() / LAUNCHER_LOG}.")
         # Windows venv python.exe may be a redirector with a different server PID.
         # The per-launch token follows its child while marker/health PIDs still match.
         port = get_running_port(expected_token=proc.jm_launch_token)
         if port is not None:
             return port
         time.sleep(POLL_INTERVAL)
-    raise TimeoutError("Server startup timed out. See runtime/logs/launcher.log.")
+    raise TimeoutError(f"Server startup timed out. See {get_log_dir() / LAUNCHER_LOG}.")
 
 
 def main(argv=None, quiet=False):

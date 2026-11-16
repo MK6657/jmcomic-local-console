@@ -1,6 +1,6 @@
 """路径安全检查模块
-方案A：第一版下载目录固定为 PROJECT_ROOT/downloads/
-不允许用户修改到外部路径。
+下载根目录来自启动时路径配置，默认 PROJECT_ROOT/downloads/。
+页面设置不能修改，所有文件访问仍限制在配置的下载根目录内。
 
 安全说明：
 - 使用 os.path.realpath() 而非 Path.resolve() 来解析路径，
@@ -11,10 +11,10 @@
 import os
 from pathlib import Path
 
-from .path_utils import get_app_root
+from .path_utils import get_app_root, get_download_root as configured_download_root
 
 PROJECT_ROOT = get_app_root()
-DOWNLOAD_ROOT = PROJECT_ROOT / "downloads"
+DOWNLOAD_ROOT = configured_download_root()
 
 
 def _real_resolve(path: str | Path) -> Path:
