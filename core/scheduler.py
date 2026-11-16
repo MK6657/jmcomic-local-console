@@ -5,6 +5,7 @@
 则启动下载。不干扰用户手动启动的任务。
 """
 import threading
+import time
 from datetime import datetime
 
 from . import database as db
@@ -98,15 +99,26 @@ def start():
         log.info("定时下载调度器已启动")
 
 
-def stop():
-    """停止定时调度器（幂等）。set 与 join 都在锁内，与 start 串行化。"""
+def stop(timeout=5) -> bool:
+    """Stop within one budget; keep ownership of a still-running scheduler."""
     global _scheduler_thread
-    with _scheduler_lock:
+    deadline = time.monotonic() + max(0, timeout)
+    _stop_event.set()
+    if not _scheduler_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+        return False
+    try:
         _stop_event.set()
-        if _scheduler_thread:
-            _scheduler_thread.join(timeout=5)
-            _scheduler_thread = None
+        thread = _scheduler_thread
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+        if thread is not None and thread.is_alive():
+            return False
+        _scheduler_thread = None
+        if thread is not None:
             log.info("定时下载调度器已停止")
+        return True
+    finally:
+        _scheduler_lock.release()
 
 
 def sync_with_settings():

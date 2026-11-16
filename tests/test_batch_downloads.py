@@ -710,11 +710,15 @@ def test_disjoint_by_construction(client, make_local, downloads):
     assert a1 <= completed and not a2 & completed
     db.clear_jobs_by_status("completed")
     _forget_local()
-    assert preview(client, "new_chapters")["items"] == []
+    # Successful resources survive disposable task history; confirmed new chapters
+    # stay eligible and can never become an undownloaded-favourite whole-album job.
+    assert set(_ids(preview(client, "new_chapters"))) == a1
     after = preview(client, "undownloaded_favourites")
     cleared = {a for a, (fav, state, check) in album.items()
                if fav and state in ("readable", "partial", "cbz", "deleted")}
-    assert cleared <= {a for a, reason in _reasons(after) if reason == "records_cleared"}
+    indexed = {row["album_id"] for row in _rows("SELECT DISTINCT album_id FROM resource_catalog")}
+    assert cleared <= indexed and not a2 & indexed
+    assert set(_ids(after)) == a2
     assert not cleared & set(_ids(after))
 
 

@@ -7,6 +7,7 @@ from flask import Blueprint, jsonify, request
 from core.database import add_search_history, get_search_history, delete_search_history, clear_search_history
 from core.jm_service import search_albums
 from core.logger import log
+from core.upstream import known_failure
 from core.validation import validate_numeric  # P1-8 统一 album_id 校验
 
 api_search_bp = Blueprint("api_search", __name__, url_prefix="/api")
@@ -49,11 +50,9 @@ def search():
         })
     except Exception as e:
         log.error(f"API搜索失败 q={q} error={e}")
-        err_msg = str(e)
-        if "ConnectionError" in err_msg or "connection" in err_msg.lower():
-            return jsonify({"status": "error", "message": "无法连接到 18comic 服务器，请检查网络连接"}), 502
-        if "超时" in err_msg:
-            return jsonify({"status": "error", "message": "搜索超时，请检查关键词或稍后重试"}), 504
+        failure = known_failure(e)
+        if failure is not None:
+            return jsonify(failure.payload()), failure.http_status
         return jsonify({"status": "error", "message": "搜索失败，请稍后重试"}), 500
 
 

@@ -4,25 +4,22 @@ JMComic 命令行工具
 用法:
   python jmcomic_cli.py search <关键词>                    # 搜索漫画
   python jmcomic_cli.py info <车号>                        # 查看漫画详情
-  python jmcomic_cli.py download <车号> [章节范围]          # 下载漫画
+  python jmcomic_cli.py download <车号>                    # 下载漫画
   python jmcomic_cli.py browse [--category 分类] [--order 排序]  # 分类浏览
   python jmcomic_cli.py batch <车号1,车号2,...>             # 批量下载
 """
 
-import sys
-import os
 import argparse
-from pathlib import Path
-from jmcomic import *
+from jmcomic import JmMagicConstants
+from core import database as db, sdk_adapter
 from core.jm_service import close_client
-
-# 下载目录 —— 与 Web 应用保持一致（项目 downloads/ 目录）
-from core.path_guard import DOWNLOAD_ROOT
 
 
 def get_client():
-    option = JmModuleConfig.option_class().default()
-    client = option.build_jm_client()
+    """Use the same saved settings and construction policy as the Web application."""
+    db.init_db()
+    option = sdk_adapter.build_option()
+    client = sdk_adapter.cached_client(option)
     return client, option
 
 
@@ -164,14 +161,18 @@ def cmd_browse(args):
 def cmd_batch(args):
     """批量下载多个漫画"""
     ids = args.ids.split(",")
-    ids = [i.strip() for i in ids if i.strip()]
+    ids = list(dict.fromkeys(i.strip() for i in ids if i.strip()))
 
     print(f"📥 批量下载 {len(ids)} 个漫画: {', '.join(ids)}")
 
     from jmcomic import download_batch, download_album
 
-    results = download_batch(download_album, ids)
-    print(f"\n✅ 批量下载完成: {len(results)}/{len(ids)}")
+    client, option = get_client()
+    try:
+        results = download_batch(download_album, ids, option=option)
+        print(f"\n✅ 批量下载完成: {len(results)}/{len(ids)}")
+    finally:
+        close_client(client)
 
 
 def main():

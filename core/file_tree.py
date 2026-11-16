@@ -4,6 +4,8 @@ import re
 import stat
 from pathlib import Path
 
+from .storage import STAGING_DIRECTORY, is_temporary_path
+
 _REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT: junctions, symlinks and other redirections
 
 
@@ -36,11 +38,14 @@ def iter_safe_files(root, accept=None, nonempty=False):
     also skips empty files (the size comes with the folder listing on Windows). Each folder is
     listed once and its entries are classified from the listing itself, so a caller that only needs the first
     match (next(...)) pays for one listing per level it descends and nothing for the rest of the tree.
+    Reserved staging folders and legacy unfinished page names are never content.
     A linked root raises ValueError on the first next(), as safe_files always did.
     """
     root = Path(root)
     if is_link(root):
         raise ValueError("源目录不能是符号链接或目录联接")
+    if any(part.casefold() == STAGING_DIRECTORY for part in root.parts):
+        return
     pending = [str(root)]
     while pending:
         folder = pending.pop()
@@ -52,9 +57,12 @@ def iter_safe_files(root, accept=None, nonempty=False):
                         if _entry_is_link(entry):
                             continue
                         if entry.is_dir(follow_symlinks=False):
-                            subfolders.append(entry.path)
+                            if entry.name.casefold() != STAGING_DIRECTORY:
+                                subfolders.append(entry.path)
                             continue
                         if not entry.is_file(follow_symlinks=False):
+                            continue
+                        if is_temporary_path(entry.name):
                             continue
                         if nonempty and entry.stat(follow_symlinks=False).st_size <= 0:
                             continue

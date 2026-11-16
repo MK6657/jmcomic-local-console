@@ -29,6 +29,9 @@ from .packer import CbzPacker
 from .file_tree import is_link
 from . import archive_pages
 from . import update_store
+from . import sdk_adapter
+from .upstream import classify_failure
+from .storage import staged_file
 from .local_availability import forget as forget_local_state, has_local_pages, is_readable, readable_folder
 
 
@@ -57,7 +60,7 @@ def _get_or_create_option():
         with _option_lock:
             if _global_option is None:
                 opt_dict = build_jmcomic_option()
-                _global_option = JmModuleConfig.option_class().construct(opt_dict)
+                _global_option = sdk_adapter.build_option(opt_dict)
     return _global_option
 
 
@@ -82,13 +85,13 @@ def get_client(shared=True):
         option = _get_or_create_option()
         if shared:
             if _global_client is None:
-                _global_client = option.new_jm_client()
+                _global_client = sdk_adapter.new_client(option)
                 setattr(_global_client, _JM_SHARED_ATTR, True)
                 _global_client._jm_users = 0
                 _global_client._jm_retired = False
             _global_client._jm_users += 1
             return _global_client, option
-        client = option.new_jm_client()
+        client = sdk_adapter.new_client(option)
         client._jm_counted = True
         with _clients_lock:
             _active_independent_clients += 1
@@ -112,7 +115,7 @@ def new_image_client():
         overrides = {}
         if option.client.postman.src_dict.get("type") == "curl_cffi_session":
             overrides["use_thread_local_curl"] = False
-        return option.new_jm_client(**overrides)
+        return sdk_adapter.new_client(option, **overrides)
 
 
 def new_check_client(timeout: int):
@@ -125,7 +128,7 @@ def new_check_client(timeout: int):
     计入 get_active_client_count()。"""
     global _active_independent_clients
     with _option_lock:
-        client = _get_or_create_option().new_jm_client(cache=False, timeout=timeout)
+        client = sdk_adapter.new_client(_get_or_create_option(), cache=False, timeout=timeout)
     client.set_cache_dict(None)
     client.retry_times = 0
     client._jm_counted = True
@@ -183,8 +186,10 @@ _RETRY_TIMEOUT = 600  # 末趟重试 10 分钟
 _download_lock = threading.Lock()
 
 
-def _should_stop(job_id: str, album_id: str, tracker, pause_ev) -> bool:
-    """检查下载是否应停止（取消/删除），返回 True 表示应停止。"""
+def _should_stop(job_id: str, album_id: str, tracker, pause_ev, stop_event=None) -> bool:
+    """Check explicit cancellation or runtime shutdown without conflating them."""
+    if stop_event is not None and stop_event.is_set():
+        return True
     job = db.get_job(job_id)
     if job is None:
         log.warning(f"下载中的任务已被删除 job_id={job_id}")
@@ -206,12 +211,16 @@ def _should_stop(job_id: str, album_id: str, tracker, pause_ev) -> bool:
         return True
     # 暂停等待 — 保留已下载进度，不推送 0/0
     while job and job["status"] == "paused":
+        if stop_event is not None and stop_event.is_set():
+            return True
         log.debug(f"下载任务暂停中 job_id={job_id}")
         if pause_ev:
             pause_ev.wait(timeout=3)
         else:
             time.sleep(3)  # pause_ev 未传入时的兜底
         job = db.get_job(job_id)
+        if stop_event is not None and stop_event.is_set():
+            return True
         if job is None or job["status"] == "canceled":
             db.update_wishlist_download_status(album_id, "none")
             if tracker:
@@ -227,7 +236,7 @@ def _download_image_single_attempt(
     client, job_id, album_id, album, output_path,
     photo, idx, img, img_url, img_path, scramble_id,
     done_pages, total_pages, failed_pages, pending_images,
-    tracker, photo_dir, pass_num, timeout, lock, refetch_gif=False,
+    tracker, photo_dir, pass_num, timeout, lock, refetch_gif=False, stop_event=None,
 ):
     """单张图片单次下载尝试。
     成功 → done_pages +1
@@ -236,6 +245,8 @@ def _download_image_single_attempt(
     使用传入的每任务锁 lock，避免跨任务争用模块级 _download_lock。
     GIF 页（image_is_gif）不切片，保存为保留全部帧的动画 WebP（文件名仍是 NNNNN.webp）。
     """
+    if stop_event is not None and stop_event.is_set():
+        return
     img_name = f"{idx + 1:05d}.webp"
     img_path = photo_dir / img_name if not str(img_path).startswith(str(photo_dir)) else img_path
     if not is_safe_path(img_path) or not is_safe_path(photo_dir):
@@ -256,45 +267,33 @@ def _download_image_single_attempt(
             })
         return
 
-    tmp_path = raw_gif = None
     try:
-        # Never overwrite a previous valid image before a replacement is verified.
-        fd, name = tempfile.mkstemp(prefix=img_path.stem + ".", suffix=img_path.suffix, dir=photo_dir)
-        os.close(fd)
-        tmp_path = Path(name)
-        if gif:
-            # GIF 页：先按 .gif 原样保存（不解码、不切片；扩展名相同 jmcomic 就不经 PIL 转换），
-            # 再由 _save_gif_as_webp 把全部帧写成动画 WebP。直接让 jmcomic 存成 .webp 只会留下第一帧。
-            fd, name = tempfile.mkstemp(prefix=img_path.stem + ".", suffix=".gif", dir=photo_dir)
-            os.close(fd)
-            raw_gif = Path(name)
-            client.download_image(
-                img_url=img_url,
-                img_save_path=str(raw_gif),
-                scramble_id=None,
-                decode_image=False,
-            )
-            _save_gif_as_webp(raw_gif, tmp_path)
-        else:
-            client.download_image(
-                img_url=img_url,
-                img_save_path=str(tmp_path),
-                scramble_id=scramble_id,
-                decode_image=True,
-            )
-        # 下载成功但文件可能为空（jmcomic 静默失败），校验后纠正
-        if not _valid_image(tmp_path):
-            raise IOError("下载结果不是完整有效的图片")
-        os.replace(tmp_path, img_path)
+        # SDK/Pillow need the real suffix. Staging stays on this disk but outside
+        # every reader/packer scan, including when the process is interrupted.
+        with staged_file(img_path) as staged:
+            if gif:
+                with staged_file(img_path, suffix=".gif") as raw:
+                    client.download_image(
+                        img_url=img_url, img_save_path=str(raw.path),
+                        scramble_id=None, decode_image=False,
+                    )
+                    if stop_event is not None and stop_event.is_set():
+                        return
+                    _save_gif_as_webp(raw.path, staged.path)
+            else:
+                client.download_image(
+                    img_url=img_url, img_save_path=str(staged.path),
+                    scramble_id=scramble_id, decode_image=True,
+                )
+            if stop_event is not None and stop_event.is_set():
+                return
+            staged.publish(_valid_image)
         # 确认下载成功后计数
         with lock:
             done_pages[0] += 1
     except Exception as e:
-        if tmp_path is not None and tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+        if stop_event is not None and stop_event.is_set():
+            return  # Runtime owns recovery; a stop is neither a failed page nor a retry.
         if pass_num == 1 and pending_images is not None:
             # 首趟：只存位置信息，不存 client（线程退出后 client 会关闭）
             with lock:
@@ -304,7 +303,7 @@ def _download_image_single_attempt(
                     "scramble_id": scramble_id, "photo_dir": photo_dir,
                 })
             log.warning(
-                f"首趟下载超时，已跳过待重试 job_id={job_id} "
+                f"首趟下载失败，已跳过待重试 job_id={job_id} "
                 f"pass={pass_num} img={idx + 1} error={e}"
             )
         else:
@@ -313,13 +312,6 @@ def _download_image_single_attempt(
                 log.warning(f"图片下载最终失败 job_id={job_id} error={err_msg}")
                 failed_pages.append(err_msg)
                 db.update_job(job_id, error_message=err_msg[:500])
-    finally:
-        if raw_gif is not None:
-            try:
-                raw_gif.unlink(missing_ok=True)
-            except OSError:
-                pass
-
     with lock:
         progress_pct = round(done_pages[0] / total_pages * 100, 1) if total_pages > 0 else 0
         db.update_job(job_id, done_pages=done_pages[0])
@@ -383,18 +375,20 @@ def _call_with_timeout(label: str, timeout: float, timeout_msg: str, fn, *args, 
     """在独立线程中执行 jmcomic 远程调用，带超时保护。
 
     统一取代散落各处的 `ThreadPoolExecutor(1) + fut.result(timeout=...)` 样板：
-    超时或调用异常时记录日志并抛 TimeoutError(timeout_msg)，
-    确保 Waitress 请求线程不会被网络调用永久挂起。
+    只有真正的等待/传输超时归为 timeout，其余失败保留结构化种类。
+    请求返回后，仍在执行的调用继续持有客户端租约，直到实际结束。
     """
     pool = ThreadPoolExecutor(max_workers=1)
     fut = _submit_client_call(pool, getattr(fn, "__self__", None), fn, *args, **kwargs)
     try:
         result = fut.result(timeout=timeout)
     except Exception as e:
-        # 超时的 TimeoutError() 没有文字，带上类型才看得出是超时还是上游报错
-        log.warning(f"{label} 超时或失败 error={type(e).__name__}: {e}")
         pool.shutdown(wait=False)  # 不阻塞请求线程；挂起的工作线程由其自身超时终结
-        raise TimeoutError(timeout_msg)
+        failure = classify_failure(e, timeout_message=timeout_msg)
+        log.warning(f"{label} 失败 kind={failure.kind} error={type(e).__name__}: {e}")
+        if failure is e:
+            raise
+        raise failure from e
     pool.shutdown(wait=True)
     return result
 
@@ -413,7 +407,7 @@ def search_albums(keyword: str, page: int = 1, page_size: int = 20, sort: str = 
 
     try:
         search_page = _call_with_timeout(
-            f"搜索 keyword={keyword}", 25, "搜索超时，请检查关键词或稍后重试",
+            f"搜索 keyword={keyword}", 25, "搜索超时，请稍后重试",
             client.search,
             search_query=keyword,
             page=page,
@@ -778,8 +772,12 @@ def _chapter_output_dir(album_dir, photo):
 def _download_chapter(
     job_id, album_id, album, album_dir, photo, total_pages,
     done_pages, pending_images, failed_pages, tracker, pause_ev, lock, pass_num, timeout,
+    stop_event=None,
 ):
     """下载单个章节的所有图片（支持章节内多图并行，每图独立 client）"""
+    if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
+        return
+    control = {"stop_event": stop_event} if stop_event is not None else {}
     image_threads = int(get_settings().get("image_threads", "3"))
     photo_dir = _chapter_output_dir(album_dir, photo)
     # 旧版本下载的章节：GIF 页可能已被切片/只剩第一帧，首趟不按“已存在”跳过它们
@@ -793,6 +791,7 @@ def _download_chapter(
                 None, job_id, album_id, album, photo, photo_dir,
                 i, img, total_pages, done_pages, pending_images,
                 failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif,
+                **control,
             )
     else:
         # 多图并行：每个线程独立 client，避免 HTTP 非线程安全问题
@@ -804,28 +803,33 @@ def _download_chapter(
                     None, job_id, album_id, album, photo, photo_dir,
                     i, img, total_pages, done_pages, pending_images,
                     failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif,
+                    **control,
                 )
                 img_futs.append(fut)
             for fut in as_completed(img_futs):
                 # 提前检查取消状态，减少取消延迟
-                if _should_stop(job_id, album_id, tracker, pause_ev):
+                if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
+                    for pending in img_futs:
+                        pending.cancel()
                     break
                 try:
-                    fut.result(timeout=timeout)  # 加超时避免永久挂起
+                    fut.result()  # Already completed; network limits belong to the transport.
                 except Exception as e:
                     log.warning(f"图片下载线程异常 job_id={job_id} error={e}")
 
-    db.update_job(job_id, current_photo=str(photo.photo_id))
+    if stop_event is None or not stop_event.is_set():
+        db.update_job(job_id, current_photo=str(photo.photo_id))
 
 
 def _download_chapter_image(
     _, job_id, album_id, album, photo, photo_dir,
     i, img, total_pages, done_pages, pending_images,
     failed_pages, tracker, pause_ev, lock, pass_num, timeout, refetch_gif=False,
+    stop_event=None,
 ):
     """下载单张图片（每个线程独立 client，避免 HTTP 非线程安全问题）"""
     # _should_stop 内部已持锁（db 查询），无需额外保护
-    if _should_stop(job_id, album_id, tracker, pause_ev):
+    if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
         return
     img_client, _ = get_client(shared=False)
     try:
@@ -840,17 +844,19 @@ def _download_chapter_image(
             done_pages, total_pages, failed_pages,
             pending_images if pass_num == 1 else None,
             tracker, photo_dir, pass_num=pass_num, timeout=timeout, lock=lock, refetch_gif=refetch_gif,
+            **({"stop_event": stop_event} if stop_event is not None else {}),
         )
     finally:
         close_client(img_client)
 
 
-def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
+def download_album_job(job_id: str, album_id: str, photo_ids: list[str], *, stop_event=None):
     """
     在后台线程中执行下载任务 — 两趟式：首趟快跳，末趟重试。
 
-    首趟每张图 120s 超时，超时则跳过（不阻塞后续）；
-    末趟回扫所有 pending 图片，给足 600s 重试。
+    Runtime shutdown cooperatively stops between requests and before publishing
+    new content. In-flight SDK calls keep their transport until they actually end;
+    the manager reports an undrained shutdown rather than closing it early.
     """
     tracker = progress_manager.get_tracker(job_id)
     if not tracker:
@@ -868,7 +874,7 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
     written_dirs = []  # 这次写过的目录：结束时（无论成败）让“本地可读”重新判断
 
     try:
-        if _should_stop(job_id, album_id, tracker, pause_ev):
+        if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
             return
         db.update_wishlist_download_status(album_id, "downloading")
         tracker.push("progress", {
@@ -879,16 +885,22 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
 
         client, _ = get_client(shared=False)
         album = client.get_album_detail(album_id)
+        if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
+            return
 
         total_pages = 0
         photos_to_download = []
         seen_photo_ids = set()
         for photo in album:
+            if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
+                return
             if str(photo.photo_id) in photo_ids or not photo_ids:
                 if str(photo.photo_id) in seen_photo_ids:
                     continue
                 seen_photo_ids.add(str(photo.photo_id))
                 client.check_photo(photo)
+                if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
+                    return
                 pages = len(photo) if hasattr(photo, "__len__") and photo.page_arr else 0
                 total_pages += pages
                 photos_to_download.append(photo)
@@ -963,16 +975,23 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
                     job_id, album_id, album, album_dir, photo, total_pages,
                     done_pages, pending_images, failed_pages,
                     tracker, pause_ev, _lock, 1, _FIRST_PASS_TIMEOUT,
+                    **({"stop_event": stop_event} if stop_event is not None else {}),
                 )
                 futs.append(fut)
             # 等待所有章节完成，不阻塞 cancel（每个 chapter 线程内检查 _should_stop）
-            for fut in futs:
+            for fut in as_completed(futs):
+                if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
+                    for pending in futs:
+                        pending.cancel()
+                    break
                 try:
-                    fut.result(timeout=_FIRST_PASS_TIMEOUT)  # 加超时避免永久挂起
+                    fut.result()
                 except Exception as e:
                     log.warning(f"章节下载线程异常 job_id={job_id} error={e}")
 
         # ── 第二趟：串行重试 pending 图片（量少，无需并行）──
+        if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
+            return
         if pending_images:
             log.info(f"开始重试 {len(pending_images)} 张未下载的图片 job_id={job_id}")
             tracker.push("progress", {
@@ -986,7 +1005,7 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
             should_exit = False
             try:
                 for pinfo in pending_images:
-                    if _should_stop(job_id, album_id, tracker, pause_ev):
+                    if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
                         should_exit = True
                         break
                     _download_image_single_attempt(
@@ -996,6 +1015,7 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
                         done_pages, total_pages, failed_pages, None,
                         tracker, pinfo["photo_dir"], pass_num=2, timeout=_RETRY_TIMEOUT,
                         lock=job_lock,
+                        **({"stop_event": stop_event} if stop_event is not None else {}),
                     )
             finally:
                 close_client(retry_client)
@@ -1007,7 +1027,7 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
         now = datetime.now().isoformat()
 
         # Futures can fail before recording a page error. Do not pack partial data.
-        if _should_stop(job_id, album_id, tracker, pause_ev):
+        if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
             return
         if done_pages[0] != total_pages:
             failed_pages.append(f"下载不完整：{done_pages[0]}/{total_pages} 页")
@@ -1071,10 +1091,12 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
                     if not is_safe_path(output_dir):
                         log.error(f"delete_originals 安全校验失败，拒绝删除: {output_dir}")
                     else:
-                        if _should_stop(job_id, album_id, tracker, pause_ev):
+                        if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
                             return
                         # Delete only packed unchanged images, never the directory.
                         for path, signature in originals.items():
+                            if stop_event is not None and stop_event.is_set():
+                                return
                             if (is_safe_path(path) and path.is_file()
                                     and (path.stat().st_size, path.stat().st_mtime_ns) == signature):
                                 path.unlink()
@@ -1106,6 +1128,9 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
             log.warning(f"同步自动标签失败 album_id={album_id} error={e}")
 
         done_val = done_pages[0]
+
+        if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
+            return
 
         # 最终写入前检查是否已被取消，防止覆盖 canceled 状态
         final_job = db.get_job(job_id)
@@ -1155,6 +1180,9 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str]):
         tracker.close()
 
     except Exception as e:
+        if stop_event is not None and stop_event.is_set():
+            log.info(f"停机期间上游调用结束，保留任务供恢复 job_id={job_id} error={type(e).__name__}")
+            return
         err_msg = str(e)[:1000]
         log.error(f"下载任务异常 job_id={job_id} error={err_msg}")
         # 异常处理前先检查是否已被取消，防止覆盖 canceled 状态

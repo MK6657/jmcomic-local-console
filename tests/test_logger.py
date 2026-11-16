@@ -495,7 +495,7 @@ def test_download_job_thread_has_its_own_request_id(client, monkeypatch):
     from core import job_manager as jm_module, logger as lm
     seen = []
 
-    def fake_job(job_id, album_id, photo_ids):
+    def fake_job(job_id, album_id, photo_ids, *, stop_event=None):
         seen.append(lm.current_request_id())
         worker = threading.Thread(target=lm.bind_request_id(lambda: seen.append(lm.current_request_id())))
         worker.start()
@@ -519,7 +519,8 @@ def _newest_entry(client, query):
 
 def test_tag_sync_upstream_failure_joins_the_request_trace(client, monkeypatch):
     """The upstream call runs in a pool thread; without bind_request_id the cause of a failed sync (and the
-    library's retry records) had no request_id, so "只看此请求" showed the 504 but not why."""
+    library's retry records) had no request_id. Connection failures now remain 502,
+    and the response and original cause must still share one request trace."""
     from core import jm_service
     album = str(random.randint(10**8, 10**9))
 
@@ -530,12 +531,13 @@ def test_tag_sync_upstream_failure_joins_the_request_trace(client, monkeypatch):
             raise ConnectionError(f"upstream refused album {album_id}")
     monkeypatch.setattr(jm_service, "get_client", lambda shared=True: (FailingClient(), None))
     jm_service.clear_album_detail_cache()
-    assert client.post(f"/api/library/{album}/tags/sync").status_code == 504
+    assert client.post(f"/api/library/{album}/tags/sync").status_code == 502
     data = client.get("/api/system/logs", query_string={"source": "app", "q": album, "limit": 50}).get_json()
     messages = {entry["message"].split("\n")[0]: entry["request_id"] for entry in data["entries"]}
-    rid = messages[f"API同步标签超时 album_id={album}"]
+    rid = next(rid for message, rid in messages.items()
+               if message.startswith(f"API同步标签失败 album_id={album} "))
     assert rid.startswith("req_")
-    cause = f"获取专辑详情 album_id={album} 超时或失败 error=ConnectionError: upstream refused album {album}"
+    cause = f"获取专辑详情 album_id={album} 失败 kind=connection error=ConnectionError: upstream refused album {album}"
     assert messages[cause] == rid
     assert messages[f"【req.retry】请求失败 url=https://cdn.example.test/album/{album}"] == rid
     assert set(messages.values()) == {rid}
@@ -550,7 +552,7 @@ def test_background_tag_sync_threads_keep_the_starting_request_id(client, monkey
     started, seen = [], []
 
     def thread(target, args=(), **kwargs):  # only these two routes' threads; logging's own stay real
-        started.append((target, args))
+        started.append((target, args, lm.current_request_id()))
         return Mock()
     for module in (api_library, api_wishlist):
         monkeypatch.setattr(module, "threading", SimpleNamespace(Thread=thread))
@@ -565,16 +567,25 @@ def test_background_tag_sync_threads_keep_the_starting_request_id(client, monkey
         response = client.post("/api/wishlist", json={"album_id": album, "title": "t", "author": "a"})
         query = f"添加收藏 album_id={album}"
     else:
-        monkeypatch.setattr(api_library.db, "get_library", lambda **kwargs: {"items": [{"album_id": album}]})
+        api_library.db.add_wishlist(album, "fixture", "author", "")
         response = client.post("/api/library/tags/sync-all")
         query = "API批量同步标签已接受"
     assert len(started) == 1
-    target, args = started[0]
+    target, args, rid = started[0]
     target(*args)  # the thread body, run after the request has ended (also releases the bulk-sync lock)
     assert response.status_code in (201, 202)
-    rid = _newest_entry(client, query)["request_id"]
     assert rid.startswith("req_") and seen == [rid]
     assert lm.current_request_id() is None  # the id does not leak into the thread that ran it
+    # The acceptance message can be deduplicated with an earlier test/request.
+    # Flush it and match this request in either a single entry or its merged IDs,
+    # instead of mistaking an older identical message for the current request.
+    lm.flush_log_summaries(force=True)
+    entries = client.get("/api/system/logs", query_string={
+        "source": "app", "q": rid, "limit": 50,
+    }).get_json()["entries"]
+    assert any(query in entry["message"] and (
+        entry["request_id"] == rid or rid in entry.get("extra", {}).get("request_ids", [])
+    ) for entry in entries)
 
 
 def test_sse_stream_failure_is_logged_with_the_request_id(client, monkeypatch):

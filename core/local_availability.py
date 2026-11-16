@@ -1,6 +1,6 @@
 """本地可读判定：搜索、详情、下载管理、收藏和资源库共用同一个标准。
 
-一部漫画“本地可读”= 它最近一次已完成的下载任务的输出目录仍然存在、在下载目录内，
+一部漫画“本地可读”= 资源目录记录的最近一次成功下载的输出目录仍然存在、在下载目录内，
 而且目录树里至少有一张本地阅读器能打开的图片（has_page_image）。
 与本地阅读器（routes/api_preview._find_album_dir + _scan_pages）的判断一致：最近一次完成的任务目录不在了，
 就不再回退到更早的任务；目录还在但一页图片都没有（例如被“打开文件夹”重新建出的空目录），也不算可读。
@@ -197,15 +197,7 @@ def local_states(album_ids) -> dict[str, LocalState]:
     ids = [a for a in dict.fromkeys(str(a) for a in album_ids) if validate_numeric(a)][:MAX_IDS]
     if not ids:
         return {}
-    conn = db.get_db()
-    try:
-        rows = conn.execute(
-            f"SELECT job_id, album_id, output_path, superseded_at FROM jobs WHERE status='completed' AND album_id IN "
-            f"({','.join('?' * len(ids))}) ORDER BY created_at DESC, id DESC",
-            ids,
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = db.resource_records(ids)
     states: dict[str, LocalState] = {}
     now, root = time.monotonic(), []
     for row in rows:
@@ -249,15 +241,7 @@ def readable_folder(album_id: str) -> str | None:
     album_id = str(album_id)
     if not validate_numeric(album_id):
         return None
-    conn = db.get_db()
-    try:
-        row = conn.execute(
-            "SELECT job_id, output_path, superseded_at FROM jobs WHERE status='completed' AND album_id=? "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
-            (album_id,),
-        ).fetchone()
-    finally:
-        conn.close()
+    row = db.get_completed_job_by_album_id(album_id)
     if row is None or row["superseded_at"] or not row["output_path"]:
         return None
     state = _folder_state(row["output_path"], row["job_id"], time.monotonic(), [])

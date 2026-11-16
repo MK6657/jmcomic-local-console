@@ -12,6 +12,7 @@ from flask import Blueprint, request, jsonify, Response, stream_with_context
 from core.database import get_all_jobs, get_job, delete_job, clear_jobs_by_status
 import core.database as db
 from core.job_manager import job_manager
+from core.task_commands import TaskCommandError
 from core.logger import log
 from core.progress import progress_manager
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
@@ -111,13 +112,20 @@ def create_job():
     if len(title) > 500:
         title = title[:500]
 
-    job_id = job_manager.create_job(album_id, title, photo_ids)
-    # 同步更新收藏清单状态
-    db.update_wishlist_download_status(album_id, "queued")
-    # 立即触发调度，不需等 2 秒循环
-    job_manager.schedule_next()
-    log.info(f"API创建任务 job_id={job_id} album_id={album_id} title={title}")
-    return jsonify({"status": "ok", "job_id": job_id}), 201
+    try:
+        result = job_manager.create_job_result(album_id, title, photo_ids)
+    except TaskCommandError as error:
+        return jsonify(status="error", message=str(error), reason=error.reason), error.http_status
+    if result.created:
+        # The command is already committed. A scheduling error must not tell the
+        # user that enqueueing failed and encourage another download request.
+        try:
+            job_manager.schedule_next()
+        except Exception as error:
+            log.error(f"创建任务后调度失败（任务记录已保存）job_id={result.job_id} error={error}")
+    log.info(f"API创建任务 job_id={result.job_id} album_id={album_id} created={result.created}")
+    return jsonify({"status": "ok", "job_id": result.job_id, "created": result.created,
+                    "reason": "created" if result.created else "already_active"}), 201 if result.created else 200
 
 
 @api_jobs_bp.get("/api/jobs")
@@ -247,16 +255,14 @@ def retry_job(job_id: str):
     err = _check_job_id(job_id)
     if err:
         return err
-    new_job_id, reason = job_manager.retry_job(job_id)
-    if reason == "status":
-        log.warning(f"API重试任务失败 job_id={job_id} 任务还没结束")
-        return jsonify({"status": "error", "message": "该任务状态不能重试"}), 400
-    if not new_job_id:
-        log.warning(f"API重试任务失败 job_id={job_id} 原任务不存在")
-        return jsonify({"status": "error", "message": "原任务不存在"}), 404
-    # wishlist 状态同步已由 job_manager.retry_job 内部完成，此处不再重复
-    log.info(f"API重试任务 old_job_id={job_id} new_job_id={new_job_id}")
-    return jsonify({"status": "ok", "job_id": new_job_id}), 201
+    try:
+        result = job_manager.retry_job_result(job_id)
+    except TaskCommandError as error:
+        log.warning(f"API重试任务失败 job_id={job_id} reason={error.reason}")
+        return jsonify(status="error", message=str(error), reason=error.reason), error.http_status
+    log.info(f"API重试任务 old_job_id={job_id} new_job_id={result.job_id} created={result.created}")
+    return jsonify({"status": "ok", "job_id": result.job_id, "created": result.created,
+                    "reason": "created" if result.created else "already_active"}), 201 if result.created else 200
 
 
 @api_jobs_bp.delete("/api/jobs/<job_id>")

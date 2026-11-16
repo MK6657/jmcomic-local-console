@@ -10,6 +10,7 @@ from core import archive_pages, chapter_inventory
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.database import get_completed_job_by_album_id
 from core.file_tree import safe_files
+from core.storage import is_temporary_path
 from core.local_availability import MAX_IDS, is_page_image, local_states
 from core.logger import log
 # P1-8 补充 album_id 校验；图片类型与 MIME 统一取自 core.validation
@@ -95,8 +96,8 @@ def local_chapters(album_id: str):
 def _find_album_dir(album_id: str) -> tuple[Path | None, str | None]:
     """查找 album_id 对应的本地目录
 
-    优先从 jobs 表获取 output_path；
-    若没有匹配任务或目录已被删除，返回 None（用户应通过下载管理页进入预览）。
+    从独立资源目录获取最近一次成功下载的 output_path，清理任务历史不影响阅读；
+    若没有资源记录或目录已被删除，返回 None。
     最近一次完成的任务已被取代（目录被删除后又被重新下载建出，见 core.local_availability）同样返回 None：
     里面是还没完成（或失败 / 已取消）的那次下载写的残缺内容，与“本地可读”的判断一致。
     """
@@ -245,6 +246,10 @@ def preview_image(img_path: str):
     if not is_safe_path(full_path):
         log.warning(f"图片访问路径越权 img_path={img_path}")
         return jsonify({"status": "error", "message": "没有权限访问该文件"}), 403
+
+    # A guessed URL must not bypass the same staging exclusion used by page scans.
+    if is_temporary_path(full_path):
+        return jsonify({"status": "error", "message": "文件不存在"}), 404
 
     # 检查文件是否存在
     if not full_path.is_file():

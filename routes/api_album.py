@@ -11,6 +11,8 @@ from core.logger import log
 from core.path_guard import is_safe_path
 from core.validation import validate_numeric, require_numeric, ALLOWED_EXTENSIONS, is_allowed_image, get_image_mime
 from core.jm_service import get_album_detail_cached
+from core.upstream import known_failure
+from core.local_availability import first_page_image
 from jmcomic import JmcomicText
 
 api_album_bp = Blueprint("api_album", __name__)
@@ -28,9 +30,9 @@ def album_detail(album_id: str):
         return jsonify({"status": "ok", "data": data})
     except Exception as e:
         log.error(f"API专辑详情失败 album_id={album_id} error={e}")
-        err_msg = str(e)
-        if "ConnectionError" in err_msg or "Timeout" in err_msg or "connection" in err_msg.lower() or "timeout" in err_msg.lower():
-            return jsonify({"status": "error", "message": "无法连接到 18comic 服务器，请检查网络连接"}), 502
+        failure = known_failure(e)
+        if failure is not None:
+            return jsonify(failure.payload()), failure.http_status
         return jsonify({"status": "error", "message": "获取专辑详情失败，请检查 album_id 是否正确或稍后重试"}), 500
 
 
@@ -46,21 +48,8 @@ def cover_redirect(album_id: str):
         job = get_completed_job_by_album_id(album_id)
         if job and job.get("output_path"):
             album_dir = Path(job["output_path"])
-            if album_dir.exists():
-                first_img = None
-                for ch_dir in sorted(album_dir.iterdir()):
-                    if ch_dir.is_dir():
-                        for f in sorted(ch_dir.iterdir()):
-                            if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
-                                first_img = f
-                                break
-                        if first_img:
-                            break
-                if not first_img:
-                    for f in sorted(album_dir.iterdir()):
-                        if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
-                            first_img = f
-                            break
+            if album_dir.exists() and is_safe_path(album_dir):
+                first_img = first_page_image(album_dir)
                 if first_img:
                     if not is_safe_path(first_img):
                         log.warning(f"封面路径越权 album_id={album_id} path={first_img}")

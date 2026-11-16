@@ -109,15 +109,8 @@ def _local_chapters(folder: Path) -> dict | None:
 
 def _other_folders(album_id: str, job_id: str, folder: Path) -> bool:
     """这部漫画别的已完成（没被取代）的下载目录里还有能读的页（按作者整理后的旧目录、上游改标题前的目录）"""
-    conn = db.get_db()
-    try:
-        rows = conn.execute(
-            "SELECT output_path FROM jobs WHERE album_id=? AND status='completed' AND superseded_at IS NULL "
-            "AND job_id != ? AND output_path IS NOT NULL AND output_path != ''",
-            (album_id, job_id),
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = [row for row in db.resource_records([album_id])
+            if not row["superseded_at"] and row["job_id"] != job_id and row["output_path"]]
     seen = {os.path.normcase(os.path.abspath(str(folder)))}
     for row in rows:
         key = os.path.normcase(os.path.abspath(row["output_path"]))

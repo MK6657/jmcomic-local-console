@@ -199,6 +199,78 @@ def _run_migrations(conn):
     if "superseded_at" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
         conn.execute("ALTER TABLE jobs ADD COLUMN superseded_at TEXT")
         conn.commit()
+    if version < 3:
+        _migrate_resource_catalog(conn)
+
+
+def _migrate_resource_catalog(conn):
+    """Keep successful download evidence independently of disposable task history.
+
+    Completion and its resource record share the same SQLite transaction, including
+    callers using update_job, conditional transitions or an explicit SQL import.
+    A deleted task deliberately has no cascading effect on its resource record.
+    """
+    columns = ("job_id", "album_id", "title", "selected_photo_ids", "output_path",
+               "created_at", "updated_at", "completed_at", "superseded_at")
+    names = ", ".join(columns)
+    assignments = ", ".join(f"{name}=excluded.{name}" for name in columns if name != "job_id")
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("""CREATE TABLE IF NOT EXISTS resource_catalog (
+            job_id TEXT PRIMARY KEY,
+            job_order INTEGER NOT NULL,
+            album_id TEXT NOT NULL,
+            title TEXT,
+            selected_photo_ids TEXT,
+            output_path TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            completed_at TEXT,
+            superseded_at TEXT
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_catalog_album_latest "
+                     "ON resource_catalog(album_id, created_at DESC, job_order DESC)")
+        conn.execute(
+            f"INSERT INTO resource_catalog (job_order, {names}) "
+            f"SELECT id, {names} FROM jobs WHERE status='completed' "
+            f"ON CONFLICT(job_id) DO UPDATE SET job_order=excluded.job_order, {assignments}")
+        values = ", ".join(f"NEW.{name}" for name in columns)
+        for event in ("INSERT", "UPDATE"):
+            conn.execute(f"""CREATE TRIGGER IF NOT EXISTS catalog_completed_job_{event.lower()}
+                AFTER {event} ON jobs WHEN NEW.status = 'completed'
+                BEGIN
+                    INSERT INTO resource_catalog (job_order, {names}) VALUES (NEW.id, {values})
+                    ON CONFLICT(job_id) DO UPDATE SET job_order=excluded.job_order, {assignments};
+                END""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS catalog_revoked_completion
+            AFTER UPDATE OF status ON jobs WHEN OLD.status = 'completed' AND NEW.status != 'completed'
+            BEGIN
+                DELETE FROM resource_catalog WHERE job_id = NEW.job_id;
+            END""")
+        conn.execute("PRAGMA user_version = 3")
+
+
+def resource_records(album_ids, conn=None) -> list[dict]:
+    """Successful resource evidence, newest first, even after task-history cleanup.
+
+    Superseded entries remain present so a failed replacement cannot revive an
+    older directory. File availability and path safety stay with their callers.
+    """
+    ids = list(dict.fromkeys(str(album_id) for album_id in album_ids))
+    if not ids:
+        return []
+    own = conn is None
+    conn = conn or get_db()
+    try:
+        rows = conn.execute(
+            "SELECT *, job_order AS id FROM resource_catalog "
+            "WHERE album_id IN (SELECT value FROM json_each(?)) "
+            "ORDER BY created_at DESC, job_order DESC", (json.dumps(ids),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        if own:
+            conn.close()
 
 
 # ─── Jobs 操作 ───
@@ -225,8 +297,8 @@ def insert_job(job_id: str, album_id: str, title: str, photo_ids: list):
 
 _GUARD_COMPLETED = {
     "any": "",
-    "required": " AND EXISTS (SELECT 1 FROM jobs c WHERE c.album_id = ? AND c.status = 'completed')",
-    "forbidden": " AND NOT EXISTS (SELECT 1 FROM jobs c WHERE c.album_id = ? AND c.status = 'completed')",
+    "required": " AND EXISTS (SELECT 1 FROM resource_catalog c WHERE c.album_id = ?)",
+    "forbidden": " AND NOT EXISTS (SELECT 1 FROM resource_catalog c WHERE c.album_id = ?)",
 }
 
 
@@ -319,11 +391,12 @@ def get_all_jobs(limit: int = 5000) -> list[dict]:
 
 
 def get_completed_job_by_album_id(album_id: str) -> dict | None:
-    """获取指定 album_id 的已完成任务（取最新的一个，顺序与 core.local_availability 相同），避免全表扫描。"""
+    """Compatibility lookup for the latest successful resource, independent of history."""
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT * FROM jobs WHERE album_id=? AND status='completed' ORDER BY created_at DESC, id DESC LIMIT 1",
+            "SELECT *, job_order AS id, 'completed' AS status FROM resource_catalog "
+            "WHERE album_id=? ORDER BY created_at DESC, job_order DESC LIMIT 1",
             (album_id,),
         ).fetchone()
         return dict(row) if row else None
@@ -343,15 +416,17 @@ def mark_completed_jobs_superseded(album_id: str, output_path: str, by_job_id: s
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT job_id, output_path FROM jobs WHERE album_id=? AND status='completed' "
+            "SELECT job_id, output_path FROM resource_catalog WHERE album_id=? "
             "AND superseded_at IS NULL AND job_id != ? AND output_path IS NOT NULL AND output_path != ''",
             (album_id, by_job_id),
         ).fetchall()
         job_ids = [row["job_id"] for row in rows if _same_path(row["output_path"], output_path)]
         if job_ids:
             now = datetime.now().isoformat()
-            conn.executemany("UPDATE jobs SET superseded_at=? WHERE job_id=?", [(now, j) for j in job_ids])
-            conn.commit()
+            with conn:
+                conn.executemany("UPDATE resource_catalog SET superseded_at=? WHERE job_id=?",
+                                 [(now, j) for j in job_ids])
+                conn.executemany("UPDATE jobs SET superseded_at=? WHERE job_id=?", [(now, j) for j in job_ids])
         return len(job_ids)
     finally:
         conn.close()
@@ -447,7 +522,8 @@ def _refresh_wishlist_after_job_delete(conn, album_ids):
                 WHEN status='queued' THEN 2 ELSE 3 END,
                 created_at DESC, id DESC
             LIMIT 1
-        ), 'none') WHERE album_id=?""",
+        ), CASE WHEN EXISTS (SELECT 1 FROM resource_catalog r WHERE r.album_id=wishlist.album_id)
+                THEN 'completed' ELSE 'none' END) WHERE album_id=?""",
         [(album_id,) for album_id in album_ids],
     )
 
@@ -594,8 +670,8 @@ def _job_facts_sql(album_id_expr: str) -> str:
                  LIMIT 1) AS active_job,
                (SELECT j.status FROM jobs j WHERE j.album_id = {album_id_expr}
                  ORDER BY j.created_at DESC, j.id DESC LIMIT 1) AS latest_job,
-               EXISTS (SELECT 1 FROM jobs j
-                        WHERE j.album_id = {album_id_expr} AND j.status = 'completed') AS has_completed"""
+               EXISTS (SELECT 1 FROM resource_catalog r
+                        WHERE r.album_id = {album_id_expr}) AS has_completed"""
 
 
 def download_state(readable, active_job, latest_job, has_completed, legacy_status) -> dict:
@@ -799,8 +875,8 @@ def favourite_rows(conn, album_ids, readable_ids) -> dict[str, dict]:
 
 
 def get_completed_album_ids(wishlist_only: bool = False) -> list[str]:
-    """有已完成下载任务的 album_id —— 本地可读判定的候选（是否真能读由 core.local_availability 决定）。"""
-    sql = "SELECT DISTINCT album_id FROM jobs WHERE status='completed'"
+    """Indexed resources: candidates whose actual files are checked by local_availability."""
+    sql = "SELECT DISTINCT album_id FROM resource_catalog WHERE 1=1"
     if wishlist_only:
         sql += " AND album_id IN (SELECT album_id FROM wishlist)"
     conn = get_db()
@@ -1018,7 +1094,7 @@ def get_all_tags(min_count: int = 1, library_only: bool = True) -> list[dict]:
                 WHERE album_id IN (
                     SELECT album_id FROM wishlist
                     UNION
-                    SELECT DISTINCT album_id FROM jobs WHERE status='completed'
+                    SELECT DISTINCT album_id FROM resource_catalog
                 )
                 GROUP BY tag
                 HAVING count >= ?
@@ -1054,7 +1130,7 @@ def search_library_tags(keyword: str, limit: int = 20) -> list[dict]:
             """SELECT tag, COUNT(*) AS count FROM album_tags
                WHERE tag LIKE ? ESCAPE ? AND album_id IN (
                    SELECT album_id FROM wishlist UNION
-                   SELECT album_id FROM jobs WHERE status='completed')
+                   SELECT album_id FROM resource_catalog)
                GROUP BY tag ORDER BY count DESC, tag ASC LIMIT ?""",
             ("%" + _escape_like(keyword.strip().lower()) + "%", chr(92), max(1, min(limit, 100))),
         ).fetchall()
@@ -1297,7 +1373,7 @@ def get_library(
                     1 AS is_wishlisted
                 FROM wishlist w
                 LEFT JOIN (
-                    SELECT DISTINCT album_id FROM jobs WHERE status='completed'
+                    SELECT DISTINCT album_id FROM resource_catalog
                 ) jc ON w.album_id = jc.album_id
                 LEFT JOIN album_meta wm ON wm.album_id = w.album_id
             ),
@@ -1311,7 +1387,7 @@ def get_library(
                     '' AS added_at,
                     COALESCE(NULLIF(m.updated_at, ''), '') AS updated_at,
                     0 AS is_wishlisted
-                FROM (SELECT DISTINCT album_id FROM jobs WHERE status='completed') j
+                FROM (SELECT DISTINCT album_id FROM resource_catalog) j
                 LEFT JOIN album_meta m ON j.album_id = m.album_id
                 WHERE j.album_id NOT IN (SELECT album_id FROM wishlist)
             ),
@@ -1442,7 +1518,7 @@ def get_library_stat() -> dict:
     try:
         wishlist_count = conn.execute("SELECT COUNT(*) FROM wishlist").fetchone()[0]
         downloaded_count = conn.execute(
-            "SELECT COUNT(DISTINCT album_id) FROM jobs WHERE status='completed'"
+            "SELECT COUNT(DISTINCT album_id) FROM resource_catalog"
         ).fetchone()[0]
         tag_count = conn.execute(
             "SELECT COUNT(DISTINCT tag) FROM album_tags"
@@ -1454,7 +1530,7 @@ def get_library_stat() -> dict:
             SELECT COUNT(*) FROM (
                 SELECT album_id FROM wishlist
                 UNION
-                SELECT DISTINCT album_id FROM jobs WHERE status='completed'
+                SELECT DISTINCT album_id FROM resource_catalog
             )
             """
         ).fetchone()[0]
@@ -1580,24 +1656,24 @@ def delete_cached_album_detail(album_id: str) -> int:
 
 
 def backfill_missing_meta() -> int:
-    """为已完成任务中缺少 album_meta 的条目回填元数据。"""
+    """为资源目录中缺少 album_meta 的条目回填元数据，不依赖任务历史。"""
     conn = get_db()
     try:
         # 先检查是否有缺失，没有则直接跳过
         missing_count = conn.execute("""
             SELECT COUNT(*)
-            FROM jobs j
+            FROM resource_catalog j
             LEFT JOIN album_meta m ON j.album_id = m.album_id
-            WHERE j.status = 'completed' AND m.album_id IS NULL
+            WHERE m.album_id IS NULL
         """).fetchone()[0]
         if missing_count == 0:
             return 0
 
         rows = conn.execute("""
             SELECT DISTINCT j.album_id, j.title
-            FROM jobs j
+            FROM resource_catalog j
             LEFT JOIN album_meta m ON j.album_id = m.album_id
-            WHERE j.status = 'completed' AND m.album_id IS NULL
+            WHERE m.album_id IS NULL
         """).fetchall()
         count = 0
         for r in rows:

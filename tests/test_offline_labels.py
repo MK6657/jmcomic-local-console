@@ -205,7 +205,12 @@ def test_pages_that_cannot_be_attributed_stop_the_count(client, download, downlo
         (twin / ".jm-chapter.json").write_text(json.dumps({"photo_id": "71", "format": 2}), encoding="utf-8")
         (twin / "00009.webp").write_bytes(b"page")
     _chapter_list()
-    assert _claim(client) == (None, "unattributed")
+    if damage == "leftover":
+        # Interrupted staging pages are excluded from both reading and inventory;
+        # the intact downloaded chapter still proves exactly one of three chapters.
+        assert _claim(client) == ({"downloaded": 1, "total": 3}, "partial")
+    else:
+        assert _claim(client) == (None, "unattributed")
 
 
 def test_not_readable_albums_get_no_count(client, downloads):

@@ -12,6 +12,7 @@ from core import update_store
 from core.jm_service import get_album_detail, get_album_detail_cached
 from core.local_availability import MAX_IDS, local_states, readable_among  # readable_among 供其他路由沿用这里的导入
 from core.logger import bind_request_id, log
+from core.upstream import known_failure
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 
 api_library_bp = Blueprint("api_library", __name__, url_prefix="/api/library")
@@ -295,9 +296,10 @@ def album_tags_sync(album_id: str):
         fut = pool.submit(bind_request_id(get_album_detail_cached), album_id)
         try:
             data = fut.result(timeout=20)
-        except FuturesTimeout:
+        except FuturesTimeout as error:
             log.warning(f"API同步标签超时 album_id={album_id}")
-            return jsonify({"status": "error", "message": "同步标签超时"}), 504
+            failure = known_failure(error)
+            return jsonify(failure.payload()), failure.http_status
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
 
@@ -327,6 +329,9 @@ def album_tags_sync(album_id: str):
         })
     except Exception as e:
         log.error(f"API同步标签失败 album_id={album_id} error={e}")
+        failure = known_failure(e)
+        if failure is not None:
+            return jsonify(failure.payload()), failure.http_status
         return jsonify({"status": "error", "message": "同步标签失败"}), 500
 
 

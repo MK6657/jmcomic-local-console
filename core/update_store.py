@@ -229,8 +229,8 @@ def register_legacy(now: datetime) -> int:
     with _tx() as conn:
         rows = conn.execute(
             """SELECT j.album_id, MAX(COALESCE(j.completed_at, j.updated_at, j.created_at)) AS finished
-               FROM jobs j
-               WHERE j.status='completed' AND j.superseded_at IS NULL
+               FROM resource_catalog j
+               WHERE j.superseded_at IS NULL
                  AND NOT EXISTS (SELECT 1 FROM album_update_checks u WHERE u.album_id = j.album_id)
                GROUP BY j.album_id
                ORDER BY finished DESC, j.album_id""",
@@ -254,7 +254,7 @@ def due_candidates(now: datetime, far: datetime, limit: int = 50) -> list[str]:
     rows = _read(
         """SELECT u.album_id FROM album_update_checks u
            WHERE (u.next_check_at IS NULL OR u.next_check_at <= ? OR u.next_check_at > ?)
-             AND EXISTS (SELECT 1 FROM jobs j WHERE j.album_id = u.album_id AND j.status = 'completed')
+             AND EXISTS (SELECT 1 FROM resource_catalog r WHERE r.album_id = u.album_id)
              AND NOT EXISTS (SELECT 1 FROM jobs a WHERE a.album_id = u.album_id
                              AND a.status IN ('queued', 'running', 'paused'))
            ORDER BY u.next_check_at IS NOT NULL, u.next_check_at, u.album_id
@@ -269,7 +269,7 @@ def next_due_at() -> datetime | None:
     rows = _read(
         """SELECT MIN(u.next_check_at) FROM album_update_checks u
            WHERE u.next_check_at IS NOT NULL
-             AND EXISTS (SELECT 1 FROM jobs j WHERE j.album_id = u.album_id AND j.status = 'completed')""",
+             AND EXISTS (SELECT 1 FROM resource_catalog r WHERE r.album_id = u.album_id)""",
     )
     return _parse(rows[0][0]) if rows else None
 
@@ -517,7 +517,10 @@ def _titles(conn, album_ids) -> dict[str, str]:
         """SELECT p.value AS album_id,
                   COALESCE(NULLIF(TRIM(m.title), ''),
                            (SELECT j.title FROM jobs j WHERE j.album_id = p.value AND COALESCE(TRIM(j.title), '') != ''
-                             ORDER BY j.created_at DESC, j.id DESC LIMIT 1), '') AS title
+                             ORDER BY j.created_at DESC, j.id DESC LIMIT 1),
+                           (SELECT r.title FROM resource_catalog r WHERE r.album_id = p.value
+                             AND COALESCE(TRIM(r.title), '') != ''
+                             ORDER BY r.created_at DESC, r.job_order DESC LIMIT 1), '') AS title
            FROM json_each(?) p LEFT JOIN album_meta m ON m.album_id = p.value""",
         (_ids_param(album_ids),),
     ).fetchall()

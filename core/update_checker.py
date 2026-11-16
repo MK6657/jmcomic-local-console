@@ -357,9 +357,9 @@ def start() -> None:
     """启动后台检查线程（幂等）。只由 app.main() 调用。"""
     global _armed, _thread, _stop_event
     with _thread_lock:
-        _armed = True
         if _thread is not None and _thread.is_alive():
             return
+        _armed = True
         stop_ev = threading.Event()   # 本线程专属，stop() 只会操作到它
         _stop_event = stop_ev
         _thread = threading.Thread(target=_loop, args=(stop_ev,), daemon=True, name="update-checker")
@@ -367,16 +367,28 @@ def start() -> None:
     log.info("检查新章节后台线程已启动（只取章节列表，从不下载）")
 
 
-def stop() -> None:
-    """停止后台检查线程（幂等）。正在进行的一次检查会在自己的时限内结束并释放锁。"""
+def stop(timeout=5) -> bool:
+    """Stop within one budget; do not lose ownership while an upstream call finishes."""
     global _armed, _thread
-    with _thread_lock:
+    deadline = time.monotonic() + max(0, timeout)
+    _armed = False
+    _stop_event.set()
+    if not _thread_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+        return False
+    try:
         _armed = False
         _stop_event.set()
-        if _thread is not None:
-            _thread.join(timeout=5)
-            _thread = None
+        thread = _thread
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+        if thread is not None and thread.is_alive():
+            return False
+        _thread = None
+        if thread is not None:
             log.info("检查新章节后台线程已停止")
+        return True
+    finally:
+        _thread_lock.release()
 
 
 def is_checking(album_id: str) -> bool:

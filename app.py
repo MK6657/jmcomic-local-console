@@ -173,24 +173,22 @@ from flask import Flask
 # 导入即配置好 app.log / error.log（不删除任何文件）；过期日志清理在 main() 中启动。
 from core.logger import (
     log, MAX_LOG_AGE_DAYS, MAX_TOTAL_SIZE_MB,
-    adopt_logger, claim_library_loggers, install_process_hooks, start_log_maintenance,
+    adopt_logger, install_process_hooks, start_log_maintenance,
+    shutdown_logging,
 )
 log.info("=== JMComic 下载控制台 启动 ===")
 
 # ── 先导入核心模块（确保全局实例就绪） ─────────────────────
 import core.database as db
 from core.job_manager import job_manager
-from core.scheduler import start as start_scheduler, stop as stop_scheduler
-from core import update_checker  # 检查新章节：只有 main() 启动后台线程（create_app 从不启动）
+from core import scheduler, update_checker
+from core.runtime import ApplicationRuntime
 
 # ── jmcomic 库全局优化（必须在任何 client 创建前设置）──
-from jmcomic import JmModuleConfig
+from core.sdk_adapter import configure_sdk
 # 库日志由 core.logger 接管：去掉 jmcomic 自带的 stdout handler（不再重复进 launcher.log），
 # 逐请求/逐图片的常规进度被丢弃，只有重试/失败/异常经去重 + 脱敏写入 app.log / error.log。
-JmModuleConfig.FLAG_ENABLE_JM_LOG = True
-claim_library_loggers()  # 与导入顺序无关：若 jmcomic 先于 core.logger 被导入，这里移除它的 stdout handler
-JmModuleConfig.FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN = False  # 跳过启动时的域名更新请求
-JmModuleConfig.FLAG_API_CLIENT_REQUIRE_COOKIES = False     # 公开内容无需 cookie，避免 /setting 请求用过期域名失败
+configure_sdk()
 
 # ── 注册蓝图 ──────────────────────────────────────────────
 from routes.page_routes import page_bp
@@ -362,81 +360,95 @@ def _startup_record(port: int) -> dict:
     }
 
 
+class _ShutdownRequested(BaseException):
+    """Unwind serving/startup once; cleanup runs in main's single finally block."""
+
+
 def main():
-    # 日志：未捕获异常（含启动失败）写入 error.log
-    install_process_hooks()
-
-    # 获取单实例锁
-    try:
-        _acquire_lock()
-    except SystemExit as exc:
-        # 另一实例仍在运行/启动中（“重启未生效”的常见原因）：写入日志，而不只是打印到 launcher.log
-        log.error(f"启动中止：{exc}")
-        raise
-
-    # 清理 7 天前/超出总上限的历史日志，之后每天及每次轮转后自动清理
-    start_log_maintenance()
-
-    # 初始化数据库
-    db.init_db()
-
-    # 应用重启后，将所有 stranded 状态（running/paused）的任务回退为 queued，
-    # 因为之前的下载线程已经不存在了。
-    stranded = db.get_jobs_by_status("running") + db.get_jobs_by_status("paused")
-    for j in stranded:
-        db.update_job(j["job_id"], status="queued")
-        album_id = j.get("album_id")
-        if album_id:
-            db.update_wishlist_download_status(album_id, "queued")
-    if stranded:
-        log.info(f"已回退 {len(stranded)} 个孤立任务 (running/paused) → queued")
-
-    # ── 信号处理器：优雅关闭 ──
-    def _signal_handler(signum, frame):
-        log.warning(f"收到信号 {signum}，开始优雅关闭...")
-        job_manager.stop()
-        stop_scheduler()
-        update_checker.stop()
-        _release_lock()
-        sys.exit(0)
-
     import signal
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
+    install_process_hooks()
+    runtime = ApplicationRuntime(job_manager, scheduler, update_checker, logger=log)
+    sock = None
+    acquired = False
+    maintenance_started = False
+    closing = False
+    old_handlers = {}
 
-    # 启动日志 — 打印关键配置摘要
-    log.info(
-        f"启动配置 PORT={_DEFAULT_PORT} PID={os.getpid()} "
-        f"DOWNLOAD_ROOT={db.get_setting('download_root', 'downloads/')} "
-        f"MAX_LOG_AGE={MAX_LOG_AGE_DAYS}d MAX_LOG_SIZE={MAX_TOTAL_SIZE_MB}MB"
-    )
+    def request_shutdown(signum, frame):
+        nonlocal closing
+        if closing:
+            return  # A second signal must not interrupt bounded draining/cleanup.
+        closing = True
+        log.warning(f"收到信号 {signum}，开始优雅关闭...")
+        raise _ShutdownRequested()
 
-    # 启动 Flask 开发服务器
-    app = create_app()
+    safe = True
     try:
-        # 优先使用 waitress（生产级 WSGI，不会卡死）
+        try:
+            _acquire_lock()
+            acquired = True
+        except SystemExit as exc:
+            log.error(f"启动中止：{exc}")
+            raise
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            old_handlers[signum] = signal.signal(signum, request_shutdown)
+        application = create_app()  # Initializes schema, never recovers or starts jobs.
         try:
             from waitress import serve
-            log.info("使用 waitress 服务器")
-            sock = _bind_preemptive()
-            actual_port = sock.getsockname()[1]
-            # Do not start/resume downloads when no server port can be acquired.
-            job_manager.start()
-            start_scheduler()
-            # 检查新章节的后台线程（启动 5–7 分钟后才开始第一次检查；只取章节列表，从不下载）
-            update_checker.start()
-            # 记录实际端口
-            _PORT_FILE.write_text(json.dumps(_startup_record(actual_port)))
-            log.info(f"服务已启动 → http://127.0.0.1:{actual_port}")
-            serve(app, sockets=[sock], threads=128)
         except ImportError:
             raise RuntimeError("运行依赖缺失，请执行 python -m pip install -r requirements.txt") from None
+        sock = _bind_preemptive()
+        actual_port = sock.getsockname()[1]
+        # Acquire a listener before changing interrupted task states or starting
+        # any service that can make upstream requests or execute queued downloads.
+        maintenance_started = True
+        start_log_maintenance()
+        log.info(
+            f"启动配置 PORT={actual_port} PID={os.getpid()} "
+            f"DOWNLOAD_ROOT={db.get_setting('download_root', 'downloads/')} "
+            f"MAX_LOG_AGE={MAX_LOG_AGE_DAYS}d MAX_LOG_SIZE={MAX_TOTAL_SIZE_MB}MB"
+        )
+        runtime.start()
+        _PORT_FILE.write_text(json.dumps(_startup_record(actual_port)))
+        log.info(f"服务已启动 → http://127.0.0.1:{actual_port}（waitress）")
+        serve(application, sockets=[sock], threads=128)
+    except _ShutdownRequested:
+        pass
     finally:
-        job_manager.stop()
-        stop_scheduler()
-        update_checker.stop()
-        _release_lock()
+        closing = True
+        drained = False
+        try:
+            safe = runtime.stop()
+            drained = safe
+        except Exception as exc:
+            safe = False
+            log.error(f"后台运行时关闭失败: {type(exc).__name__}")
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception as exc:
+                    safe = False
+                    log.error(f"监听端口关闭失败: {type(exc).__name__}")
+            if acquired and drained:
+                try:
+                    _release_lock()
+                except Exception as exc:
+                    safe = False
+                    log.error(f"服务启动记录清理失败: {type(exc).__name__}")
+            elif acquired:
+                # A live executor may still own an HTTP request/file write. Keep
+                # the mutex until this process actually exits, so a replacement
+                # process cannot recover and write the same task concurrently.
+                log.error("后台服务未排空，保留单实例锁直到进程退出；当前端口已关闭")
+            try:
+                if safe and maintenance_started:
+                    shutdown_logging()
+            finally:
+                for signum, handler in old_handlers.items():
+                    signal.signal(signum, handler)
+    return 0 if safe else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

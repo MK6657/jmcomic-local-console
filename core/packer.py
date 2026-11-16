@@ -1,9 +1,7 @@
 """
 CBZ / 漫画打包模块
 """
-import os
 import zipfile
-import tempfile
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -13,6 +11,7 @@ from . import archive_pages
 from .logger import log
 from .validation import EXPORT_IMAGE_EXTENSIONS
 from .file_tree import safe_files
+from .storage import staged_file
 
 _publish_lock = threading.Lock()
 
@@ -67,11 +66,11 @@ class CbzPacker(Packer):
           打包后删了原图、这次只下载了新章节或只重下了一部分时，旧的页不会因为新包覆盖旧包而丢失。
           旧包有被跳过的页（带不过来）、或读不出旧包的页时整个打包失败，旧包原样保留。
         - 打包的页数记在 self.packed_count（散图 + 带过来的页），调用方可据此核对新包。
-        - 流式写入磁盘 .cbz.tmp 文件
+        - 流式写入同盘隔离暂存文件，目录扫描器不可见
         - 使用 ZIP_DEFLATED 压缩
         - 如果 on_progress 可调用，每处理一张图调用 on_progress(current, total)
-        - 完成后 os.rename(.cbz.tmp → .cbz)
-        - try/finally 确保异常时清理 .cbz.tmp
+        - 完成并验证 ZIP 页数和 CRC 后原子发布
+        - 上下文退出时清理本次暂存文件，失败保留已有压缩包
         - 同时生成 ComicInfo.xml 包含 Title/Series/Writer
         """
         source_dir = Path(source_dir)
@@ -103,11 +102,8 @@ class CbzPacker(Packer):
         self.packed_count = total
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, name = tempfile.mkstemp(prefix=output_path.name + ".", suffix=".tmp", dir=output_path.parent)
-        os.close(fd)
-        tmp_path = Path(name)
-
-        try:
+        with staged_file(output_path) as staged:
+            tmp_path = staged.path
             with zipfile.ZipFile(
                 str(tmp_path), "w", zipfile.ZIP_DEFLATED
             ) as zf:
@@ -142,22 +138,18 @@ class CbzPacker(Packer):
                             if on_progress and callable(on_progress):
                                 on_progress(idx, total)
 
-            # 重命名 .tmp → .cbz（原子操作）
-            with _publish_lock:
-                os.replace(str(tmp_path), str(output_path))
+            def complete_archive(path):
+                with zipfile.ZipFile(path) as archive:
+                    return (len(archive.infolist()) == total + 1
+                            and archive.namelist().count("ComicInfo.xml") == 1
+                            and archive.testzip() is None)
+
+            # 所有页面写完并验证后才替换旧包。
+            staged.publish(complete_archive, lock=_publish_lock)
             log.info(
                 f"CBZ 打包完成: {output_path} ({total} 张图片)"
             )
             return output_path
-
-        except Exception:
-            # 清理临时文件
-            if tmp_path.exists():
-                try:
-                    tmp_path.unlink()
-                except OSError:
-                    pass
-            raise
 
     def _build_comic_info(
         self, title: str = "", series: str = "", writer: str = "", page_count: int = 0

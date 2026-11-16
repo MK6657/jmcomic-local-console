@@ -42,6 +42,7 @@ from pathlib import Path, PurePosixPath
 
 from .file_tree import _REPARSE_POINT, natural_key
 from .validation import EXPORT_IMAGE_EXTENSIONS, is_allowed_image
+from .storage import is_temporary_path
 
 ARCHIVE_SUFFIXES = (".cbz", ".zip")
 MAX_ENTRIES = 200000                       # 条目数上限（很长的连载几百话 × 几十页也远小于此；自动打包不会超过）
@@ -211,6 +212,8 @@ def quick_status(path) -> tuple:
 def _page_name(info: zipfile.ZipInfo) -> str | None:
     """条目算一页时返回规范化后的路径，否则 None（目录、不安全的路径、非图片、加密、不支持的压缩方式、太大）"""
     name = info.filename.replace("\\", "/")
+    if is_temporary_path(name):
+        return None
     if not name or len(name) > MAX_NAME or "\x00" in name or name.endswith("/"):
         return None
     if name.startswith("/") or (len(name) > 1 and name[1] == ":"):
@@ -240,6 +243,8 @@ def _read_member(zf: zipfile.ZipFile, page: ArchivePage) -> bytes:
 def _is_image_entry(info: zipfile.ZipInfo) -> bool:
     """看起来是一页图片的条目（不含 macOS 附带文件）：用来数被跳过的页"""
     name = info.filename.replace("\\", "/")
+    if is_temporary_path(name):
+        return False
     parts = name.split("/")
     if name.endswith("/") or parts[0] == "__MACOSX" or parts[-1].startswith("._"):
         return False

@@ -127,9 +127,8 @@ def diagnose():
                     domain_list = JmModuleConfig.DOMAIN_API_LIST
                 else:
                     # 复用已经发现的网页域名，不在诊断请求中触发额外的域名发现。
-                    domain_list = JmModuleConfig.DOMAIN_HTML_LIST or (
-                        [JmModuleConfig.DOMAIN_HTML] if JmModuleConfig.DOMAIN_HTML else []
-                    )
+                    known_html = getattr(JmModuleConfig, "DOMAIN_HTML", None)
+                    domain_list = JmModuleConfig.DOMAIN_HTML_LIST or ([known_html] if known_html else [])
             jm_domain = domain_list[0] if domain_list else ""
             if jm_domain:
                 parsed = urlparse(jm_domain)
