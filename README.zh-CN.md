@@ -10,6 +10,8 @@
 
 ## 环境要求
 
+重构分支提供包含Python运行时的Windows便携版构建流程，使用方式与验证范围见[Windows便携版](docs/WINDOWS_RELEASE.md)。以下环境要求适用于源码运行。
+
 - Windows 10/11，Python 3.10–3.12；本次维护使用 Python 3.11 验证。
 - 安装依赖需要联网；搜索、下载还依赖上游服务和本机网络状况。
 - 使用项目独立虚拟环境，避免与 Hermes 或系统 Python 的依赖互相影响。
@@ -148,7 +150,7 @@ API 与 HTML 使用各自的域名；Chrome 能打开网页不代表 APP 接口�
 不会访问上游服务。
 
 项目没有 `package.json`，因此不提供 npm lint/typecheck/build 脚本。
-`build.spec` 是保留的 PyInstaller 打包方案，不代表本次已验证 EXE 产物。
+Windows便携包通过 `tools/build_windows.py` 构建，只有EXE自检通过才发布到新的 `releases/` 目录；详见[构建说明](docs/WINDOWS_RELEASE.md)。
 
 ## 故障排查与限制
 

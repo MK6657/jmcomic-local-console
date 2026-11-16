@@ -66,6 +66,12 @@ def code_fingerprint(root=ROOT):
     as added or removed files."""
     root = Path(root)
     digest = hashlib.sha256()
+    if getattr(sys, "frozen", False):
+        # Frozen Python modules live in the archive, not core/*.py. Include the
+        # executable and build manifest so backend/dependency updates count too.
+        for path in (Path(sys.executable), root / "release.json"):
+            digest.update(path.read_bytes())
+        return digest.hexdigest()
     for pattern in RESTART_GLOBS:
         for path in sorted(root.glob(pattern)):
             if not path.is_file():
@@ -203,11 +209,19 @@ def rotate_launcher_log(log_dir, now=None):
 
 
 def launch_flask(root=None):
-    """Use the project interpreter and a file, never undrained PIPEs."""
+    """Launch source Python or this portable executable; never undrained PIPEs."""
     paths = get_path_config(default_home=Path(root) if root is not None else None)
     root = ROOT if root is None else Path(root)
-    venv_python = root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    executable = str(venv_python) if venv_python.is_file() else sys.executable
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
+        executable = sys.executable
+        command = [executable, "serve"]
+        working_directory = str(Path(executable).parent)
+    else:
+        venv_python = root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        executable = str(venv_python) if venv_python.is_file() else sys.executable
+        command = [executable, str(root / "app.py")]
+        working_directory = str(root)
     log_dir = paths.logs
     log_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -218,6 +232,8 @@ def launch_flask(root=None):
     token = uuid.uuid4().hex
     environment = dict(os.environ, JMCONSOLE_LAUNCH_TOKEN=token)
     environment.update(paths.as_environment())
+    if frozen:
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     # Child output lands in launcher.log: keep it UTF-8 (not the console code page) so it stays readable.
     environment["PYTHONIOENCODING"] = "utf-8:backslashreplace"
     with (log_dir / LAUNCHER_LOG).open("ab") as output:
@@ -225,7 +241,7 @@ def launch_flask(root=None):
         output.write(f"[{stamp}] [INFO] [launcher] starting server: {executable} app.py\n".encode("utf-8"))
         output.flush()
         proc = subprocess.Popen(
-            [executable, str(root / "app.py")], cwd=str(root),
+            command, cwd=working_directory,
             stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
             env=environment, **kwargs,
         )

@@ -1,0 +1,4 @@
+-r requirements.txt
+# Build tools only; install in a separate environment, never the daily instance.
+PyInstaller==6.22.3
+pyinstaller-hooks-contrib==2026.10

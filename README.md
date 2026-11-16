@@ -12,6 +12,10 @@ does not include downloaded content, credentials, or the upstream reference proj
 
 ## Requirements
 
+The refactor branch includes a Windows portable build with a bundled Python runtime.
+See [Windows portable release](docs/WINDOWS_RELEASE.md) for usage and validation limits.
+The requirements below apply to running from source.
+
 - Windows 10/11 and Python 3.10–3.12; this maintenance pass was tested with Python 3.11.
 - Internet access for dependency installation; search/download also depend on upstream availability.
 - A separate project virtual environment, not a shared Hermes/system environment.
@@ -184,7 +188,9 @@ import time. Do not run them against your personal instance; use a disposable co
 server instances and tests port fallback without contacting upstream services.
 
 There is no `package.json`, so npm lint/typecheck/build scripts are not provided.
-`build.spec` is a historical PyInstaller recipe, not a verified release binary.
+Use `tools/build_windows.py` for the portable Windows bundle. It publishes a new
+`releases/` directory only after the executable passes its isolated self-check;
+see the [build guide](docs/WINDOWS_RELEASE.md).
 
 ## Troubleshooting and limitations
 

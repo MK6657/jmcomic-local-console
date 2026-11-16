@@ -39,6 +39,7 @@ _preview/
 
 # Local environments, secrets and nested repositories
 .venv/
+.venv-build/
 venv/
 .worktrees/
 .pytest_cache/
