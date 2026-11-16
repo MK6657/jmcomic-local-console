@@ -16,12 +16,27 @@ from core.scheduler import sync_with_settings as sync_scheduler
 api_settings_bp = Blueprint("api_settings", __name__)
 
 
+def _apply_saved_settings():
+    """Persistence already committed: report live-application failures honestly."""
+    warnings = []
+    for name, action in (("网络客户端", invalidate_option_cache), ("定时调度", sync_scheduler)):
+        try:
+            action()
+        except Exception as exc:
+            # Settings can contain credentials; log only the operation and error type.
+            log.error(f"设置已保存但应用失败 component={name} error_type={type(exc).__name__}")
+            warnings.append(f"{name}未能立即应用，请重启程序后检查")
+    return warnings
+
+
 @api_settings_bp.get("/api/settings")
 def list_settings():
     """获取所有设置项"""
     log.debug("API获取设置")
     settings = get_settings()
-    return jsonify({"status": "ok", "settings": settings})
+    response = jsonify({"status": "ok", "settings": settings})
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @api_settings_bp.post("/api/settings")
@@ -39,11 +54,10 @@ def save_settings():
         update_settings(body)
     except ValueError as exc:
         return jsonify(status="error", message=str(exc)), 400
-    invalidate_option_cache()  # 设置变更后重建 jmcomic Option
-    sync_scheduler()  # 定时下载开关即时生效（无需重启）
+    warnings = _apply_saved_settings()
     updated = get_settings()
     log.info(f"API保存设置 keys_updated={list(body.keys())}")
-    return jsonify({"status": "ok", "settings": updated})
+    return jsonify({"status": "ok", "saved": True, "settings": updated, "warnings": warnings})
 
 
 # ── 导入 / 导出 ──
@@ -122,6 +136,6 @@ def import_settings():
             errors.append(f"设置 '{key}' 失败，已跳过")
 
     log.info(f"API导入设置 imported={imported} skipped={skipped} errors={len(errors)}")
-    invalidate_option_cache()  # 设置变更后重建 jmcomic Option
-    sync_scheduler()  # 定时下载开关即时生效（无需重启）
-    return jsonify({"status": "ok", "imported": imported, "skipped": skipped, "errors": errors})
+    warnings = _apply_saved_settings()
+    return jsonify({"status": "ok", "imported": imported, "skipped": skipped, "errors": errors,
+                    "warnings": warnings})

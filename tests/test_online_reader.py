@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from fake_transport import owned_client
 
 
 class FakeImage:
@@ -65,6 +66,7 @@ class FakeClient:
         self.album = album
         self.fail_download = fail_download
         self.postman = FakePostman(self._image)
+        owned_client(self, root=self.postman)
 
     @property
     def downloads(self):
@@ -285,7 +287,7 @@ def test_download_job_does_not_unscramble_gif_pages(client, monkeypatch, tmp_pat
     from core import jm_service
     from jmcomic import JmImageDetail
     seen = []
-    monkeypatch.setattr(jm_service, "get_client", lambda shared=True: (object(), None))
+    monkeypatch.setattr(jm_service, "get_client", lambda shared=True: (owned_client(), None))
     monkeypatch.setattr(jm_service, "close_client", lambda _client: None)
     monkeypatch.setattr(jm_service, "_should_stop", lambda *args: False)
     monkeypatch.setattr(jm_service, "_download_image_single_attempt",
@@ -330,6 +332,7 @@ def jm_download_client(album, payloads):
     class JmDownloadClient(JmImageClient):
         def __init__(self):
             self.fetched = []
+            owned_client(self)
 
         def get_album_detail(self, album_id):
             return album

@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 from PIL import Image
+from fake_transport import owned_client
 
 
 @pytest.fixture
@@ -38,7 +39,7 @@ def test_already_stopping_job_does_not_construct_an_upstream_client(job, monkeyp
 def test_stop_during_metadata_does_not_request_chapters_or_mark_failed(job, monkeypatch, raises):
     from core import database as db, jm_service
     stop = threading.Event()
-    upstream = Mock()
+    upstream = owned_client(Mock())
     def detail(_):
         stop.set()
         if raises:
@@ -71,7 +72,7 @@ def test_stop_during_image_preserves_old_page_without_retry_or_failure(job, rais
         stop.set()
         if raises:
             raise ConnectionError("connection stopped")
-    upstream = Mock(download_image=Mock(side_effect=download))
+    upstream = owned_client(Mock(download_image=Mock(side_effect=download)))
     failed, retry, done = [], [], [0]
     jm_service._download_image_single_attempt(
         upstream, "job_shutdown_test", "123", None, "", [1], 0,
@@ -114,7 +115,7 @@ def test_manager_waits_for_real_inflight_call_and_recovers_only_after_it_exits(j
     from core import database as db, jm_service, job_manager as jobs
     manager = jobs.JobManager()
     entered, release = threading.Event(), threading.Event()
-    upstream = Mock()
+    upstream = owned_client(Mock())
     def detail(_):
         entered.set()
         assert release.wait(3)

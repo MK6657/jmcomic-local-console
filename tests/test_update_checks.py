@@ -54,6 +54,8 @@ class _Client:
     """The download's client: serves the album and 'checks' photos (no network)."""
 
     def __init__(self, album):
+        from fake_transport import owned_client
+        owned_client(self)
         self.album = album
 
     def get_album_detail(self, album_id):

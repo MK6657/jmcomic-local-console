@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 from PIL import Image
+from fake_transport import owned_client
 
 
 @pytest.mark.parametrize("route", ["/api/jobs", "/api/wishlist", "/api/wishlist/check",
@@ -210,7 +211,7 @@ def test_download_terminal_state_and_safe_packing(client, album_dir, monkeypatch
     from core.progress import progress_manager
     photo = FakePhoto([object()])
     album = FakeAlbum([photo])
-    mock_client = Mock()
+    mock_client = owned_client(Mock())
     mock_client.get_album_detail.return_value = album
     monkeypatch.setattr(service, "get_client", lambda **kwargs: (mock_client, None))
     monkeypatch.setattr(service, "close_client", lambda _: None)
@@ -250,7 +251,7 @@ def test_failed_redownload_preserves_previous_image(client, album_dir):
     path = album_dir / "00001.webp"
     make_image(path)
     original = path.read_bytes()
-    mock_client = Mock()
+    mock_client = owned_client(Mock())
     mock_client.download_image.side_effect = OSError("network failed")
     failed = []
     service._download_image_single_attempt(

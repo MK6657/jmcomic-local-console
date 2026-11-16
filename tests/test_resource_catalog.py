@@ -219,7 +219,7 @@ def test_v2_migration_preserves_latest_order_superseded_and_runs_once(client, do
     db.init_db()
     connection = db.get_db()
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == db.CURRENT_SCHEMA_VERSION
         assert connection.execute("SELECT COUNT(*) FROM resource_catalog").fetchone()[0] == 3
     finally:
         connection.close()

@@ -1164,7 +1164,7 @@ def test_settings_summary_is_reloaded_with_the_settings():
     load = source[source.index("async function loadSettings"):source.index("// ── 事件绑定")]
     assert load.rstrip().endswith("loadUpdateSummary();\n  }")
     save = source[source.index("async function handleSave"):source.index("// ── 检查新章节状态 ──")]
-    assert "showToast('设置已保存', 'success');\n      loadUpdateSummary();" in save
+    assert "showToast('设置已保存', 'success');" in save and "loadUpdateSummary();" in save
     block = source[source.index("// ── 检查新章节状态 ──"):source.index("// ── 检查新章节状态结束 ──")]
     assert "innerHTML" not in block and "textContent" in block
 

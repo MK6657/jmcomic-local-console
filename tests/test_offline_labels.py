@@ -39,6 +39,8 @@ class _Album(list):
 
 class _Client:
     def __init__(self, album):
+        from fake_transport import owned_client
+        owned_client(self)
         self.album = album
 
     def get_album_detail(self, album_id):

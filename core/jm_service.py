@@ -32,6 +32,8 @@ from . import update_store
 from . import sdk_adapter
 from .upstream import classify_failure
 from .storage import staged_file
+from . import image_download
+from .transfer import download_budget, DownloadInterrupted
 from .local_availability import forget as forget_local_state, has_local_pages, is_readable, readable_folder
 
 
@@ -178,12 +180,22 @@ def close_client(client) -> None:
 
 
 
-_FIRST_PASS_TIMEOUT = 120
-_RETRY_TIMEOUT = 600  # 末趟重试 10 分钟
+_FIRST_PASS_TIMEOUT = 120  # Legacy caps; each operation also obeys the saved network timeout.
+_RETRY_TIMEOUT = 600
 # 并行下载共享状态锁（保护 done_pages / failed_pages / pending_images）
 # 注意：_download_lock 已弃用，改用每个任务独立锁 job_lock 以消除跨任务争用。
 # 保留模块级锁仅用于模块级共享资源（如 client 创建），目前无需模块级锁。
 _download_lock = threading.Lock()
+
+
+def _operation_timeout(cap=120) -> float:
+    """Apply saved settings to real transport calls, not only Future.result()."""
+    return max(0.001, min(float(get_settings().get("timeout", 30)), float(cap), 120.0))
+
+
+def _download_canceled(job_id):
+    job = db.get_job(job_id)
+    return job is None or job["status"] == "canceled"
 
 
 def _should_stop(job_id: str, album_id: str, tracker, pause_ev, stop_event=None) -> bool:
@@ -271,19 +283,22 @@ def _download_image_single_attempt(
         # SDK/Pillow need the real suffix. Staging stays on this disk but outside
         # every reader/packer scan, including when the process is interrupted.
         with staged_file(img_path) as staged:
+            options = dict(timeout=_operation_timeout(timeout),
+                           attempts=1 + int(get_settings().get("retry_times", 2)),
+                           stop_event=stop_event, should_cancel=lambda: _download_canceled(job_id))
             if gif:
                 with staged_file(img_path, suffix=".gif") as raw:
-                    client.download_image(
+                    image_download.download_image(client,
                         img_url=img_url, img_save_path=str(raw.path),
-                        scramble_id=None, decode_image=False,
+                        scramble_id=None, decode_image=False, **options,
                     )
                     if stop_event is not None and stop_event.is_set():
                         return
                     _save_gif_as_webp(raw.path, staged.path)
             else:
-                client.download_image(
+                image_download.download_image(client,
                     img_url=img_url, img_save_path=str(staged.path),
-                    scramble_id=scramble_id, decode_image=True,
+                    scramble_id=scramble_id, decode_image=True, **options,
                 )
             if stop_event is not None and stop_event.is_set():
                 return
@@ -291,6 +306,8 @@ def _download_image_single_attempt(
         # 确认下载成功后计数
         with lock:
             done_pages[0] += 1
+    except DownloadInterrupted:
+        return
     except Exception as e:
         if stop_event is not None and stop_event.is_set():
             return  # Runtime owns recovery; a stop is neither a failed page nor a retry.
@@ -884,7 +901,9 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str], *, stop
         })
 
         client, _ = get_client(shared=False)
-        album = client.get_album_detail(album_id)
+        with download_budget(client, _operation_timeout(), stop_event=stop_event,
+                             should_cancel=lambda: _download_canceled(job_id)):
+            album = client.get_album_detail(album_id)
         if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
             return
 
@@ -898,7 +917,9 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str], *, stop
                 if str(photo.photo_id) in seen_photo_ids:
                     continue
                 seen_photo_ids.add(str(photo.photo_id))
-                client.check_photo(photo)
+                with download_budget(client, _operation_timeout(), stop_event=stop_event,
+                                     should_cancel=lambda: _download_canceled(job_id)):
+                    client.check_photo(photo)
                 if _should_stop(job_id, album_id, tracker, pause_ev, stop_event):
                     return
                 pages = len(photo) if hasattr(photo, "__len__") and photo.page_arr else 0
@@ -1179,6 +1200,8 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str], *, stop
 
         tracker.close()
 
+    except DownloadInterrupted:
+        return
     except Exception as e:
         if stop_event is not None and stop_event.is_set():
             log.info(f"停机期间上游调用结束，保留任务供恢复 job_id={job_id} error={type(e).__name__}")

@@ -15,7 +15,7 @@ from .instance_lock import maintenance_lock
 # 资源库最大条目安全上限（防止全表扫描 OOM）
 _LIBRARY_MAX_ITEMS = 10000
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 DB_DIR = get_data_dir()
 DB_PATH = DB_DIR / "app.db"
 _initialization_lock = threading.RLock()
@@ -245,6 +245,13 @@ def _run_migrations(conn):
         conn.commit()
     if version < 3:
         _migrate_resource_catalog(conn)
+    if version < 4:
+        with conn:
+            if "queued_at" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
+                conn.execute("ALTER TABLE jobs ADD COLUMN queued_at TEXT")
+            conn.execute("UPDATE jobs SET queued_at=created_at WHERE queued_at IS NULL")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, queued_at, id)")
+            conn.execute("PRAGMA user_version = 4")
 
 
 def _migrate_resource_catalog(conn):
@@ -500,7 +507,8 @@ def claim_next_queued_job(excluded_album_ids=()) -> dict | None:
         exclusion = (" AND album_id NOT IN (" + ",".join("?" for _ in excluded_album_ids) + ")"
                      if excluded_album_ids else "")
         row = conn.execute(
-            "SELECT * FROM jobs WHERE status='queued'" + exclusion + " ORDER BY created_at ASC, id ASC LIMIT 1",
+            "SELECT * FROM jobs WHERE status='queued'" + exclusion
+            + " ORDER BY COALESCE(NULLIF(queued_at, ''), created_at, ''), id LIMIT 1",
             excluded_album_ids,
         ).fetchone()
         if not row:

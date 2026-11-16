@@ -4,7 +4,7 @@ Matching active requests share one job. A chapter selection is a set for this pu
 the empty set still means an entire album, never an arbitrary partial selection.
 """
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 
@@ -76,8 +76,8 @@ def _enqueue(conn, album_id: str, title: str, photo_ids: list[str], output_path=
     now = datetime.now().isoformat()
     conn.execute(
         "INSERT INTO jobs (job_id, album_id, title, selected_photo_ids, status, "
-        "output_path, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)",
-        (job_id, album_id, title, json.dumps(photo_ids, ensure_ascii=False), output_path, now, now),
+        "output_path, created_at, updated_at, queued_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
+        (job_id, album_id, title, json.dumps(photo_ids, ensure_ascii=False), output_path, now, now, now),
     )
     _sync_wishlist(conn, album_id)
     return EnqueueResult(job_id, True)
@@ -119,6 +119,28 @@ def retry_download(job_id: str) -> EnqueueResult:
         return _enqueue(conn, album_id, source["title"] or "", selected, output_path)
 
 
+def queue_tail_time(conn) -> str:
+    """An explicit queue position after all waiting work, without changing history.
+
+    Legacy rows have no queued_at and retain their original created_at ordering.
+    The database write transaction serializes append decisions; clock rollback
+    cannot put a recovered task ahead of work that is already waiting.
+    """
+    now = datetime.now()
+    latest = conn.execute(
+        "SELECT MAX(COALESCE(NULLIF(queued_at, ''), created_at)) FROM jobs WHERE status='queued'",
+    ).fetchone()[0]
+    if latest:
+        try:
+            stamp = datetime.fromisoformat(latest)
+            if stamp.tzinfo is not None:
+                stamp = stamp.astimezone().replace(tzinfo=None)
+            now = max(now, stamp)
+        except (TypeError, ValueError):
+            pass  # Malformed legacy history does not block recovery of valid tasks.
+    return (now + timedelta(microseconds=1)).isoformat()
+
+
 def recover_interrupted(excluded_job_ids=()) -> int:
     """Requeue interrupted executors atomically; a user's paused jobs stay paused.
 
@@ -129,12 +151,14 @@ def recover_interrupted(excluded_job_ids=()) -> int:
     where = " AND job_id NOT IN (SELECT value FROM json_each(?))" if excluded else ""
     params = (json.dumps(excluded),) if excluded else ()
     with db.transaction() as conn:
-        rows = conn.execute("SELECT job_id, album_id FROM jobs WHERE status='running'" + where, params).fetchall()
+        rows = conn.execute("SELECT job_id, album_id FROM jobs WHERE status='running'" + where
+                            + " ORDER BY created_at, id", params).fetchall()
         if not rows:
             return 0
         now = datetime.now().isoformat()
-        conn.executemany("UPDATE jobs SET status='queued', updated_at=? WHERE job_id=? AND status='running'",
-                         [(now, row["job_id"]) for row in rows])
+        for row in rows:
+            conn.execute("UPDATE jobs SET status='queued', updated_at=?, queued_at=? "
+                         "WHERE job_id=? AND status='running'", (now, queue_tail_time(conn), row["job_id"]))
         for album_id in {row["album_id"] for row in rows}:
             _sync_wishlist(conn, album_id)
         return len(rows)
@@ -146,8 +170,9 @@ def requeue_interrupted(job_id: str) -> bool:
         row = conn.execute("SELECT album_id FROM jobs WHERE job_id=? AND status='running'", (job_id,)).fetchone()
         if row is None:
             return False
-        changed = conn.execute("UPDATE jobs SET status='queued', updated_at=? WHERE job_id=? AND status='running'",
-                               (datetime.now().isoformat(), job_id)).rowcount
+        changed = conn.execute("UPDATE jobs SET status='queued', updated_at=?, queued_at=? "
+                               "WHERE job_id=? AND status='running'",
+                               (datetime.now().isoformat(), queue_tail_time(conn), job_id)).rowcount
         if changed:
             _sync_wishlist(conn, row["album_id"])
         return bool(changed)
@@ -160,8 +185,12 @@ def resume_download(job_id: str, *, has_executor: bool) -> tuple[bool, str]:
         if row is None or row["status"] != "paused":
             status = row["status"] if row else "不存在"
             return False, f"当前状态为「{status}」，无法恢复"
-        status = "running" if has_executor else "queued"
-        conn.execute("UPDATE jobs SET status=?, updated_at=? WHERE job_id=? AND status='paused'",
-                     (status, datetime.now().isoformat(), job_id))
+        if has_executor:
+            conn.execute("UPDATE jobs SET status='running', updated_at=? WHERE job_id=? AND status='paused'",
+                         (datetime.now().isoformat(), job_id))
+        else:
+            conn.execute("UPDATE jobs SET status='queued', updated_at=?, queued_at=? "
+                         "WHERE job_id=? AND status='paused'",
+                         (datetime.now().isoformat(), queue_tail_time(conn), job_id))
         _sync_wishlist(conn, row["album_id"])
         return True, "已恢复"

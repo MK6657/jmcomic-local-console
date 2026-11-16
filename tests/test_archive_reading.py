@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from fake_transport import owned_client
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_JS = ROOT / "static" / "js"
@@ -701,6 +702,7 @@ class _Album(list):
 
 class _Client:
     def __init__(self, album):
+        owned_client(self)
         self.album = album
 
     def get_album_detail(self, album_id):

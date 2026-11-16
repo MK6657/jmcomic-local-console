@@ -50,7 +50,7 @@ _KNOWN_TABLES = {"jobs", "settings", "search_history", "wishlist", "album_tags",
                  "resource_catalog", "sqlite_sequence"}
 _JOB_COLUMNS = {"id", "job_id", "album_id", "title", "selected_photo_ids", "status", "total_pages",
                 "done_pages", "current_photo", "current_image", "output_path", "error_message",
-                "created_at", "updated_at", "completed_at", "superseded_at"}
+                "created_at", "updated_at", "completed_at", "superseded_at", "queued_at"}
 _RESOURCE_COLUMNS = {"job_id", "job_order", "album_id", "title", "selected_photo_ids", "output_path",
                      "created_at", "updated_at", "completed_at", "superseded_at"}
 
@@ -158,6 +158,8 @@ def _validate_schema(conn, manifest_version: int) -> dict[str, str]:
         raise RestoreError("unsupported_schema", "备份数据库结构不受当前程序支持，目标实例未发布")
     checks = {"jobs": ({"job_id", "album_id", "status", "output_path"}, _JOB_COLUMNS),
               "settings": ({"key", "value"}, {"key", "value"})}
+    if version >= 4:
+        checks["jobs"][0].add("queued_at")
     if version >= 3:
         if "resource_catalog" not in tables:
             raise RestoreError("unsupported_schema", "备份资源目录结构不完整，目标实例未发布")
@@ -202,7 +204,18 @@ def _rewrite_database(path: Path, manifest: dict, final_downloads: Path, deadlin
             counts.append(count)
         connection.execute("INSERT INTO settings(key, value) VALUES ('download_root', ?) "
                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(final_downloads),))
-        requeued = connection.execute("UPDATE jobs SET status='queued' WHERE status='running'").rowcount
+        if manifest["schema_version"] >= 4:
+            from .task_commands import queue_tail_time
+            interrupted = connection.execute(
+                "SELECT job_id FROM jobs WHERE status='running' ORDER BY created_at, id",
+            ).fetchall()
+            for (job_id,) in interrupted:
+                _check_deadline(deadline)
+                connection.execute("UPDATE jobs SET status='queued', queued_at=? WHERE job_id=?",
+                                   (queue_tail_time(connection), job_id))
+            requeued = len(interrupted)
+        else:
+            requeued = connection.execute("UPDATE jobs SET status='queued' WHERE status='running'").rowcount
         for sql in triggers.values():
             connection.execute(sql)
         connection.commit()

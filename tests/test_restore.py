@@ -115,6 +115,31 @@ def test_inventory_restore_reports_missing_resources_and_preserves_pauses(source
     assert result.requeued_jobs == 1
 
 
+def test_restore_appends_interrupted_jobs_after_waiting_queue(source, tmp_path):
+    from core import database as db
+    from core.restore import restore_backup
+    for job_id, status, created in (
+        ("old_running", "running", "2020-01-01T00:00:00"),
+        ("next_running", "running", "2020-01-02T00:00:00"),
+        ("waiting", "queued", "2020-01-03T00:00:00"),
+        ("paused", "paused", "2020-01-04T00:00:00"),
+    ):
+        db.insert_job(job_id, "456", "Other", ["81"])
+        with db.transaction() as conn:
+            conn.execute("UPDATE jobs SET status=?, created_at=?, queued_at=? WHERE job_id=?",
+                         (status, created, "2099-01-01T00:00:00" if job_id == "waiting" else created, job_id))
+    backup = _backup(source, tmp_path / "queue.zip")
+    result = restore_backup(backup, tmp_path / "queue-restored")
+    with _db(result.database) as conn:
+        assert [row[0] for row in conn.execute(
+            "SELECT job_id FROM jobs WHERE status='queued' "
+            "ORDER BY COALESCE(NULLIF(queued_at,''),created_at,''), id",
+        )] == ["waiting", "old_running", "next_running"]
+        assert conn.execute("SELECT created_at FROM jobs WHERE job_id='old_running'").fetchone()[0] == "2020-01-01T00:00:00"
+        assert conn.execute("SELECT status FROM jobs WHERE job_id='paused'").fetchone()[0] == "paused"
+    assert result.requeued_jobs == 2
+
+
 @pytest.mark.parametrize("source_root,output", [
     (r"D:\Library\downloads", r"d:\library\downloads\Title_123"),
     ("/srv/library/downloads", "/srv/library/downloads/Title_123"),

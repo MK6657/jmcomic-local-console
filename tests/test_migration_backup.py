@@ -43,7 +43,7 @@ def test_original_schema_is_backed_up_before_migration_and_not_again_on_next_ini
         assert conn.execute("SELECT title FROM jobs WHERE job_id='old_job'").fetchone()[0] == "Keep title"
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='resource_catalog'").fetchone() is None
     with sqlite3.connect(database) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.CURRENT_SCHEMA_VERSION
         assert conn.execute("SELECT title FROM resource_catalog").fetchone()[0] == "Keep title"
     db.init_db()
     assert list(backups.glob("*.zip")) == archives
