@@ -10,6 +10,20 @@ This is a **local Python application**, not a browser extension or a hosted serv
 Only use it for content you are authorized to access and download. This repository
 does not include downloaded content, credentials, or the upstream reference project.
 
+## Backend review branch
+
+The Windows backend refactor is published on **`codex/refactor-windows`**; `main`
+keeps the previous version. Reviewers should follow the [clone and test guide](docs/GITHUB_REVIEW.md)
+and [independent audit instructions](docs/INDEPENDENT_BACKEND_AUDIT.md).
+
+```bash
+git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
+cd jmcomic-backend-review
+```
+
+The frozen product code is commit `7ae6ccb`; subsequent review-documentation commits
+do not change the application. Use Windows for the complete runtime acceptance checks.
+
 ## Requirements
 
 The refactor branch includes a Windows portable build with a bundled Python runtime.

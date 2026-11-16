@@ -8,6 +8,19 @@
 这是一个**本地 Python 应用**，不是浏览器扩展，也不是在线托管服务。
 请仅访问和下载你有权使用的内容。仓库不包含下载内容、个人凭据或第三方参考项目。
 
+## 后端复检分支
+
+本次 Windows 后端重构发布在 **`codex/refactor-windows`** 分支，`main` 保留原版本。
+请审核者先阅读[克隆与测试指南](docs/GITHUB_REVIEW.md)和[独立审查委托](docs/INDEPENDENT_BACKEND_AUDIT.md)。
+
+```bash
+git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
+cd jmcomic-backend-review
+```
+
+产品代码固定为 `7ae6ccb`，后续审查文档提交不改变程序行为。完整运行验收使用 Windows；
+仅下载 GitHub 默认分支会拿到原版本。
+
 ## 环境要求
 
 重构分支提供包含Python运行时的Windows便携版构建流程，使用方式与验证范围见[Windows便携版](docs/WINDOWS_RELEASE.md)。以下环境要求适用于源码运行。

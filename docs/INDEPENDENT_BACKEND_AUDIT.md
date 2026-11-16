@@ -13,9 +13,18 @@
 | 完整审查差异 | `c310e3f..7ae6ccb` |
 | 最后一批收尾差异 | `c64a1bc..7ae6ccb`；只看这一段会遗漏前面的重构 |
 | 原日常项目，**不是待审工作区** | `D:\jmcomic-local-console`，原 `main` 分支 |
-| GitHub仓库 | `https://github.com/MK6657/jmcomic-local-console` |
+| GitHub公开分支 | `https://github.com/MK6657/jmcomic-local-console/tree/codex/refactor-windows` |
 
-这批重构提交尚未推送远端。**直接克隆GitHub，或在 `D:\jmcomic-local-console` 审查，都不能替代对上述工作树的审查。** 本说明可能作为后续文档提交加入分支；产品代码审查目标仍固定为 `7ae6ccb`。
+本次通过公开仓库的独立分支交付，`main` 保持重构前版本。**必须显式克隆 `codex/refactor-windows`；只下载GitHub默认分支，或在本机原日常项目 `D:\jmcomic-local-console` 审查，会拿到旧代码。** 后续文档提交不改变产品代码审查目标 `7ae6ccb`。本机绝对路径仅用于原开发机定位，异机请使用自己的克隆目录，详见 [GitHub克隆与测试指南](GITHUB_REVIEW.md)。
+
+```bash
+git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
+cd jmcomic-backend-review
+git show -s --format="%H %s" 7ae6ccb
+git diff --name-only 7ae6ccb..HEAD
+```
+
+最后一条在本次交付快照中只应列出审查或使用文档；发现其他变化时，先明确实际审查范围。
 
 本机先核实位置和版本，不切分支、不重置工作区：
 
@@ -32,7 +41,7 @@ git diff --stat c310e3f..7ae6ccb
 
 ## 2. 异机或云端审核怎么交付
 
-请提供**源码快照、完整差异文件和本文**。便携EXE用于行为验证，不能代替源码审查。不要直接压缩整个工作目录，也不要打包日常项目目录。
+首选按上一节克隆公开分支；没有Git时，可在GitHub分支页面选择Code → Download ZIP。分支ZIP不含Git历史，完整差异仍应通过仓库比较或下列patch取得。需要离线交付时，请提供**源码快照、完整差异文件和本文**。便携EXE用于行为验证，不能代替源码审查。不要直接压缩整个工作目录，也不要打包日常项目目录。
 
 可在上述工作树中执行以下导出命令。它们只导出固定提交中的Git跟踪文件及两个提交之间的差异，不打包虚拟环境、未跟踪的数据库或下载目录：
 
@@ -131,7 +140,7 @@ Get-ChildItem -LiteralPath '.\static\js' -Filter '*.js' -File | ForEach-Object {
 git diff --check
 ```
 
-本次固定代码的已有结果：**1571 passed，2 skipped，141.08秒**；跳过项涉及当前Windows账户的文件符号链接权限。Python编译、16个JS语法检查和pip依赖检查通过。审核者应记录自己实际执行的结果；不同环境的跳过项需单独说明，不必把数量一致作为唯一判断标准。
+本次固定代码最近一次重新构建时的结果：**1571 passed，2 skipped，147.17秒**（2026-11-16）；两项跳过仍为Windows环境条件。Python编译、16个JS语法检查和pip依赖检查通过。审核者应记录自己实际执行的结果；不同环境的跳过项需单独说明，不必把数量一致作为唯一判断标准。
 
 如在异机解压源码，使用独立环境安装 `requirements-dev.txt`；构建EXE时再使用 `requirements-build.txt`。不要复用个人服务环境。本次构建验证使用Windows x64、Python 3.11.15；具体依赖组合见候选旁的 `release.json`，其中 `jmcomic` 为2.7.10、`curl_cffi` 为0.17.0。不要把本机通过当成所有Python/Windows版本均已通过。
 
@@ -164,18 +173,18 @@ git diff --check
 本机发行目录：
 
 ```text
-C:\Users\ggy\.codex\worktrees\windows-backend-refactor\jmcomic-local-console\releases\windows-x64-2f43ae06f9e8
+C:\Users\ggy\.codex\worktrees\windows-backend-refactor\jmcomic-local-console\releases\windows-x64-2e06f6438219
 ```
 
-ZIP：`JMComic-windows-x64.zip`，34,104,230字节。
+ZIP：`JMComic-windows-x64.zip`，34,104,283字节。
 
 SHA-256：
 
 ```text
-61570e2f1d78c041c0219dfa3a0a206fbea65eb2a48797a22cc6cc485c28c41d
+b51a0d0354d261d296840f72e9d8b3d12450e40ba3ca5af4e9e8c4fc1c04098b
 ```
 
-该目录含 `release.json`、`SHA256SUMS.txt`、ZIP和解压后的 `JMComic`。源码输入指纹：`2f43ae06f9e8029b34a18aef69ceac198c44436648fe9487d675d735e40cfc95`。这个指纹与Git提交ID不同，是构建输入的内容摘要；本说明作为后续独立文档加入，不改变该候选的产品代码。
+该目录含 `release.json`、`SHA256SUMS.txt`、ZIP和解压后的 `JMComic`。源码输入指纹：`2e06f6438219a72e3dcd98f2dec1c630ba28435921b169b4388f24ab43f36188`。这是2026-11-16恢复工作区后重新构建的候选，原 `2f43ae06f9e8` 产物已不在本地，勿混用其哈希。这个指纹与Git提交ID不同，是构建输入的内容摘要；本说明作为后续独立文档加入，不改变该候选的产品代码。
 
 `releases/` 未加入Git，源码ZIP不会自动包含发行包，需要行为复检时由提供者另附。核对SHA-256后完整解压，保留 `_internal`，运行：
 
@@ -187,7 +196,7 @@ SHA-256：
 每条均需退出码0，最后一行JSON为 `status: ok`。也可在源码工作树中显式验证整个发行目录：
 
 ```powershell
-& $auditPython tests/check_windows_release.py '.\releases\windows-x64-2f43ae06f9e8' --check-launcher
+& $auditPython tests/check_windows_release.py '.\releases\windows-x64-2e06f6438219' --check-launcher
 ```
 
 该检查覆盖ZIP哈希/CRC、中文及空格路径、去除系统Python路径后的EXE自检、空备份校验和生产锁忙时拒绝启动。不是干净虚拟机验收，也不是签名或安装/卸载验收。
@@ -219,4 +228,4 @@ SHA-256：
 
 ## 10. 可直接转发给审查代理的简短任务
 
-> 请先阅读这份 `INDEPENDENT_BACKEND_AUDIT.md` 和项目 `AGENTS.md`，独立审查 `codex/refactor-windows` 的后端重构。产品代码目标固定为 `7ae6ccb`，完整差异为 `c310e3f..7ae6ccb`。按文档确认本机工作树或使用提供的源码ZIP及patch，不能只审GitHub main。默认只读审查；必要验证使用临时实例，保留pytest的socket/libcurl阻断，不操作日常实例、不自动真实下载、不修改/提交/部署。重点寻找数据安全、队列卡死、设置丢失、后台调用与客户端所有权、停机竞态、迁移/备份恢复及测试有效性问题。输出按严重性排序的Markdown审查报告，附准确位置、触发条件、影响与证据，区分真实缺陷、建议和未验证范围。
+> 请从公开仓库 `https://github.com/MK6657/jmcomic-local-console` 显式克隆 `codex/refactor-windows` 分支，先阅读 `docs/GITHUB_REVIEW.md`、这份 `INDEPENDENT_BACKEND_AUDIT.md` 和项目 `AGENTS.md`，独立审查后端重构。产品代码目标固定为 `7ae6ccb`，完整差异为 `c310e3f..7ae6ccb`，后续仅为文档提交；不能只审GitHub main。默认只读审查；必要验证使用临时实例，保留pytest的socket/libcurl阻断，不操作日常实例、不自动真实下载、不修改/提交/部署。完整运行验收使用Windows，其他系统的验证边界须如实说明。重点寻找数据安全、队列卡死、设置丢失、后台调用与客户端所有权、停机竞态、迁移/备份恢复及测试有效性问题。输出按严重性排序的Markdown审查报告，附准确位置、触发条件、影响与证据，区分真实缺陷、建议和未验证范围。
