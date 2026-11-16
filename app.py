@@ -37,6 +37,7 @@ _FALLBACK_PORTS = [5001, 5002, 5003]
 
 
 _mutex_handle = None
+_shutdown_control = None
 
 
 def _acquire_lock():
@@ -142,8 +143,8 @@ def _bind_preemptive() -> socket.socket:
     raise RuntimeError(f"无可用端口（尝试了 {_DEFAULT_PORT}, {_FALLBACK_PORTS} 均被占）")
 
 
-def _release_lock():
-    """释放锁文件和端口记录"""
+def _release_lock(*, keep_process_lock=False):
+    """Clear identity records; entry shutdown keeps the OS lease until exit."""
     global _mutex_handle
     try:
         if _PID_FILE.exists():
@@ -159,7 +160,7 @@ def _release_lock():
                 _PORT_FILE.unlink()
     except Exception:
         pass
-    if _mutex_handle is not None:
+    if _mutex_handle is not None and not keep_process_lock:
         _mutex_handle.close()
         _mutex_handle = None
 
@@ -179,6 +180,9 @@ import core.database as db
 from core.job_manager import job_manager
 from core import scheduler, update_checker
 from core.runtime import ApplicationRuntime
+from core.http_server import ManagedHTTPServer
+from core.process_control import create_shutdown_control, SHUTDOWN_PROTOCOL
+from core.progress import progress_manager
 
 # ── jmcomic 库全局优化（必须在任何 client 创建前设置）──
 from core.sdk_adapter import configure_sdk
@@ -347,13 +351,16 @@ def create_app() -> Flask:
 
 def _startup_record(port: int) -> dict:
     """runtime/data/flask.json 的内容：launcher 用它核实服务身份、决定复用还是重启。"""
-    return {
+    record = {
         "pid": os.getpid(),
         "port": port,
         "timestamp": time.time(),
         "launch_token": os.environ.get("JMCONSOLE_LAUNCH_TOKEN", ""),
         "code_fingerprint": _CODE_FINGERPRINT,
     }
+    if _shutdown_control is not None:
+        record.update(shutdown_protocol=SHUTDOWN_PROTOCOL, shutdown_token=_shutdown_control.token)
+    return record
 
 
 class _ShutdownRequested(BaseException):
@@ -362,9 +369,11 @@ class _ShutdownRequested(BaseException):
 
 def main():
     import signal
+    global _shutdown_control
     install_process_hooks()
     runtime = ApplicationRuntime(job_manager, scheduler, update_checker, logger=log)
     sock = None
+    http = None
     acquired = False
     maintenance_started = False
     closing = False
@@ -388,13 +397,11 @@ def main():
             raise
         for signum in (signal.SIGINT, signal.SIGTERM):
             old_handlers[signum] = signal.signal(signum, request_shutdown)
+        _shutdown_control = create_shutdown_control(os.environ.get("JMCONSOLE_LAUNCH_TOKEN"))
         application = create_app()  # Initializes schema, never recovers or starts jobs.
-        try:
-            from waitress import serve
-        except ImportError:
-            raise RuntimeError("运行依赖缺失，请执行 python -m pip install -r requirements.txt") from None
         sock = _bind_preemptive()
         actual_port = sock.getsockname()[1]
+        http = ManagedHTTPServer(application, sock)
         # Acquire a listener before changing interrupted task states or starting
         # any service that can make upstream requests or execute queued downloads.
         maintenance_started = True
@@ -407,19 +414,37 @@ def main():
         runtime.start()
         _PORT_FILE.write_text(json.dumps(_startup_record(actual_port)))
         log.info(f"服务已启动 → http://127.0.0.1:{actual_port}（waitress）")
-        serve(application, sockets=[sock], threads=128)
+        http.run()
     except _ShutdownRequested:
         pass
     finally:
         closing = True
+        control_stopped = True
+        if _shutdown_control is not None:
+            try:
+                control_stopped = _shutdown_control.stop()
+                if control_stopped:
+                    _shutdown_control = None
+            except Exception:
+                control_stopped = False
+            if not control_stopped:
+                log.error("停机控制线程未排空或关闭失败，保留实例所有权")
         drained = False
         try:
             safe = runtime.stop()
-            drained = safe
+            safe = safe and control_stopped
         except Exception as exc:
             safe = False
             log.error(f"后台运行时关闭失败: {type(exc).__name__}")
         finally:
+            if http is not None:
+                try:
+                    progress_manager.close_all()
+                    safe = http.stop() and safe
+                except Exception as exc:
+                    safe = False
+                    log.error(f"HTTP服务未排空: {type(exc).__name__}")
+            drained = safe
             if sock is not None:
                 try:
                     sock.close()
@@ -428,7 +453,11 @@ def main():
                     log.error(f"监听端口关闭失败: {type(exc).__name__}")
             if acquired and drained:
                 try:
-                    _release_lock()
+                    # Shared metadata futures can outlive their HTTP request,
+                    # and online prefetch is not yet part of Runtime. Even after
+                    # the owned services drain, retain the OS mutex until this
+                    # process really exits so maintenance cannot overlap them.
+                    _release_lock(keep_process_lock=True)
                 except Exception as exc:
                     safe = False
                     log.error(f"服务启动记录清理失败: {type(exc).__name__}")

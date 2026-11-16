@@ -112,6 +112,14 @@ class ProgressManager:
             if tracker:
                 tracker.close()
 
+    def close_all(self):
+        """End idle SSE generators during process shutdown, preserving job rows."""
+        with self._lock:
+            trackers = list(self._trackers.values())
+            self._trackers.clear()
+        for tracker in trackers:
+            tracker.close()
+
 
 # 全局实例
 progress_manager = ProgressManager()

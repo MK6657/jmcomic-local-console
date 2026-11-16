@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
 from core.path_utils import get_data_dir, get_log_dir, get_path_config
+from core.process_control import request_shutdown, SHUTDOWN_PROTOCOL
 
 HOST = "127.0.0.1"
 ROOT = Path(__file__).resolve().parent
@@ -150,26 +151,30 @@ def process_alive(pid):
         kernel32.CloseHandle(handle)
 
 
-def stop_outdated_server(pid, timeout=10, port=None):
-    """Stop the server whose identity get_running_server() verified. Interrupted downloads are
-    re-queued by app.py at the next start."""
-    try:
-        flush_server_logs(port)
-    finally:  # the stop must happen even if the flush raises or is interrupted (Ctrl+C)
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW, timeout=10,
-            )
-        else:
-            os.kill(pid, 15)
+def stop_outdated_server(pid, timeout=20, port=None, record=None):
+    """Notify a verified service and wait for actual exit; never force an upgrade."""
+    verified = get_running_server(expected_pid=pid)
+    if verified is None or verified[0] != port:
+        if not process_alive(pid):
+            return
+        raise RuntimeError("服务身份无法再次核实，已保留进程，请检查后重试")
+    current = verified[1]
+    if record is not None and (record.get("launch_token") != current.get("launch_token")
+                               or record.get("shutdown_token") != current.get("shutdown_token")):
+        raise RuntimeError("运行服务的身份已变化，已取消重启")
+    if os.name == "nt":
+        if current.get("shutdown_protocol") != SHUTDOWN_PROTOCOL:
+            raise RuntimeError("旧服务不支持协作停机，请在原启动窗口正常关闭，再启动新版本")
+        if not request_shutdown(current.get("shutdown_token")):
+            raise RuntimeError("未找到该服务的停机通道，已保留进程")
+    else:
+        os.kill(pid, 15)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not process_alive(pid):
             return
         time.sleep(POLL_INTERVAL)
-    raise RuntimeError(f"Could not stop the outdated server (PID {pid}); close it and run start.bat again.")
+    raise RuntimeError(f"服务仍在退出（PID {pid}），已取消重启；请等待在途任务结束后重试")
 
 
 def _day(timestamp):
@@ -250,26 +255,26 @@ def launch_flask(root=None):
 
 
 def cleanup(proc):
-    """Only stop our live child tree, including Windows venv redirector children."""
+    """Drain our own child without interpreting a missing event as safe to kill."""
     if proc.poll() is None:
-        try:
-            flush_server_logs(getattr(proc, "jm_port", None))
-        finally:  # the stop must happen even if the flush raises or is interrupted (Ctrl+C)
-            if os.name == "nt":
-                result = subprocess.run(
-                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW, timeout=10,
-                )
-                if result.returncode and proc.poll() is None:
-                    raise RuntimeError("Could not stop the owned server process tree")
-            else:
-                proc.terminate()
+        token = getattr(proc, "jm_launch_token", None)
+        notified = isinstance(token, str) and request_shutdown(token)
+        if notified:
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=20)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+                raise RuntimeError("服务尚未完成退出，进程已保留；请等待在途任务结束") from None
+            if proc.returncode:
+                raise RuntimeError("服务退出未完成全部清理，请检查日志后再启动")
+            return
+        # The event may already have closed while Python is still waiting for
+        # an in-flight SDK future. Absence never proves startup did no work.
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("停机通道不可用，进程仍在运行，已保留；请检查日志后重试") from None
+        if proc.returncode:
+            raise RuntimeError("服务启动或退出失败，请检查日志")
 
 
 def wait_until_ready(proc, timeout=MAX_WAIT):
@@ -290,6 +295,10 @@ def main(argv=None, quiet=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wait", "-w", action="store_true", help="Press Enter to stop the server")
     args = parser.parse_args(argv)
+    # Read-only preflight before opening or stopping a running instance. An old
+    # launcher must never stop a newer service only to fail on its future schema.
+    from core.database import _existing_schema
+    _existing_schema()
     server = get_running_server()
     if server is not None:
         port, record = server
@@ -298,7 +307,7 @@ def main(argv=None, quiet=False):
             return 0
         if not quiet:
             print(f"Program files changed since the running server (PID {record['pid']}) started; restarting it...")
-        stop_outdated_server(int(record["pid"]), port=port)
+        stop_outdated_server(int(record["pid"]), port=port, record=record)
     proc = launch_flask()
     keep_running = False
     try:

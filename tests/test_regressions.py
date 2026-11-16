@@ -219,16 +219,19 @@ def test_startup_token_handles_windows_redirector_pid(tmp_path, monkeypatch):
     assert launcher.get_running_port(expected_token="stale-launch") is None
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows process-tree cleanup")
-def test_cleanup_targets_only_owned_process_tree(monkeypatch):
+@pytest.mark.skipif(os.name != "nt", reason="Windows event shutdown")
+def test_cleanup_notifies_only_its_owned_launch_and_waits(monkeypatch):
     import launcher
-    proc = Mock(pid=4242)
+    proc = Mock(pid=4242, jm_launch_token="a" * 32, returncode=0)
     proc.poll.return_value = None
+    notify = Mock(return_value=True)
+    monkeypatch.setattr(launcher, "request_shutdown", notify)
     run = Mock(return_value=Mock(returncode=0))
     monkeypatch.setattr(launcher.subprocess, "run", run)
     launcher.cleanup(proc)
-    assert run.call_args.args[0] == ["taskkill", "/PID", "4242", "/T", "/F"]
-    proc.wait.assert_called_once_with(timeout=5)
+    notify.assert_called_once_with("a" * 32)
+    run.assert_not_called()
+    proc.wait.assert_called_once_with(timeout=20)
 
 
 def test_launcher_wait_stops_its_own_process(monkeypatch):

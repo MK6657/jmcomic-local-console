@@ -189,7 +189,8 @@ server instances and tests port fallback without contacting upstream services.
 
 There is no `package.json`, so npm lint/typecheck/build scripts are not provided.
 Use `tools/build_windows.py` for the portable Windows bundle. It publishes a new
-`releases/` directory only after the executable passes its isolated self-check;
+`releases/` directory only after the executable passes isolated asset/API and
+process lifecycle checks;
 see the [build guide](docs/WINDOWS_RELEASE.md).
 
 ## Troubleshooting and limitations

@@ -263,12 +263,14 @@ def entry(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "update_checker", updates)
     monkeypatch.setattr(app, "create_app", lambda: events.append("create_app") or "application")
     monkeypatch.setattr(app, "install_process_hooks", lambda: None)
+    monkeypatch.setattr(app, "create_shutdown_control", lambda token: None)
     monkeypatch.setattr(app, "start_log_maintenance", lambda: events.append("maintenance"))
     monkeypatch.setattr(app, "shutdown_logging", lambda: events.append("shutdown_logging"))
     monkeypatch.setattr(app, "_acquire_lock", lambda: events.append("lock"))
     marker = tmp_path / "flask.json"
     monkeypatch.setattr(app, "_PORT_FILE", marker)
-    def release():
+    def release(*, keep_process_lock=False):
+        assert keep_process_lock
         events.append("release")
         marker.unlink(missing_ok=True)
     monkeypatch.setattr(app, "_release_lock", release)
@@ -281,6 +283,14 @@ def entry(monkeypatch, tmp_path):
         assert marker.is_file()
         events.append("serve")
     monkeypatch.setattr(waitress, "serve", serve)
+    class HTTP:
+        def __init__(self, application, listener):
+            self.application, self.listener = application, listener
+        def run(self):
+            waitress.serve(self.application, sockets=[self.listener], threads=128)
+        def stop(self):
+            return True
+    monkeypatch.setattr(app, "ManagedHTTPServer", HTTP)
     handlers = {signal.SIGINT: "original-int", signal.SIGTERM: "original-term"}
     def set_handler(signum, handler):
         old = handlers[signum]
@@ -362,6 +372,33 @@ def test_entry_incomplete_drain_returns_failure_and_keeps_logging_available(entr
     assert "release" not in entry.events
     assert "shutdown_logging" not in entry.events
     assert entry.marker.exists()  # identity remains protected until OS process exit
+
+
+def test_entry_http_workers_still_running_keeps_instance_lock(entry, monkeypatch):
+    class HTTP:
+        def __init__(self, *args):
+            pass
+        def run(self):
+            pass
+        def stop(self):
+            return False
+    monkeypatch.setattr(entry.app, "ManagedHTTPServer", HTTP)
+    assert entry.app.main() == 1
+    assert "release" not in entry.events and entry.marker.exists()
+
+
+def test_entry_stops_control_before_restoring_signal_handlers(entry, monkeypatch):
+    from unittest.mock import Mock
+    control = Mock(token="a" * 32)
+    def stop():
+        assert callable(entry.handlers[signal.SIGINT])
+        entry.events.append("control.stop")
+        return True
+    control.stop.side_effect = stop
+    monkeypatch.setattr(entry.app, "create_shutdown_control", lambda token: control)
+    assert entry.app.main() == 0
+    assert entry.events.index("control.stop") < entry.events.index("stop:jobs")
+    assert entry.app._shutdown_control is None
 
 
 def test_entry_listener_close_failure_still_releases_ownership(entry):

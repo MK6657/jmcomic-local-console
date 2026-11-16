@@ -13,7 +13,7 @@ def launcher_env(monkeypatch):
     calls = {"opened": [], "stopped": [], "launched": 0}
     monkeypatch.setattr(launcher.webbrowser, "open", lambda url: calls["opened"].append(url))
     monkeypatch.setattr(launcher, "stop_outdated_server",
-                        lambda pid, port=None: calls["stopped"].append(pid))
+                        lambda pid, port=None, record=None: calls["stopped"].append(pid))
 
     def launch():
         calls["launched"] += 1
@@ -102,44 +102,44 @@ def test_server_records_its_code_fingerprint(app):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process-tree stop")
-def test_stopping_a_server_flushes_its_log_summaries_first(monkeypatch):
-    """taskkill /F skips the server's atexit flush of pending "N similar messages merged" summaries."""
+def test_stopping_a_verified_server_notifies_and_waits_without_force(monkeypatch):
     import launcher
     events = []
-    monkeypatch.setattr(launcher, "flush_server_logs", lambda port: events.append(("flush", port)))
+    record = {"pid": 4242, "shutdown_protocol": launcher.SHUTDOWN_PROTOCOL, "shutdown_token": "a" * 32}
+    monkeypatch.setattr(launcher, "get_running_server", lambda **kw: (5000, record))
+    monkeypatch.setattr(launcher, "request_shutdown", lambda token: events.append(("notify", token)) or True)
     monkeypatch.setattr(launcher.subprocess, "run",
-                        lambda args, **kwargs: events.append(("kill", args[2])) or Mock(returncode=0))
+                        lambda *a, **kw: pytest.fail("must not force terminate a verified service"))
     monkeypatch.setattr(launcher, "process_alive", lambda pid: False)
-    launcher.stop_outdated_server(4242, port=5000)
-    proc = Mock(pid=77, jm_port=5001)
+    launcher.stop_outdated_server(4242, port=5000, record=record)
+    proc = Mock(pid=77, jm_port=5001, jm_launch_token="b" * 32, returncode=0)
     proc.poll.return_value = None
     launcher.cleanup(proc)
-    assert events == [("flush", 5000), ("kill", "4242"), ("flush", 5001), ("kill", "77")]
+    assert events == [("notify", "a" * 32), ("notify", "b" * 32)]
+    proc.wait.assert_called_once_with(timeout=20)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process-tree stop")
 @pytest.mark.parametrize("failure", [KeyboardInterrupt, RuntimeError])
-def test_server_is_stopped_even_when_the_flush_fails(monkeypatch, failure):
-    """A second Ctrl+C during the flush wait (or any unexpected error) must not skip the taskkill: the
-    launcher would exit and leave the server holding its port and mutex."""
+def test_notification_failure_never_force_kills_running_service(monkeypatch, failure):
     import launcher
     events = []
-
-    def flush(port):
-        events.append(("flush", port))
-        raise failure("interrupted while waiting for the server")
-    monkeypatch.setattr(launcher, "flush_server_logs", flush)
+    record = {"pid": 4242, "shutdown_protocol": launcher.SHUTDOWN_PROTOCOL, "shutdown_token": "a" * 32}
+    monkeypatch.setattr(launcher, "get_running_server", lambda **kw: (5000, record))
+    def notify(token):
+        events.append(token)
+        raise failure("notification failed")
+    monkeypatch.setattr(launcher, "request_shutdown", notify)
     monkeypatch.setattr(launcher.subprocess, "run",
-                        lambda args, **kwargs: events.append(("kill", args[2])) or Mock(returncode=0))
-    monkeypatch.setattr(launcher, "process_alive", lambda pid: False)
+                        lambda *a, **kw: pytest.fail("must preserve the process"))
     with pytest.raises(failure):
         launcher.stop_outdated_server(4242, port=5000)
-    proc = Mock(pid=77, jm_port=5001)
+    proc = Mock(pid=77, jm_port=5001, jm_launch_token="b" * 32)
     proc.poll.return_value = None
     with pytest.raises(failure):
         launcher.cleanup(proc)
-    assert events == [("flush", 5000), ("kill", "4242"), ("flush", 5001), ("kill", "77")]
-    proc.wait.assert_called_once_with(timeout=5)
+    assert events == ["a" * 32, "b" * 32]
+    proc.wait.assert_not_called()
 
 
 class _ReplySocket:

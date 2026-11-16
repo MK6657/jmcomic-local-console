@@ -31,14 +31,15 @@ def source_fingerprint(root=ROOT):
     return digest.hexdigest()
 
 
-def check_bundle(executable, *, cwd):
+def check_bundle(executable, *, cwd, command="self-check"):
     # Prove the frozen program can load its own runtime without a system Python
     # or the build environment on PATH. Self-check overrides all instance paths.
     environment = {key: value for key, value in os.environ.items()
                    if key not in {"PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"} and not key.startswith("JMCONSOLE_")}
     environment["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
-    process = subprocess.run([str(executable), "self-check"], cwd=cwd, env=environment,
-                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
+    process = subprocess.run([str(executable), command], cwd=cwd, env=environment,
+                             capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             timeout=150 if command == "lifecycle-check" else 90)
     try:
         result = json.loads(process.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -94,9 +95,11 @@ def build(output=None):
         raise RuntimeError("构建期间源代码发生变化，产物未发布；请在代码稳定后重建")
     bundle = work / "dist" / "JMComic"
     result = check_bundle(bundle / "JMComic.exe", cwd=work)
+    lifecycle = check_bundle(bundle / "JMComic.exe", cwd=work, command="lifecycle-check")
     if source_fingerprint() != source_id:
         raise RuntimeError("自检期间源码发生变化，产物未发布")
     (bundle / "SELF_CHECK.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    (bundle / "LIFECYCLE_CHECK.json").write_text(json.dumps(lifecycle, indent=2) + "\n", encoding="utf-8")
     shutil.copyfile(ROOT / "docs" / "WINDOWS_RELEASE.md", bundle / "README-Windows.md")
     for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
         if (ROOT / name).is_file():
