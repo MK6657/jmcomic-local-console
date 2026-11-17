@@ -435,6 +435,32 @@ def test_attempt_cut_short_by_the_page_budget_is_not_held_against_the_host(env):
     assert not env.reader._host_failed_at
 
 
+@pytest.mark.parametrize("impl", ["api", "html"])
+def test_reader_uses_the_sdk_image_headers_without_its_retries(client, monkeypatch, impl):
+    from unittest.mock import Mock
+    from core import jm_service, online_reader
+    from core.settings import update_settings
+
+    update_settings({"client_type": impl, "retry_times": "3"})
+    image_client = jm_service.new_image_client()
+    url = "https://image.invalid/media/photos/123/00001.webp?v=1"
+    timeout = (2, 5)
+    payload = page_bytes(url)
+    get = Mock(side_effect=[Response(payload), ConnectionError("offline fixture")])
+    try:
+        assert image_client.client_key == impl and image_client.retry_times == 3
+        monkeypatch.setattr(image_client.get_root_postman().session, "get", get)
+        assert image_client.get_jm_image(url).content == payload
+        with pytest.raises(ConnectionError, match="offline fixture"):
+            online_reader._request(image_client, url, timeout)
+        sdk_call, reader_call = get.call_args_list
+        assert reader_call.args == sdk_call.args == (url,)
+        assert reader_call.kwargs["headers"] == sdk_call.kwargs["headers"]
+        assert reader_call.kwargs["timeout"] == timeout
+    finally:
+        jm_service.close_client(image_client)
+
+
 def test_image_clients_abandon_a_stalled_transfer(env, monkeypatch):
     """A host that accepts the request and then sends (almost) nothing is abandoned by libcurl itself after 8 s
     (LOW_SPEED_LIMIT / LOW_SPEED_TIME on the pooled client's session), so the next host gets its turn."""

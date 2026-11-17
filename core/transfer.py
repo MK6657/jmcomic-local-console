@@ -11,6 +11,8 @@ import math
 import threading
 import time
 
+from .sdk_adapter import transport_and_session
+
 _clock = time.monotonic
 _MISSING = object()
 _ACTIVE_ATTRIBUTE = "_jm_transfer_budget_active"
@@ -92,8 +94,7 @@ def download_budget(client, timeout, *, stop_event=None, should_cancel=None):
     if client is None or getattr(client, "_jm_downloader_shared", False):
         raise TransferConfigurationError()
     try:
-        root = client.get_root_postman()
-        session = root.session
+        root, session = transport_and_session(client)
         original_options = session.curl_options
         methods = {method: getattr(root, method) for method in ("get", "post")}
     except AttributeError:

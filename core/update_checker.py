@@ -25,6 +25,7 @@ from jmcomic import JmcomicException, MissingAlbumPhotoException
 
 from . import jm_service
 from . import local_availability
+from . import sdk_adapter
 from . import update_store
 from . import transfer
 from .logger import clear_request_id, log, set_request_id
@@ -262,14 +263,14 @@ def fetch_upstream_episodes(album_id: str, stop_event: threading.Event | None = 
         if remaining < 0.001:
             raise CheckFailed("timeout", "TransferTimeout", 0)
         with transfer.download_budget(client, remaining, stop_event=stop_event) as budget:
-            domains = [domain for domain in (client.get_domain_list() or []) if domain]
+            domains = sdk_adapter.client_domains(client)
             budget.check()
             if not domains:
                 raise CheckFailed("network", "NoDomain", 0)
             first = _cursor % len(domains)
             for index in list(range(first, len(domains))) + list(range(first)):
                 remaining = budget.check()
-                client.set_domain_list([domains[index]])
+                sdk_adapter.select_client_domain(client, domains[index])
                 # One shared deadline, tightened for this SDK call. Real postman
                 # GET/POST attempts see the smaller remaining timeout, even when
                 # get_album_detail makes more than one transport request.

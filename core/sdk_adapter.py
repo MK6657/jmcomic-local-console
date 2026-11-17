@@ -1,8 +1,7 @@
-"""Shared construction boundary for the installed jmcomic SDK.
+"""Construction and transport access for the installed jmcomic SDK.
 
 Importing this module does not initialize logging, a database, clients or network
-connections. Client leases and caches remain owned by jm_service; this adapter
-only applies the application's existing SDK policy and creates options/clients.
+connections. Callers own their clients, retry order, budgets and shutdown.
 """
 from copy import deepcopy
 import threading
@@ -63,3 +62,33 @@ def cached_client(option):
     """
     configure_sdk()
     return option.build_jm_client()
+
+
+def transport_and_session(client):
+    """Return the root GET/POST transport and the session it actually uses."""
+    root = client.get_root_postman()
+    return root, root.session
+
+
+def client_domains(client) -> tuple[str, ...]:
+    """Snapshot distinct nodes already selected by this client, in SDK order."""
+    return tuple(dict.fromkeys(domain for domain in (client.get_domain_list() or ()) if domain))
+
+
+def select_client_domain(client, domain: str) -> None:
+    """Restrict an exclusively owned check client to one node for its next call."""
+    client.set_domain_list([domain])
+
+
+def image_domains() -> tuple[str, ...]:
+    """Read the SDK's current image hosts, independent of the metadata client."""
+    from jmcomic import JmModuleConfig
+    return tuple(JmModuleConfig.DOMAIN_IMAGE_LIST)
+
+
+def get_image_once(client, url: str, timeout):
+    """Issue one postman GET with the SDK's image headers, outside its client retry loop."""
+    from jmcomic import JmModuleConfig
+    kwargs = {"headers": JmModuleConfig.new_html_headers()}
+    client.update_request_with_specify_domain(kwargs, None, True)
+    return client.postman.get(url, timeout=timeout, **kwargs)

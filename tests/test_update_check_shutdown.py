@@ -648,9 +648,10 @@ def test_real_sdk_keeps_its_own_domains_and_one_request_per_domain(checks, monke
     monkeypatch.setattr(jm_service, "new_check_client", lambda timeout: real)
     with pytest.raises(checker.CheckFailed) as failure:
         checker.fetch_upstream_episodes("3001")
-    assert failure.value.kind == "network" and failure.value.requests == len(expected)
-    assert len(calls) == len(expected)
-    assert all(domain in url for domain, (url, _) in zip(expected, calls))
+    nodes = dict.fromkeys(domain for domain in expected if domain)
+    assert failure.value.kind == "network" and failure.value.requests == len(nodes)
+    assert len(calls) == len(nodes)
+    assert all(domain in url for domain, (url, _) in zip(nodes, calls))
     assert all(0 < kwargs["timeout"] <= 20 for _, kwargs in calls)
     assert jm_service.get_active_client_count() == before
 

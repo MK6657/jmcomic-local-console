@@ -9,8 +9,7 @@ import threading
 import time
 from urllib.parse import urlsplit, urlunsplit
 
-from jmcomic import JmModuleConfig
-
+from .sdk_adapter import image_domains
 from .transfer import download_budget, DownloadInterrupted
 
 _host_lock = threading.Lock()
@@ -25,7 +24,7 @@ def _hosts(url):
     # a different endpoint; alternate only scheme+host and preserve path/query.
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         raise ValueError("图片地址无效")
-    candidates = list(dict.fromkeys([parts.netloc, *JmModuleConfig.DOMAIN_IMAGE_LIST]))
+    candidates = list(dict.fromkeys([parts.netloc, *image_domains()]))
     now = time.monotonic()
     with _host_lock:
         if _good_host in candidates:

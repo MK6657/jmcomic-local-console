@@ -9,6 +9,8 @@ import math
 import threading
 import time
 
+from .sdk_adapter import transport_and_session
+
 _clock = time.monotonic
 _context = threading.local()
 
@@ -74,8 +76,7 @@ def install(client):
     """Configure a newly constructed, unpublished metadata-only shared client."""
     from curl_cffi import CurlOpt
     from curl_cffi.requests import RetryStrategy
-    root = client.get_root_postman()
-    session = root.session
+    root, session = transport_and_session(client)
     options = dict(session.curl_options or {})
     # TIMEOUT_MS must come from each request's remaining deadline, not a
     # process-wide session value that would override the scalar timeout.

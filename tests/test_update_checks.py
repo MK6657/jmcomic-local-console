@@ -4,7 +4,6 @@ Everything runs in pytest's tmp folders with the network blocked (conftest): the
 never touched, the upstream is always a fake (a stubbed fetch, a strict fake client, or the real client whose
 libcurl call is blocked), and the background thread is only started once, with a stubbed fetch and a one-hour
 startup delay. Downloads use the REAL download_album_job with a fake client (as in test_offline_labels.py)."""
-import ast
 import json
 import random
 import shutil
@@ -14,9 +13,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-
-ROOT = Path(__file__).resolve().parent.parent
-UPDATE_MODULES = ("core/update_store.py", "core/update_checker.py", "routes/api_updates.py")
 
 # the album the fake download client serves: chapter 71 has 3 pages, 72 has 2, 73 has 4
 CHAPTERS = [("71", "第1话", 3), ("72", "第2话", 2), ("73", "第3话", 4)]
@@ -973,49 +969,47 @@ def test_checks_never_create_jobs_touch_files_or_caches(client, local_album, dow
     assert not any(t.name.startswith("dl-") for t in threading.enumerate())
 
 
-FORBIDDEN = {
-    "create_job", "insert_job", "retry_job", "claim_next_queued_job", "schedule_next", "_schedule_next",
-    "download_album_job", "download_album", "download_photo", "download_image", "check_photo",
-    "check_album_photos", "get_photo_detail", "get_jm_image", "new_image_client", "JmDownloader",
-    "SubscribeAlbumUpdatePlugin", "get_client", "get_album_detail_cached", "get_cached_album_detail",
-    "set_cached_album_detail", "update_wishlist_download_status", "upsert_album_meta", "batch_sync_auto_tags",
-    "create_tracker",
-}
-JM_SERVICE_ALLOWED = {"new_check_client", "close_client", "forget_album_detail"}
+@pytest.mark.parametrize(("impl", "detail_path"), [("api", "/album?id=3001"), ("html", "/album/3001")])
+def test_check_route_only_requests_album_detail_on_its_own_nodes(client, checker, local_album, monkeypatch,
+                                                                 impl, detail_path):
+    from curl_cffi.requests import Session
+    from jmcomic import JmModuleConfig
+    from core import jm_service
+    from core.settings import update_settings
 
+    nodes = [f"{impl}-first.invalid", f"{impl}-second.invalid"]
+    configured = [nodes[0], nodes[0], nodes[1]]
+    monkeypatch.setattr(JmModuleConfig, f"DOMAIN_{impl.upper()}_LIST", configured.copy())
+    update_settings({"client_type": impl, "retry_times": "5"})
+    calls, closed = [], []
+    original_close = Session.close
 
-def test_update_modules_reference_no_download_code():
-    album_detail_calls = {}
-    for rel in UPDATE_MODULES:
-        source = (ROOT / rel).read_text(encoding="utf-8")
-        for node in ast.walk(ast.parse(source)):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    assert "job_manager" not in alias.name and "jm_plugin" not in alias.name, (rel, alias.name)
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                names = {alias.name for alias in node.names}
-                assert "job_manager" not in module and "jm_plugin" not in module, (rel, module)
-                assert not names & {"job_manager", "jm_plugin"} and not names & FORBIDDEN, (rel, names)
-                if module.endswith("jm_service"):
-                    assert names <= JM_SERVICE_ALLOWED, (rel, names)
-            elif isinstance(node, ast.Name):
-                assert node.id not in FORBIDDEN, (rel, node.id)
-            elif isinstance(node, ast.Attribute):
-                assert node.attr not in FORBIDDEN, (rel, node.attr)
-                if isinstance(node.value, ast.Name) and node.value.id == "jm_service":
-                    assert node.attr in JM_SERVICE_ALLOWED, (rel, node.attr)
-        album_detail_calls[rel] = source.count(".get_album_detail(")
-    assert album_detail_calls == {"core/update_store.py": 0, "core/update_checker.py": 1, "routes/api_updates.py": 0}
-    checker = (ROOT / "core/update_checker.py").read_text(encoding="utf-8")
-    fetch = checker[checker.index("def fetch_upstream_episodes"):checker.index("def check_album")]
-    assert ".get_album_detail(" in fetch
-    store = ast.parse((ROOT / "core/update_store.py").read_text(encoding="utf-8"))
-    imported = {alias.name for node in ast.walk(store) if isinstance(node, ast.Import) for alias in node.names}
-    imported |= {f"{node.module or ''}:{alias.name}" for node in ast.walk(store)
-                 if isinstance(node, ast.ImportFrom) for alias in node.names}
-    assert imported == {"json", "random", "contextlib:contextmanager", "datetime:datetime", "datetime:timedelta",
-                        ":database", "validation:validate_numeric"}          # the store is database only
+    def request(session, method, url, **kwargs):
+        calls.append((session, method, url))
+        raise ConnectionError("offline fixture")
+
+    def close(session):
+        closed.append(session)
+        return original_close(session)
+
+    monkeypatch.setattr(Session, "request", request)
+    monkeypatch.setattr(Session, "close", close)
+    downloads = local_album().parent
+    jobs, files = _table("jobs"), _tree(downloads)
+    shared, _ = jm_service.get_client()
+    try:
+        assert _state(client)["update"]["state"] == "never" and not calls
+        response = client.post("/api/updates/3001/check")
+        assert response.status_code == 200 and response.json["outcome"] == "failed"
+        assert _state(client)["update"]["error"]["kind"] == "network"
+        expected = [("GET", f"https://{node}{detail_path}") for node in nodes]
+        assert [(method, url) for _, method, url in calls] == expected
+        assert len(closed) == 1 and all(session is closed[0] for session, _, _ in calls)
+        assert shared.get_root_postman().session is not closed[0] and shared.get_domain_list() == configured
+        assert [row["requests"] for row in _log_rows()] == [len(nodes)]
+        assert _table("jobs") == jobs and _tree(downloads) == files
+    finally:
+        jm_service.close_client(shared)
 
 
 def test_fetch_calls_only_album_detail_one_per_mirror(client, checker, monkeypatch):
@@ -1078,7 +1072,7 @@ def test_real_client_at_most_one_request_per_mirror(client, local_album, checker
     local_album()
     before = jm_service.get_active_client_count()
     assert update_checker.check_album("3001", "manual", lock_wait=0)["outcome"] == "failed"
-    domain_count = len(JmModuleConfig.DOMAIN_API_LIST)
+    domain_count = len({domain for domain in JmModuleConfig.DOMAIN_API_LIST if domain})
     assert len(performed) == domain_count                        # each configured mirror once, never more
     assert jm_service.get_active_client_count() == before       # the client was closed
     assert _row()["error_kind"] == "network"
@@ -1088,7 +1082,8 @@ def test_real_client_at_most_one_request_per_mirror(client, local_album, checker
 
 def test_check_ignores_detail_cache_and_request_body(client, local_album, checker, monkeypatch):
     from core import database as db, jm_service
-    local_album(baseline=False)
+    downloads = local_album(baseline=False).parent
+    jobs, files = _table("jobs"), _tree(downloads)
     db.set_cached_album_detail("3001", json.dumps({
         "album_id": "3001", "chapter_count": 5,
         "photos": [{"photo_id": str(p), "title": "x", "page_count": 1} for p in range(71, 76)]}))
@@ -1109,6 +1104,7 @@ def test_check_ignores_detail_cache_and_request_body(client, local_album, checke
     assert data["outcome"] == "baseline"
     assert data["update"]["upstream_count"] == 3 and data["update"]["baseline_count"] == 3
     assert _row()["baseline_ids"] == ["71", "72", "73"]
+    assert _table("jobs") == jobs and _tree(downloads) == files
 
 
 def test_detail_cache_dropped_only_for_that_album_on_new(client, local_album, upstream, checker):

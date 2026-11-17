@@ -11,7 +11,7 @@
 - 每页一个总时限（_page_budget()：设置页的“超时”，至少 _PAGE_BUDGET 秒），从请求到达算起：等同一页的预取、
   等取图名额、查章节列表、逐个域名尝试都算在内。
 - 取图不用 jmcomic 的重试：它按 API 域名重试，而图片 URL 是绝对地址，每次重试都打在同一个坏掉的图片域名上。
-  这里先试本页自己的图片域名（很快就失败时最多再试一次），再按 JmModuleConfig.DOMAIN_IMAGE_LIST 换域名（路径和参数
+  这里先试本页自己的图片域名（很快就失败时最多再试一次），再按 SDK 的图片域名列表换域名（路径和参数
   不变）；60 秒内失败过的域名排到最后，最近成功的域名优先。单次请求的连接超时是 _CONNECT_TIMEOUT，连上后卡住
   （_STALL_TIME 秒几乎收不到数据）就换下一个域名；还在收数据的慢速传输可以用完剩下的时间，不会被掐断后在别的域名从头再取。
 - 只有连接层面的失败（连不上、重置、卡住、响应不是图片）记为域名故障，被每页总时限截断的不算。回了 HTTP 状态码说明
@@ -39,6 +39,7 @@ from urllib.parse import urlsplit, urlunsplit
 from . import jm_service
 from .logger import log
 from .path_utils import get_cache_dir
+from .sdk_adapter import get_image_once, image_domains as _image_hosts, transport_and_session
 from .settings import get_settings
 
 CACHE_ROOT = get_cache_dir() / "online"
@@ -618,7 +619,7 @@ def _limit_stalls(client) -> None:
     平均不足 _STALL_SPEED 字节/秒就结束这次请求。不回数据的域名因此很快换掉，还在收数据的慢速传输不受影响。
     设在这个 client 自己的 curl_cffi session 上（每次请求都会带上）；没有这样的 session（测试替身）就跳过。"""
     try:
-        session = client.get_root_postman().session
+        _, session = transport_and_session(client)
         from curl_cffi import CurlOpt
     except Exception:
         return
@@ -641,11 +642,6 @@ class _FetchError(Exception):
     def __init__(self, message: str, status=None):
         super().__init__(message)
         self.status = status
-
-
-def _image_hosts():
-    from jmcomic import JmModuleConfig
-    return list(JmModuleConfig.DOMAIN_IMAGE_LIST)
 
 
 def _host_order(own: str) -> list:
@@ -681,13 +677,8 @@ def _host_result(host: str, ok: bool) -> None:
 
 
 def _request(client, url: str, timeout) -> bytes:
-    """一次图片请求。请求头与 jmcomic 取图时相同（按 client 类型：API 端是 APP 图片请求头，网页端是网页请求头，
-    见 AbstractJmClient.get_jm_image / update_request_with_specify_domain）；代理、impersonate、cookies 来自
-    client 的 session，与应用的设置一致。直接走 postman，不经过 jmcomic 的重试。"""
-    from jmcomic import JmModuleConfig
-    kwargs = {"headers": JmModuleConfig.new_html_headers()}
-    client.update_request_with_specify_domain(kwargs, None, True)
-    resp = client.postman.get(url, timeout=timeout, **kwargs)
+    """取一次图片，保留 HTTP 状态供阅读器判断是否换节点。"""
+    resp = get_image_once(client, url, timeout)
     status = resp.status_code
     if status != 200:
         raise _FetchError(f"HTTP {status}", status=status)
