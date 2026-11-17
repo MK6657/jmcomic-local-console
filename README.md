@@ -22,7 +22,8 @@ cd jmcomic-backend-review
 ```
 
 The original audit snapshot is commit `7ae6ccb`; the branch now also contains the
-first [audit corrections](docs/AUDIT_FIXES.md). Record the cloned HEAD when reviewing
+[audit corrections](docs/AUDIT_FIXES.md), including SSE/export capacity limits and
+paginated task history. Record the cloned HEAD when reviewing
 the current version. Use Windows for the complete runtime acceptance checks.
 
 ## Requirements

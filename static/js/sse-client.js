@@ -12,7 +12,16 @@
   'use strict';
 
   /** @type {Object<string, EventSource>} 统一连接池 */
-  var connections = {};
+  var connections = Object.create(null);
+  var retries = Object.create(null);
+
+  function closeConnection(jobId) {
+    if (retries[jobId]) clearTimeout(retries[jobId]);
+    delete retries[jobId];
+    if (connections[jobId]) connections[jobId].close();
+    delete connections[jobId];
+    delete window['_sseRetry_' + jobId];
+  }
 
   /** job_id → title 映射，供 Toast 使用 */
   window._jobTitleMap = {};
@@ -71,7 +80,7 @@
    * @param {string} jobId
    */
   window.connectSSE = function (jobId) {
-    if (connections[jobId]) return;
+    if (connections[jobId] || retries[jobId]) return;
 
     var source = new EventSource('/api/jobs/' + encodeURIComponent(jobId) + '/events');
     connections[jobId] = source;
@@ -90,9 +99,8 @@
 
     // ── completed ──
     source.addEventListener('completed', function (e) {
-      source.close();
-      delete connections[jobId];
-      delete window[retryKey];
+      if (connections[jobId] !== source) return;
+      closeConnection(jobId);
       try {
         var data = JSON.parse(e.data);
         var title = window._jobTitleMap[data.job_id] || data.job_id;
@@ -104,9 +112,8 @@
 
     // ── failed ──
     source.addEventListener('failed', function (e) {
-      source.close();
-      delete connections[jobId];
-      delete window[retryKey];
+      if (connections[jobId] !== source) return;
+      closeConnection(jobId);
       try {
         var data = JSON.parse(e.data);
         var title = window._jobTitleMap[data.job_id] || data.job_id;
@@ -130,9 +137,10 @@
     // 修复：原实现在每次建立连接时递增计数（下载管理页每次轮询重建连接都会 +1），
     // 长时间停留后一旦出错就不再重连；改为仅在出错时递增、连接成功后归零
     source.onopen = function () {
-      delete window[retryKey];
+      if (connections[jobId] === source) delete window[retryKey];
     };
     source.onerror = function () {
+      if (connections[jobId] !== source) return;
       source.close();
       delete connections[jobId];
       var retryCount = (window[retryKey] || 0) + 1;
@@ -142,7 +150,8 @@
         delete window[retryKey];
         return;
       }
-      setTimeout(function () {
+      retries[jobId] = setTimeout(function () {
+        delete retries[jobId];
         if (connections[jobId]) return;
         window.connectSSE(jobId);
       }, Math.min(3000 * retryCount, 15000));
@@ -163,10 +172,19 @@
    * 断开所有 SSE 连接
    */
   window.disconnectAllSSE = function () {
-    Object.keys(connections).forEach(function (id) {
-      try { connections[id].close(); } catch (e) { /* 忽略 */ }
-      delete connections[id];
+    Object.keys(connections).concat(Object.keys(retries)).forEach(function (id) {
+      try { closeConnection(id); } catch (e) { /* 忽略 */ }
     });
+  };
+
+  /** Keep polling from tearing down healthy streams or reviving old retries. */
+  window.syncSSE = function (jobIds) {
+    var wanted = Object.create(null);
+    jobIds.slice(0, 5).forEach(function (id) { wanted[id] = true; });
+    Object.keys(connections).concat(Object.keys(retries)).forEach(function (id) {
+      if (!wanted[id]) closeConnection(id);
+    });
+    Object.keys(wanted).forEach(function (id) { window.connectSSE(id); });
   };
 
   /**

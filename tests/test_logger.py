@@ -595,7 +595,7 @@ def test_sse_stream_failure_is_logged_with_the_request_id(client, monkeypatch):
     job_id = "job_" + "".join(random.choices("0123456789abcdef", k=12))
     tracker = progress_manager.create_tracker(job_id)
 
-    def failing_events(client_queue=None):
+    def failing_events(client_queue=None, *, max_duration=None):
         yield f"event: progress\ndata: {json.dumps({'job_id': job_id})}\n\n"
         json.dumps({"job_id": job_id, "bad": object()})  # an event that cannot be encoded
     monkeypatch.setattr(tracker, "iter_events", failing_events)
@@ -604,7 +604,9 @@ def test_sse_stream_failure_is_logged_with_the_request_id(client, monkeypatch):
         body = response.get_data(as_text=True)  # the stream ends instead of raising into the server
     finally:
         progress_manager.remove_tracker(job_id)
-    assert response.status_code == 200 and body.startswith("event: progress")
+        response.close()
+    assert response.status_code == 200 and body.startswith(": connected\n\n")
+    assert "event: progress" in body
     data = client.get("/api/system/logs", query_string={"source": "app", "q": job_id, "limit": 50}).get_json()
     by_message = {entry["message"].split("\n")[0]: entry for entry in data["entries"]}
     rid = by_message[f"API SSE连接 job_id={job_id}"]["request_id"]

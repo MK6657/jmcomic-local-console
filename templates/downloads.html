@@ -52,6 +52,7 @@
                 <p class="mt-2 mb-0">加载中...</p>
             </div>
         </div>
+        <div id="running-pagination" class="pagination-container"></div>
     </div>
 
     <!-- 排队中 -->
@@ -62,6 +63,7 @@
                 <p class="mt-2 mb-0">加载中...</p>
             </div>
         </div>
+        <div id="queued-pagination" class="pagination-container"></div>
     </div>
 
     <!-- 已完成 -->
@@ -69,10 +71,6 @@
         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
             <span class="fw-semibold text-success"><i class="bi bi-check-circle"></i> 已完成</span>
             <div class="d-flex flex-wrap gap-2">
-                <button type="button" class="btn btn-sm btn-outline-warning" data-action="batch-retry"
-                        title="重试所有失败任务">
-                    <i class="bi bi-arrow-counterclockwise"></i> 批量重试
-                </button>
                 <button type="button" class="btn btn-sm btn-outline-warning" data-action="clear" data-status="canceled"
                         title="只删除记录，不删除文件">
                     <i class="bi bi-trash"></i> 清空已取消
@@ -93,6 +91,7 @@
                 <p class="mt-2 mb-0">加载中...</p>
             </div>
         </div>
+        <div id="completed-pagination" class="pagination-container"></div>
     </div>
 
     <!-- 失败 -->
@@ -101,8 +100,8 @@
             <span class="fw-semibold text-danger"><i class="bi bi-exclamation-triangle"></i> 失败</span>
             <div class="d-flex flex-wrap gap-2">
                 <button type="button" class="btn btn-sm btn-outline-warning" data-action="batch-retry"
-                        title="重试所有失败任务">
-                    <i class="bi bi-arrow-counterclockwise"></i> 批量重试
+                        title="只重试当前页显示的失败任务">
+                    <i class="bi bi-arrow-counterclockwise"></i> 重试本页
                 </button>
                 <button type="button" class="btn btn-sm btn-outline-danger" data-action="clear" data-status="failed"
                         title="只删除记录，不删除文件">
@@ -116,6 +115,7 @@
                 <p class="mt-2 mb-0">加载中...</p>
             </div>
         </div>
+        <div id="failed-pagination" class="pagination-container"></div>
     </div>
 
 </div>

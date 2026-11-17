@@ -1,5 +1,5 @@
 /**
- * 下载管理页 — 全量渲染 + 操作按钮 + 轮询
+ * 下载管理页 — 分状态分页 + 操作按钮 + 轮询
  *
  * 依赖: apiFetch, escapeHtml, escapeHtmlAttr, confirmAction, encodeJobId, openFolder (utils.js)
  *        connectSSE, disconnectAllSSE, setSSECallbacks, _jobTitleMap (sse-client.js)
@@ -23,6 +23,10 @@
 
   /** @type {number|null} */
   var pollTimer = null;
+  var activeGroup = 'running';
+  var groupPages = { running: 1, queued: 1, completed: 1, failed: 1 };
+  var refreshSerial = 0;
+  var pageSize = 50;
 
   // ── 操作函数 ──
 
@@ -178,10 +182,10 @@
   }
 
   /**
-   * 批量重试所有失败任务（串行，避免触发风控）
+   * 批量重试当前失败页（串行，用户确认的范围不跨页扩展）
    */
   function batchRetryFailed() {
-    var msg = '确定批量重试所有「失败」任务？\n\n将逐个创建新任务并开始下载。\n注意：原有失败记录会被保留。';
+    var msg = '确定重试本页显示的「失败」任务？\n\n其他页不会重试。将逐个加入队列，原有失败记录保留。';
     if (!confirmAction(msg)) return;
 
     var container = document.getElementById('failed-section');
@@ -204,7 +208,7 @@
 
     function retryNext(index) {
       if (index >= jobIds.length) {
-        showToast('已重试 ' + total + ' 个失败任务（成功 ' + done + ' 个）', 'success');
+        showToast('本页重试结束，共 ' + total + ' 个（成功 ' + done + ' 个）', 'success');
         refreshJobs();
         return;
       }
@@ -237,6 +241,12 @@
     'export-zip': function (el) { exportZip(el.getAttribute('data-job-id')); },
     'export-pdf': function (el) { exportPdf(el.getAttribute('data-job-id')); },
     'batch-retry': function () { batchRetryFailed(); },
+    'jobs-page': function (el) {
+      var page = Number(el.getAttribute('data-page'));
+      if (!Number.isSafeInteger(page) || page < 1) return;
+      groupPages[activeGroup] = page;
+      refreshJobs();
+    },
     clear: function (el) { clearJobs(el.getAttribute('data-status')); },
     'clear-finished': function () { clearFinished(); }
   };
@@ -319,6 +329,7 @@
     var newest = {};
     jobs.forEach(function (job) {
       var key = String(job.album_id);
+      if (job.latest_completed_job_id && job.latest_completed_job_id !== job.job_id) return;
       if (!Object.prototype.hasOwnProperty.call(newest, key)) newest[key] = job.job_id;
     });
     return newest;
@@ -375,15 +386,23 @@
   // ── 刷新任务列表 ──
 
   function refreshJobs() {
+    var group = activeGroup;
+    var serial = ++refreshSerial;
+    var query = new URLSearchParams({ page: String(groupPages[group]), page_size: String(pageSize),
+      status: group === 'running' ? 'active' : group });
     // abortKey：轮询/操作触发的连续刷新自动中止上一次未完成的请求，避免堆积
-    apiFetch('/api/jobs', { abortKey: 'downloads-refresh' })
+    apiFetch('/api/jobs?' + query.toString(), { abortKey: 'downloads-refresh' })
       .then(function (data) {
+        if (serial !== refreshSerial || group !== activeGroup) return;
         var jobs = data.jobs || [];
-        renderJobs(jobs);
+        var paged = Number.isInteger(data.page);
+        if (paged) groupPages[group] = data.page;
+        renderJobs(jobs, paged ? group : null, data.counts);
+        if (paged) renderJobPagination(group, data);
         reconnectSSE(jobs);
       })
       .catch(function (err) {
-        if (err && err.name === 'AbortError') return; // pagehide/新刷新中止，静默
+        if (serial !== refreshSerial || (err && err.name === 'AbortError')) return;
         showToast('加载任务列表失败: ' + err.message, 'danger');
       });
   }
@@ -391,17 +410,19 @@
   // ── SSE 重连（下载管理页专用） ──
 
   function reconnectSSE(jobs) {
-    window.disconnectAllSSE();
-    jobs.forEach(function (job) {
-      if (job.status === 'running' || job.status === 'paused') {
-        window.connectSSE(job.job_id);
-      }
-    });
+    var ids = jobs.filter(function (job) { return job.status === 'running'; })
+      .slice(0, 5).map(function (job) { return job.job_id; });
+    if (window.syncSSE) window.syncSSE(ids);
+    else {
+      window.disconnectAllSSE();
+      ids.forEach(function (id) { window.connectSSE(id); });
+    }
   }
 
   // ── 渲染函数 ──
 
-  function renderJobs(jobs) {
+  function renderJobs(jobs, scope, counts) {
+    window._jobTitleMap = {};
     // 按状态分组，同时缓存 job_id → title 映射供 SSE toast 使用
     var groups = { running: [], paused: [], queued: [], completed: [], failed: [] };
     jobs.forEach(function (job) {
@@ -418,9 +439,11 @@
     var runningItems = groups.running.concat(groups.paused);
 
     // 渲染每个区域（已完成/失败区先用缓存的可读结果渲染，“阅读”按钮不会随轮询闪烁）
-    lastCompleted = groups.completed;
-    lastFailed = groups.failed;
-    newestCompleted = newestCompletedJobs(groups.completed);
+    if (!scope || scope === 'completed') {
+      lastCompleted = groups.completed;
+      newestCompleted = newestCompletedJobs(groups.completed);
+    }
+    if (!scope || scope === 'failed') lastFailed = groups.failed;
     // 有任务新完成：立即重新判断可读与新章节（刚下载的新章节已被服务端并入，不能再挂着“有新章节”）
     var newestKey = JSON.stringify(newestCompleted);
     if (newestKey !== lastNewestKey) {
@@ -428,20 +451,44 @@
       readableKey = null;
       updatesKey = null;
     }
-    renderSection('running', runningItems, renderRunningCard);
-    renderSection('queued', groups.queued, renderQueuedCard);
-    renderSection('completed', groups.completed, renderCompletedCard);
-    renderSection('failed', groups.failed, renderFailedCard);
-    refreshReadable(groups.completed.concat(groups.failed));
+    if (!scope || scope === 'running') renderSection('running', runningItems, renderRunningCard);
+    if (!scope || scope === 'queued') renderSection('queued', groups.queued, renderQueuedCard);
+    if (!scope || scope === 'completed') renderSection('completed', groups.completed, renderCompletedCard);
+    if (!scope || scope === 'failed') renderSection('failed', groups.failed, renderFailedCard);
+    refreshReadable(lastCompleted.concat(lastFailed));
 
     // 更新计数徽章 — running 计数包含 paused
     var runningCount = groups.running.length + groups.paused.length;
     var runningEl = document.getElementById('running-count');
-    if (runningEl) runningEl.textContent = runningCount;
+    if (runningEl) runningEl.textContent = counts ? counts.active : runningCount;
     ['queued', 'completed', 'failed'].forEach(function (s) {
       var el = document.getElementById(s + '-count');
-      if (el) el.textContent = groups[s].length;
+      if (el) el.textContent = counts ? counts[s] : groups[s].length;
     });
+  }
+
+  function renderJobPagination(group, data) {
+    var box = document.getElementById(group + '-pagination');
+    if (!box) return;
+    box.textContent = '';
+    function addPage(page, label, current) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn-sm ' + (current ? 'btn-primary' : 'btn-outline-secondary');
+      button.textContent = label;
+      button.setAttribute('data-action', 'jobs-page');
+      button.setAttribute('data-page', String(page));
+      if (current) button.setAttribute('aria-current', 'page');
+      box.appendChild(button);
+    }
+    if (data.page > 1) addPage(data.page - 1, '◀ 上一页', false);
+    var end = Math.min(data.pages, Math.max(1, data.page - 2) + 4);
+    for (var p = Math.max(1, end - 4); p <= end; p++) addPage(p, String(p), p === data.page);
+    if (data.page < data.pages) addPage(data.page + 1, '下一页 ▶', false);
+    var info = document.createElement('span');
+    info.className = 'page-info ms-2';
+    info.textContent = '共 ' + data.total + ' 条，第 ' + data.page + '/' + data.pages + ' 页';
+    box.appendChild(info);
   }
 
   /** readableAlbums 里的判断结果：true / false；本地只剩打不开的压缩包 → 'archive_problem'（“阅读”点开说明原因）；
@@ -588,12 +635,21 @@
     if (!pollTimer) pollTimer = setInterval(refreshJobs, 5000);
   }
   function stopPolling() {
+    refreshSerial++;
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
   }
 
   // ── 初始化 ──
   document.addEventListener('DOMContentLoaded', function () {
+    document.getElementById('downloadTabs').addEventListener('shown.bs.tab', function (event) {
+      var id = event.target.id || '';
+      var group = id.replace(/-tab$/, '');
+      if (!Object.prototype.hasOwnProperty.call(groupPages, group)) return;
+      activeGroup = group;
+      window.disconnectAllSSE();
+      refreshJobs();
+    });
     refreshJobs();
     startPolling();
   });
@@ -608,9 +664,15 @@
   });
   // 切回本标签页时重新判断（文件可能在别处被移动/删除）
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState !== 'visible' || !pollTimer) return;
+    if (document.visibilityState === 'hidden') {
+      stopPolling();
+      window.disconnectAllSSE();
+      return;
+    }
+    if (document.visibilityState !== 'visible') return;
     readableKey = null;
     updatesKey = null;   // 可能刚在详情页点过“立即检查”
     refreshJobs();
+    startPolling();
   });
 })();

@@ -967,7 +967,7 @@ window.disconnectAllSSE = () => {};
 window.apiFetch = global.apiFetch = (url, opts) => {
   opts = opts || {};
   calls.push({ url, method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null, abortKey: opts.abortKey || null });
-  if (url === '/api/jobs') return Promise.resolve({ status: 'ok', jobs: input.jobs });
+  if (url.startsWith('/api/jobs?')) return Promise.resolve({ status: 'ok', jobs: input.jobs });
   if (url === '/api/preview/available') {
     const ids = JSON.parse(opts.body).album_ids;
     return Promise.resolve({ status: 'ok', readable: ids.filter(id => input.readable.includes(id)), archives: {},
@@ -1307,7 +1307,7 @@ window.disconnectAllSSE = () => {};
 window.apiFetch = global.apiFetch = (url, opts) => {
   opts = opts || {};
   const st = input.phases[phase];
-  if (url === '/api/jobs') return Promise.resolve({ status: 'ok', jobs: st.jobs });
+  if (url.startsWith('/api/jobs?')) return Promise.resolve({ status: 'ok', jobs: st.jobs });
   if (url === '/api/preview/available') {
     const ids = JSON.parse(opts.body).album_ids;
     return Promise.resolve({ status: 'ok', readable: ids.filter(id => st.readable.includes(id)), archives: {},

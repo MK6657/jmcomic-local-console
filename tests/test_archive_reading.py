@@ -1108,7 +1108,8 @@ def test_merged_pages_keep_natural_order(client, downloads, exports_tmp, loose_n
 
 
 @pytest.mark.parametrize("fmt", ["zip", "pdf"])
-def test_exports_open_the_archive_once(client, downloads, exports_tmp, monkeypatch, fmt):
+def test_exports_preflight_metadata_then_read_60_pages_with_one_archive_open(
+        client, downloads, exports_tmp, monkeypatch, fmt):
     from core import archive_pages
     folder = downloads / "Long"
     comic(folder, {f"ch1/{n:03d}.png": png("white", (8 + n % 5, 8)) for n in range(1, 61)})
@@ -1123,8 +1124,22 @@ def test_exports_open_the_archive_once(client, downloads, exports_tmp, monkeypat
             super().__init__(file, mode, *a, **k)
     monkeypatch.setattr(archive_pages.zipfile, "ZipFile", Counting)
     response = client.post(f"/api/export/jl/{fmt}")
-    assert response.status_code == 200 and len(opens) == 1, opens
-    response.close()
+    try:
+        assert response.status_code == 200
+        # The warm index needs one bounded metadata preflight plus one shared
+        # reader for all 60 pages; page extraction must not reopen per page.
+        assert len(opens) == 2, ("expected metadata preflight + one page reader", opens)
+        assert getattr(opens[0], "name", None) == str(folder / "Long.cbz")
+        assert opens[1] == folder / "Long.cbz"
+        if fmt == "zip":
+            with real(io.BytesIO(response.data)) as exported:
+                assert len(exported.infolist()) == 60
+        else:
+            import pikepdf
+            with pikepdf.Pdf.open(io.BytesIO(response.data)) as exported:
+                assert len(exported.pages) == 60
+    finally:
+        response.close()
 
 
 def test_availability_survives_more_archives_than_the_index_cache_holds(client, downloads, monkeypatch):
@@ -1219,7 +1234,7 @@ global.document = {
 };
 global.setInterval = () => 1; global.clearInterval = () => {};
 eval(fs.readFileSync(utilsPath, 'utf8'));
-window.apiFetch = url => Promise.resolve(url === '/api/jobs' ? data.jobs : data.available);
+window.apiFetch = url => Promise.resolve(url.startsWith('/api/jobs?') ? { status: 'ok', jobs: data.jobs.jobs } : data.available);
 window.showToast = () => {}; window._jobTitleMap = {};
 window.setSSECallbacks = () => {}; window.connectSSE = () => {}; window.disconnectAllSSE = () => {};
 eval(fs.readFileSync(downloadsPath, 'utf8'));

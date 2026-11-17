@@ -166,7 +166,7 @@ def test_zip_error_cleans_temporary_file(client, album_dir, monkeypatch, tmp_pat
     temp_dir = tmp_path / "exports"
     temp_dir.mkdir()
     monkeypatch.setattr(api_export.tempfile, "tempdir", str(temp_dir))
-    monkeypatch.setattr(api_export, "safe_files", Mock(side_effect=OSError("failure")))
+    monkeypatch.setattr(api_export, "_collect_files", Mock(side_effect=OSError("failure")))
     assert client.post("/api/export/job_audit/zip").status_code == 500
     assert list(temp_dir.iterdir()) == []
 

@@ -14,7 +14,7 @@ import core.database as db
 from core.job_manager import job_manager
 from core.task_commands import TaskCommandError
 from core.logger import log
-from core.progress import progress_manager
+from core.progress import progress_manager, StreamCapacityError
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.validation import validate_numeric, validate_job_id, require_job_id
 from core.packer import CbzPacker
@@ -131,9 +131,20 @@ def create_job():
 
 @api_jobs_bp.get("/api/jobs")
 def list_jobs():
-    "获取所有任务列表"
+    """Bounded task history; enrich only this page with local archive facts."""
     log.info("API获取任务列表")
-    jobs = get_all_jobs()
+    numbers = {}
+    for key, default in (("page", 1), ("page_size", 50)):
+        raw = request.args.get(key, str(default))
+        if not re.fullmatch(r"[0-9]{1,10}", raw) or int(raw) < 1:
+            return jsonify(status="error", message=f"{key} 必须是正整数"), 400
+        numbers[key] = int(raw)
+    status = request.args.get("status") or "all"
+    try:
+        result = db.get_jobs_page(status=status, **numbers)
+    except ValueError as error:
+        return jsonify(status="error", message=str(error)), 400
+    jobs = result["jobs"]
     for job in jobs:
         if isinstance(job.get("selected_photo_ids"), str):
             try:
@@ -148,7 +159,7 @@ def list_jobs():
         fmt = cbz_map.get(op) if op else None
         job["has_cbz"] = bool(fmt)
         job["archive_format"] = fmt if fmt in ("cbz", "zip") else ("cbz" if fmt else None)
-    return jsonify({"status": "ok", "jobs": jobs})
+    return jsonify({"status": "ok", **result})
 
 
 @api_jobs_bp.get("/api/jobs/<job_id>")
@@ -188,14 +199,22 @@ def job_events(job_id: str):
             return Response(_done(), mimetype="text/event-stream")
         return jsonify({"status": "error", "message": "任务不存在或已完成"}), 404
 
+    try:
+        lease = progress_manager.acquire_stream(tracker)
+    except StreamCapacityError:
+        response = jsonify(status="error", reason="sse_limit", message="进度连接过多，请关闭多余页面后重试")
+        response.status_code = 429
+        response.headers["Retry-After"] = "5"
+        return response
+
     def generate():
         # 每个 SSE 客户端订阅独立队列，互不干扰。
         # 注意：Flask 的 request 没有 is_disconnected()（旧代码调用它导致
         # 每条 SSE 流在第一个事件处 AttributeError 崩溃、前端反复重连）。
         # 客户端断开由 yield 抛出的 GeneratorExit 感知，无需主动探测。
-        client_queue = tracker.subscribe()
         try:
-            yield from tracker.iter_events(client_queue)
+            yield ": connected\n\n"
+            yield from tracker.iter_events(lease.queue, max_duration=300)
         except Exception:
             # 在这里记录：仍处于 stream_with_context 的请求上下文中，记录带本请求的 request_id，
             # “只看此请求”能看到流为什么中断。异常一旦离开生成器，请求上下文先被弹出，waitress 随后写的
@@ -203,9 +222,16 @@ def job_events(job_id: str):
             # onerror 的规则重连），不再抛给 waitress，同一个异常不会记两遍。
             log.exception(f"SSE 推送异常，已结束本条事件流 job_id={job_id}")
         finally:
-            tracker.unsubscribe(client_queue)
+            lease.close()
 
-    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+    try:
+        response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+        response.headers["Cache-Control"] = "no-store"
+        response.call_on_close(lease.close)
+        return response
+    except BaseException:
+        lease.close()
+        raise
 
 
 @api_jobs_bp.post("/api/jobs/<job_id>/cancel")

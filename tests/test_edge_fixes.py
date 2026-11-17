@@ -164,12 +164,12 @@ def test_pdf_fallback_also_refuses_missing_pages(client, output_dir, monkeypatch
     from routes import api_export
     setup_export(output_dir)
     Image.new("RGB", (8, 8), "red").save(output_dir / "bad-on-fallback.png")
-    monkeypatch.setattr(api_export, "_needs_pillow_conversion", lambda path: False)
+    monkeypatch.setattr(api_export, "_needs_pillow_conversion", lambda path, budget=None: False)
     convert = Mock(side_effect=ValueError("force fallback"))
     monkeypatch.setattr(img2pdf, "convert", convert)
-    original = api_export._image_to_jpeg_bytes
-    monkeypatch.setattr(api_export, "_image_to_jpeg_bytes",
-        lambda path: None if path.name == "bad-on-fallback.png" else original(path))
+    original = api_export._image_to_jpeg_file
+    monkeypatch.setattr(api_export, "_image_to_jpeg_file",
+        lambda path, folder, budget: None if path.name == "bad-on-fallback.png" else original(path, folder, budget))
     response = client.post("/api/export/job_pdf/pdf")
     assert response.status_code == 422
     assert response.get_json()["failed_images"] == ["bad-on-fallback.png"]

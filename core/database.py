@@ -441,6 +441,41 @@ def get_all_jobs(limit: int = 5000) -> list[dict]:
         conn.close()
 
 
+def get_jobs_page(page: int = 1, page_size: int = 50, status: str | None = None) -> dict:
+    """One bounded page and global counters from the same read snapshot."""
+    states = ("queued", "running", "paused", "completed", "failed", "canceled")
+    if status not in (None, "all", "active", *states):
+        raise ValueError("任务状态筛选无效")
+    page, page_size = max(1, int(page)), max(1, min(200, int(page_size)))
+    conn = get_db()
+    try:
+        conn.execute("BEGIN")
+        counts = dict.fromkeys(states, 0)
+        counts.update((row["status"], row["count"]) for row in conn.execute(
+            "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"))
+        counts["all"] = sum(counts.values())
+        counts["active"] = counts["running"] + counts["paused"]
+        total = counts[status] if status not in (None, "all") else counts["all"]
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, pages)
+        where, values = "", []
+        if status == "active":
+            where = "WHERE j.status IN ('running', 'paused')"
+        elif status not in (None, "all"):
+            where, values = "WHERE j.status=?", [status]
+        rows = conn.execute(
+            "SELECT j.*, CASE WHEN j.status='completed' THEN ("
+            "SELECT newest.job_id FROM jobs newest WHERE newest.album_id=j.album_id AND newest.status='completed' "
+            "ORDER BY newest.created_at DESC, newest.id DESC LIMIT 1) END AS latest_completed_job_id "
+            f"FROM jobs j {where} ORDER BY j.created_at DESC, j.id DESC LIMIT ? OFFSET ?",
+            values + [page_size, (page - 1) * page_size],
+        ).fetchall()
+        return {"jobs": [dict(row) for row in rows], "total": total, "page": page,
+                "page_size": page_size, "pages": pages, "counts": counts, "filter": status or "all"}
+    finally:
+        conn.close()
+
+
 def get_completed_job_by_album_id(album_id: str) -> dict | None:
     """Compatibility lookup for the latest successful resource, independent of history."""
     conn = get_db()

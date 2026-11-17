@@ -358,7 +358,7 @@ def test_downloads_offer_read_on_completed_and_failed_cards():
     assert "\n      + readBtn\n" in completed.replace("\r\n", "\n")
     assert "\n      + window.readLink.html(job.album_id, readableState(job.album_id), 'btn-sm')\n" in failed.replace("\r\n", "\n")
     # failed albums are checked too (an earlier download may still be readable) and re-rendered with the result
-    assert "refreshReadable(groups.completed.concat(groups.failed));" in source
+    assert "refreshReadable(lastCompleted.concat(lastFailed));" in source
     assert "renderSection('failed', lastFailed, renderFailedCard);" in source
 
 

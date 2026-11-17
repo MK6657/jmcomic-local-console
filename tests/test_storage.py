@@ -239,7 +239,7 @@ def test_scanners_and_exports_ignore_staging_and_old_page_temps(client, tmp_path
         assert safe_files(album) == []
         assert not local_availability.has_page_image(album)
         assert api_preview._scan_pages(album) == []
-        assert api_export._collect_images(album) == []
+        assert api_export._collect_files(album, api_export.ExportBudget(), images_only=True) == []
         assert CbzPacker.packable_images(album) == []
         staged.publish(lambda p: p.stat().st_size > 0)
     ordinary = album / "00002.foo.webp"
@@ -248,7 +248,7 @@ def test_scanners_and_exports_ignore_staging_and_old_page_temps(client, tmp_path
     assert safe_files(album) == expected
     assert local_availability.has_page_image(album)
     assert [path for _, path in api_preview._scan_pages(album)] == expected
-    assert api_export._collect_images(album) == expected
+    assert api_export._collect_files(album, api_export.ExportBudget(), images_only=True) == expected
     assert CbzPacker.packable_images(album) == expected
     db.insert_job("storage-job", "123", "fixture", [])
     db.transition_job_status(
