@@ -7,10 +7,13 @@ import os
 import socket
 import threading
 from collections import OrderedDict
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from flask import Blueprint, jsonify, request
 from core.database import get_db, get_all_jobs
+from core.job_manager import job_manager
+from core.path_utils import get_path_config
 from core.logger import log, LOG_DIR, MAX_TOTAL_SIZE_MB, MAX_LOG_AGE_DAYS
 from core.validation import validate_numeric
 from core.jm_service import get_active_client_count, invalidate_option_cache, clear_album_detail_cache
@@ -175,22 +178,26 @@ def diagnose():
 def health_ping():
     """轻量健康检查"""
     log.debug("API健康检查")
-    db_ok = False
+    activity = {}
     try:
-        conn = get_db()
-        conn.execute("SELECT 1").fetchone()
-        conn.close()
-        db_ok = True
+        with closing(get_db()) as conn:
+            if request.args.get("activity") == "1":
+                counts = dict.fromkeys(("queued", "running", "paused"), 0)
+                counts.update(conn.execute("SELECT status, COUNT(*) FROM jobs WHERE status IN "
+                                           "('queued','running','paused') GROUP BY status"))
+                activity["jobs"] = dict(counts, executors=job_manager.get_running_count())
+            else:
+                conn.execute("SELECT 1").fetchone()
     except Exception:
-        pass
-    if not db_ok:
         return jsonify({"status": "error", "message": "数据库连接不可用", "db": "unreachable", "ts": datetime.now().isoformat()}), 503
     return jsonify({
         "status": "ok",
         "ts": datetime.now().isoformat(),
         "application": "jmcomic-local-console",
         "pid": os.getpid(),
+        "instance_id": get_path_config().instance_id(os.environ.get("JMCONSOLE_LAUNCH_TOKEN", "")),
         "jm_active_clients": get_active_client_count(),
+        **activity,
     })
 
 

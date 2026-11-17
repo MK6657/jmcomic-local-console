@@ -10,6 +10,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -40,16 +41,16 @@ def check_case(occupied):
     try:
         with tempfile.TemporaryDirectory(prefix="jmcomic-startup-") as sandbox:
             root = Path(sandbox)
-            marker = launcher.FLASK_JSON
-            launcher.FLASK_JSON = root / "runtime/data/flask.json"
-            try:
+            paths = launcher.get_path_config({}, default_home=root)
+            with patch.object(launcher, "FLASK_JSON", paths.data / "flask.json"), patch.object(
+                    launcher, "get_path_config", return_value=paths):
                 with (root / "child.log").open("wb") as output:
                     kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
                     token = uuid.uuid4().hex
                     proc = subprocess.Popen(
                         [sys.executable, "-c", CHILD, sandbox], cwd=ROOT,
                         stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                        env=dict(os.environ, JMCONSOLE_LAUNCH_TOKEN=token),
+                        env=dict(os.environ, JMCONSOLE_LAUNCH_TOKEN=token, **paths.as_environment()),
                         **kwargs,
                     )
                     proc.jm_launch_token = token
@@ -62,8 +63,6 @@ def check_case(occupied):
                         print(f"PASS {'fallback' if occupied else 'startup'}: verified port {port}, PID {proc.pid}")
                     finally:
                         launcher.cleanup(proc)
-            finally:
-                launcher.FLASK_JSON = marker
     finally:
         if holder is not None:
             holder.close()

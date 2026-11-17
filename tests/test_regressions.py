@@ -136,7 +136,7 @@ def test_launcher_checks_service_identity(tmp_path, monkeypatch, health, expecte
     marker.write_text(json.dumps({"port": 5002, "pid": 42}), encoding="utf-8")
     monkeypatch.setattr(launcher, "FLASK_JSON", marker)
     opener = Mock()
-    opener.open.return_value = io.BytesIO(json.dumps(health).encode())
+    opener.open.return_value = io.BytesIO(json.dumps(dict(health, instance_id=launcher.get_path_config().instance_id())).encode())
     monkeypatch.setattr(launcher, "build_opener", lambda *args: opener)
     assert launcher.get_running_port(expected_pid=42) == expected
     assert launcher.get_running_port(expected_pid=99) is None
@@ -187,7 +187,8 @@ def test_launcher_opens_existing_instance_without_spawning(monkeypatch):
     browser = Mock()
     # A server started after the program files were written is current: reuse it.
     import time
-    monkeypatch.setattr(launcher, "get_running_server", lambda: (5003, {"pid": 42, "timestamp": time.time() + 3600}))
+    record = {"pid": 42, "timestamp": time.time() + 3600}
+    monkeypatch.setattr(launcher, "get_running_server", lambda **kwargs: (5003, record))
     monkeypatch.setattr(launcher, "stop_outdated_server", Mock(side_effect=AssertionError("must not stop")))
     monkeypatch.setattr(launcher, "launch_flask", spawn)
     monkeypatch.setattr(launcher.webbrowser, "open", browser)
@@ -209,7 +210,8 @@ def test_startup_token_handles_windows_redirector_pid(tmp_path, monkeypatch):
     marker = tmp_path / "flask.json"
     marker.write_text(json.dumps({"port": 5001, "pid": 84, "launch_token": "this-launch"}), encoding="utf-8")
     monkeypatch.setattr(launcher, "FLASK_JSON", marker)
-    health = {"application": "jmcomic-local-console", "pid": 84, "status": "ok"}
+    health = {"application": "jmcomic-local-console", "pid": 84, "status": "ok",
+              "instance_id": launcher.get_path_config().instance_id("this-launch")}
     opener = Mock()
     opener.open.return_value = io.BytesIO(json.dumps(health).encode())
     monkeypatch.setattr(launcher, "build_opener", lambda *args: opener)

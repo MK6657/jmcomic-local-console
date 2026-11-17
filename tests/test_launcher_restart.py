@@ -12,8 +12,10 @@ def launcher_env(monkeypatch):
     import launcher
     calls = {"opened": [], "stopped": [], "launched": 0}
     monkeypatch.setattr(launcher.webbrowser, "open", lambda url: calls["opened"].append(url))
-    monkeypatch.setattr(launcher, "stop_outdated_server",
-                        lambda pid, port=None, record=None: calls["stopped"].append(pid))
+    def stop(pid, port, record, *, only_if_idle):
+        assert only_if_idle
+        calls["stopped"].append(pid)
+    monkeypatch.setattr(launcher, "stop_outdated_server", stop)
 
     def launch():
         calls["launched"] += 1
@@ -23,7 +25,8 @@ def launcher_env(monkeypatch):
     monkeypatch.setattr(launcher, "cleanup", lambda proc: None)
 
     def running(timestamp):
-        record = {"port": 5000, "pid": 4242, "timestamp": timestamp}
+        record = {"port": 5000, "pid": 4242, "timestamp": timestamp, "shutdown_protocol": launcher.SHUTDOWN_PROTOCOL,
+                  "launch_token": "a" * 32, "shutdown_token": "a" * 32}
         monkeypatch.setattr(launcher, "get_running_server", lambda *a, **k: (5000, record))
     return launcher, calls, running
 
@@ -203,7 +206,8 @@ def test_running_server_record_is_returned_with_port(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "FLASK_JSON", marker)
     opener = Mock()
     opener.open.return_value = io.BytesIO(json.dumps(
-        {"application": "jmcomic-local-console", "pid": 42, "status": "ok"}).encode())
+        {"application": "jmcomic-local-console", "pid": 42, "status": "ok",
+         "instance_id": launcher.get_path_config().instance_id()}).encode())
     monkeypatch.setattr(launcher, "build_opener", lambda *args: opener)
     port, record = launcher.get_running_server()
     assert port == 5002 and record["timestamp"] == 123.5

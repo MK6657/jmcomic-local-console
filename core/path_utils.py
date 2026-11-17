@@ -5,6 +5,8 @@ running process's environment never relocates its files. The explicit parser is
 pure: it validates a proposed configuration without creating or moving data.
 """
 from dataclasses import dataclass
+import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -46,6 +48,11 @@ class PathConfig:
     def as_environment(self) -> dict[str, str]:
         """Pin a child process to this same instance and storage configuration."""
         return dict(zip(PATH_ENVIRONMENT, map(str, (self.home, self.downloads, self.cache, self.backups))))
+
+    def instance_id(self, launch_token: str = "") -> str:
+        """Bind this launch to its effective storage roots without publishing paths or its nonce."""
+        roots = [os.path.normcase(path) for path in self.as_environment().values()]
+        return hashlib.sha256(json.dumps(["jmconsole-instance-v1", launch_token, *roots]).encode("ascii")).hexdigest()
 
 
 def get_path_config(environment: Mapping[str, str] | None = None,
