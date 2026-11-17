@@ -8,6 +8,8 @@
 这是一个**本地 Python 应用**，不是浏览器扩展，也不是在线托管服务。
 请仅访问和下载你有权使用的内容。仓库不包含下载内容、个人凭据或第三方参考项目。
 
+**直接在 Windows 上使用：** [下载已验收的 x64 便携包，查看校验值](docs/WINDOWS_ACCEPTANCE.md)。完整解压后双击 `JMComic.exe`，无需安装 Python 或 Node。升级已有实例前请先看[备份与升级步骤](docs/WINDOWS_RELEASE.md)。
+
 ## 后端复检分支
 
 本次 Windows 后端重构发布在 **`codex/refactor-windows`** 分支，`main` 保留原版本。
@@ -31,7 +33,7 @@ cd jmcomic-backend-review
 - 安装依赖需要联网；搜索、下载还依赖上游服务和本机网络状况。
 - 使用项目独立虚拟环境，避免与 Hermes 或系统 Python 的依赖互相影响。
 
-## 快速启动
+## 从源码快速启动
 
 克隆或解压仓库后，双击 **start.bat**。脚本会切换到项目目录，按需创建 `.venv`，
 安装或检查全部运行依赖，再启动服务并打开浏览器。首次运行需要 PATH 中能找到 `python`。

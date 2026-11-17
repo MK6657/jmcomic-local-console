@@ -10,6 +10,10 @@ This is a **local Python application**, not a browser extension or a hosted serv
 Only use it for content you are authorized to access and download. This repository
 does not include downloaded content, credentials, or the upstream reference project.
 
+**Run on Windows:** [Download the verified x64 portable package and checksums](docs/WINDOWS_ACCEPTANCE.md).
+Extract the whole package and open `JMComic.exe`. No separate Python or Node installation is required.
+See the [backup and upgrade instructions](docs/WINDOWS_RELEASE.md) before using an existing instance.
+
 ## Backend review branch
 
 The Windows backend refactor is published on **`codex/refactor-windows`**; `main`
@@ -41,7 +45,7 @@ The requirements below apply to running from source.
 - Internet access for dependency installation; search/download also depend on upstream availability.
 - A separate project virtual environment, not a shared Hermes/system environment.
 
-## Quick start
+## Quick start from source
 
 Clone or extract the repository, then double-click **start.bat**. It changes to
 the project directory, creates `.venv` if missing, installs/checks all declared

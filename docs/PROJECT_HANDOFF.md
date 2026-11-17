@@ -1,6 +1,6 @@
 # JMComic Local Console 项目接手与复检说明
 
-本文件记录 2026-11-17 的四批审计修复及其复检基线。2026-11-18 路线 B 的首个 Windows 候选另见 [候选包与复检证据](WINDOWS_CANDIDATE_B.md)；核对新版应使用该文档的发行指纹和 SHA-256。下方历史通过数和 GitHub 提交不代表该候选包的验证结果。
+**接手当前 Windows 版：** 先看[使用与升级](WINDOWS_RELEASE.md)和[本次发行验收](WINDOWS_ACCEPTANCE.md)，核对分支、产品提交、发行指纹和 ZIP 的 SHA-256。下面的架构、审计项与通过数是 2026-11-17 的历史基线；路线 B 首个候选的独立证据在[候选包交接](WINDOWS_CANDIDATE_B.md)。
 
 ## 1. 当前结论与产品目标
 
@@ -51,7 +51,7 @@ git diff --name-only 72783a2..HEAD
 | Windows构建 | PyInstaller 6.22.3，contrib hooks 2026.10，文件夹式便携包 |
 | UI约束 | 根目录`DESIGN.md`锁定`eye-care`，`project_theme.locked=true` |
 
-直接运行依赖见[requirements.txt](../requirements.txt)，测试见[requirements-dev.txt](../requirements-dev.txt)，构建见[requirements-build.txt](../requirements-build.txt)。并非所有依赖都有完整锁定：例如Pillow使用下限约束，间接依赖也可能变化。已验收包的实际依赖清单保存在该包的`release.json`；新环境的结果应记录`pip freeze`，不能把旧包版本自动当成新环境版本。
+直接运行依赖见[requirements.txt](../requirements.txt)，测试见[requirements-dev.txt](../requirements-dev.txt)，构建见[requirements-build.txt](../requirements-build.txt)。源码开发环境允许部分依赖浮动，例如 Pillow 使用下限；Windows 发行另有[构建版本约束](../requirements-windows-build-constraints.txt)，包含间接依赖。实际发行清单在对应包的 `release.json`。
 
 Python 3.10在声明支持范围内，但本轮没有3.10实机验收；Future超时兼容由专项模拟覆盖。Linux/macOS结果也不能代替原生Windows互斥锁、junction、停机事件或EXE验收。
 
@@ -310,7 +310,7 @@ Windows包从独立`.venv-build`按[WINDOWS_RELEASE.md](WINDOWS_RELEASE.md)构�
 
 ### 可直接转交其他模型的任务文本
 
-> 请克隆 https://github.com/MK6657/jmcomic-local-console 的 codex/refactor-windows 分支，先读AGENTS.md和docs/PROJECT_HANDOFF.md，记录完整HEAD及工作区状态。产品代码交接基线是72783a287e13afbaba29de03a7d88fa0977bc708，文档提交可能晚于它。审查c310e3f..72783a2的完整重构，重点复核e4a6057..72783a2的四批审计修复，并核对之后是否又有产品差异。独立运行适用的离线测试与临时实例复现，保留socket/libcurl阻断，不访问真实上游、不自动下载、不接触个人数据、不修改产品代码。优先检查任务组合事务、资源目录独立性、恢复后首次启动、元数据/图片预算、client租约、停止排空与第9节保留项。输出Markdown报告，包含SHA、环境、证据、前提、准确文件行号、严重性、修复建议和未验证范围；已有历史结论与本次实测分开。非Windows环境明确列出未完成的原生验收。先给审查结论，不自行重写、部署或合并主分支。
+当前 Windows 版的委托文本在[从 GitHub 获取并审核](GITHUB_REVIEW.md)第 5 节，可直接复制。复核旧审计报告时，再给审查者指定历史区间 `e4a6057..72783a2` 和本文件第 9 节的保留项。
 
 ## 13. 其他文档
 
@@ -321,5 +321,6 @@ Windows包从独立`.venv-build`按[WINDOWS_RELEASE.md](WINDOWS_RELEASE.md)构�
 | [BACKEND_REVIEW.md](BACKEND_REVIEW.md) | 给用户的Windows行为复检顺序 |
 | [DATA_MAINTENANCE.md](DATA_MAINTENANCE.md) | 数据路径、备份、恢复与迁移 |
 | [WINDOWS_RELEASE.md](WINDOWS_RELEASE.md) | 便携版使用、构建和验收 |
+| [WINDOWS_ACCEPTANCE.md](WINDOWS_ACCEPTANCE.md) | 本次 Windows 成品、校验值和实际执行结果 |
 | [BACKEND_REFACTOR.md](BACKEND_REFACTOR.md) | 分批演进历史；旧测试数和旧包为历史记录 |
 | [INDEPENDENT_BACKEND_AUDIT.md](INDEPENDENT_BACKEND_AUDIT.md) | 原审计委托及历史快照；当前入口以本文为准 |
