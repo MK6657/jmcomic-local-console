@@ -24,8 +24,9 @@
   var loadVersion = 0;
   var saving = false;
   var importing = false;
-  var settingsReady = false;
-  var initialLoad = null;
+  var baseline = null;
+  var pendingLoad = null;
+  var loadEditsAfter = 0;
 
   function cacheElements() {
     els.form = document.getElementById(CONFIG.formId);
@@ -63,22 +64,28 @@
     if (!autoPack.checked) deleteOriginals.checked = false;
   }
 
-  function populateForm(settings, preserveEditsAfter) {
-    if (!els.form) return;
+  function settingValue(input, value) {
+    if (input.type === 'checkbox') return value === true || value === 'true' ? 'true' : 'false';
+    var text = String(value == null ? '' : value);
+    if (input.type === 'number' && text !== '') {
+      var number = Number(text);
+      if (Number.isInteger(number)) return String(number);
+    }
+    return input.name === 'proxy' ? text.trim() : text;
+  }
 
-    var keys = Object.keys(settings);
-    for (var ki = 0; ki < keys.length; ki++) {
-      var key = keys[ki];
-      if (preserveEditsAfter !== undefined && fieldEdits[key] > preserveEditsAfter) continue;
-      var value = settings[key];
-      var input = els.form.querySelector('[name="' + key + '"]');
-      if (!input) continue;
-
+  function populateForm(settings, keepDraft) {
+    if (!baseline) baseline = Object.create(null);
+    for (var input of els.form.elements) {
+      var key = input.name;
+      if (!key || !Object.prototype.hasOwnProperty.call(settings, key)) continue;
+      var value = settingValue(input, settings[key]);
+      baseline[key] = value;
+      if (keepDraft(key)) continue;
       if (input.type === 'checkbox') {
-        input.checked = value === 'true' || value === true;
+        input.checked = value === 'true';
       } else if (input.type === 'radio') {
-        var radio = els.form.querySelector('[name="' + key + '"][value="' + value + '"]');
-        if (radio) radio.checked = true;
+        input.checked = input.value === value;
       } else {
         input.value = value;
       }
@@ -87,22 +94,22 @@
   }
 
   function collectFormValues() {
-    if (!els.form) return {};
-
-    var formData = new FormData(els.form);
-    var values = {};
-
-    for (var entry of formData.entries()) {
-      values[entry[0]] = entry[1];
+    var values = Object.create(null);
+    for (var input of els.form.elements) {
+      if (!input.name || input.readOnly || input.disabled) continue;
+      if (input.type === 'radio' && !input.checked) continue;
+      values[input.name] = settingValue(input, input.type === 'checkbox' ? input.checked : input.value);
     }
-
-    // 处理复选框：未勾选的不会出现在 FormData 中
-    var checkboxes = els.form.querySelectorAll('input[type="checkbox"]');
-    checkboxes.forEach(function (cb) {
-      if (cb.name) values[cb.name] = !cb.disabled && cb.checked ? 'true' : 'false';
-    });
-
     return values;
+  }
+
+  function changedSettings(values) {
+    var changes = {};
+    Object.keys(values).forEach(function (key) {
+      if (key in baseline && values[key] !== baseline[key]) changes[key] = values[key];
+    });
+    if (changes.auto_pack === 'false') changes.delete_originals = 'false';
+    return changes;
   }
 
   // ── 表单验证 ──
@@ -119,11 +126,6 @@
 
   function validateSettings(settings) {
     var errors = [];
-
-    // 下载目录不能为空
-    if (!settings.download_root || !settings.download_root.trim()) {
-      errors.push({ field: 'download_root', message: '下载目录不能为空' });
-    }
 
     // 代理地址格式检查（如果有的话）
     if (settings.proxy && settings.proxy.trim()) {
@@ -231,7 +233,6 @@
   async function handleImport(file) {
     if (!file || importing || saving) return;
     importing = true;
-    loadVersion += 1; // An older initial GET must not overwrite imported settings.
     var importedVersion = editVersion;
     var formData = new FormData();
     formData.append('file', file);
@@ -258,7 +259,7 @@
           showToast(msg, 'success');
         }
         // 刷新页面显示最新设置
-        await loadSettings(importedVersion);
+        await refreshSettings(importedVersion);
       } else {
         showToast('导入失败: ' + (data.message || '未知错误'), 'danger');
       }
@@ -279,6 +280,7 @@
   async function handleReset() {
     if (!confirm('确定要恢复所有设置为默认值吗？')) return;
 
+    var resetVersion = editVersion;
     try {
       await window.apiFetch('/api/settings', {
         method: 'POST',
@@ -287,7 +289,7 @@
         timeoutMs: 15000,
       });
       showToast('已恢复默认设置', 'info');
-      await loadSettings();
+      await refreshSettings(resetVersion);
     } catch (err) {
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默
       showToast('恢复默认失败: ' + err.message, 'danger');
@@ -308,19 +310,21 @@
     }
 
     try {
-      // Never submit a whole form based on placeholders while its persisted
-      // baseline is still loading. The load merges only untouched fields.
-      if (!settingsReady) {
-        if (!initialLoad) initialLoad = loadSettings();
-        await initialLoad;
-        if (!settingsReady) throw new Error('尚未读取到已保存的设置，请稍后重试');
+      if (!baseline) {
+        await (pendingLoad || refreshSettings(loadEditsAfter));
+        if (!baseline) throw new Error('尚未读取到已保存的设置，请稍后重试');
       }
-      var settings = collectFormValues();
-      if (settings.delete_originals === 'true') {
+      var submitted = collectFormValues();
+      var changes = changedSettings(submitted);
+      clearFieldErrors();
+      if (!Object.keys(changes).length) {
+        showToast('没有需要保存的修改', 'info');
+        return;
+      }
+      if (submitted.delete_originals === 'true' && (changes.delete_originals === 'true' || changes.auto_pack === 'true')) {
         if (!confirm('警告：已开启「打包后删除原始目录」！\n\n开启此选项后，每次自动打包完成后将永久删除原始图片目录。\n此操作不可撤销！\n\n确定要启用此功能吗？')) return;
       }
-      clearFieldErrors();
-      var errors = validateSettings(settings);
+      var errors = validateSettings(changes);
       if (errors.length > 0) {
         for (var ei = 0; ei < errors.length; ei++) {
           showFieldError(errors[ei].field, errors[ei].message);
@@ -329,20 +333,18 @@
         if (firstInput) firstInput.focus();
         return;
       }
-      loadVersion += 1;
-      var submittedVersion = editVersion;
-      var result = await saveSettings(settings);
-      if (!result || result.status !== 'ok' || !result.settings || typeof result.settings !== 'object' || Array.isArray(result.settings)) {
+      var result = await saveSettings(changes);
+      var confirmed = result && result.status === 'ok' && result.settings;
+      if (!confirmed || typeof confirmed !== 'object' || Array.isArray(confirmed) ||
+          Object.keys(changes).some(function (key) { return !Object.prototype.hasOwnProperty.call(confirmed, key); })) {
         throw new Error((result && result.message) || '服务器没有确认设置已保存');
       }
-      // 保存成功后，用服务器返回的最新设置更新页面，无需手动刷新
-      // A newer local edit is still an unsaved draft, not the submitted payload.
-      if (editVersion === submittedVersion) {
-        populateForm(result.settings);
-      }
+      var current = collectFormValues();
+      populateForm(confirmed, function (key) { return current[key] !== submitted[key]; });
+      var hasDraft = Object.keys(changedSettings(collectFormValues())).length > 0;
       if (Array.isArray(result.warnings) && result.warnings.length) {
-        showToast('设置已保存；' + result.warnings.join('；'), 'warning');
-      } else if (editVersion !== submittedVersion) {
+        showToast('设置已保存；' + result.warnings.join('；') + (hasDraft ? '；保存期间的新修改尚未保存' : ''), 'warning');
+      } else if (hasDraft) {
         showToast('设置已保存；保存期间的新修改尚未保存', 'info');
       } else {
         showToast('设置已保存', 'success');
@@ -434,20 +436,26 @@
 
   // ── 加载设置 ──
 
-  async function loadSettings(expectedEditVersion) {
+  function refreshSettings(preserveEditsAfter) {
+    baseline = null;
+    loadEditsAfter = preserveEditsAfter;
+    pendingLoad = loadSettings(preserveEditsAfter);
+    return pendingLoad;
+  }
+
+  async function loadSettings(preserveEditsAfter) {
     var requestVersion = ++loadVersion;
-    var requestedEditVersion = expectedEditVersion === undefined ? (settingsReady ? editVersion : 0) : expectedEditVersion;
     try {
       var settings = await fetchSettings();
-      if (requestVersion === loadVersion) {
-        populateForm(settings, requestedEditVersion);
-        settingsReady = true;
-        initSensitiveFields();
-      }
+      if (requestVersion !== loadVersion) return;
+      populateForm(settings, function (key) { return fieldEdits[key] > preserveEditsAfter; });
+      initSensitiveFields();
     } catch (err) {
-      initialLoad = null;
+      if (requestVersion !== loadVersion) return;
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默
       showToast('加载设置失败: ' + err.message, 'danger');
+    } finally {
+      if (requestVersion === loadVersion) pendingLoad = null;
     }
     loadUpdateSummary();
   }
@@ -507,7 +515,10 @@
     // 输入时清除验证错误
     if (els.form) {
       function markEdited(e) {
-        if (e.target && e.target.name) fieldEdits[e.target.name] = ++editVersion;
+        var target = e.target;
+        if (!target || !target.name) return;
+        fieldEdits[target.name] = ++editVersion;
+        if (target.name === 'auto_pack' && !target.checked) fieldEdits.delete_originals = editVersion;
       }
       els.form.addEventListener('input', markEdited);
       els.form.addEventListener('change', markEdited);
@@ -585,7 +596,7 @@
     bindEvents();
 
     // Bind edits before starting the asynchronous refresh of the server-rendered form.
-    initialLoad = loadSettings();
+    refreshSettings(0);
   }
 
   if (document.readyState === 'loading') {
