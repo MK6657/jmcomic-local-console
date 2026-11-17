@@ -58,7 +58,9 @@ def jobs(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "progress_manager", ProgressManager())
     manager = module.JobManager()
     # A controlled local executor; conftest still blocks both sockets and libcurl.
-    monkeypatch.setattr(module, "download_album_job", lambda *args, stop_event: stop_event.wait(10))
+    def worker(*args, stop_event, **kwargs):
+        stop_event.wait(10)
+    monkeypatch.setattr(module, "download_album_job", worker)
     yield db, module, manager
     assert manager.stop(timeout=7)
     assert manager._pending_operations == 0
@@ -104,15 +106,9 @@ def _write_attempt(db, monkeypatch):
 
 
 def _responsive(manager, spawn, expected=0):
-    def probe():
-        count = manager.get_running_count()
-        event = manager.get_pause_event("job_probe")
-        manager.clear_pause_event("job_probe")
-        return count, event
-
-    call = spawn(probe)
+    call = spawn(manager.get_running_count)
     assert call.done.wait(0.5), "a SQLite wait monopolized the manager lock"
-    assert call.result()[0] == expected
+    assert call.result() == expected
 
 
 def _bounded_stop(manager):
@@ -179,7 +175,7 @@ def test_concurrent_schedule_reserves_slots_and_canceled_albums_until_exit(jobs,
     observed_lock = threading.Lock()
     ready = threading.Event()
 
-    def worker(job_id, album_id, photos, *, stop_event):
+    def worker(job_id, album_id, photos, *, stop_event, **kwargs):
         with observed_lock:
             if album_id in active.values():
                 violations.append((job_id, album_id))
@@ -241,6 +237,39 @@ def test_simultaneous_database_claims_select_after_obtaining_write_lock(jobs, sp
     rows = [call.result() for call in calls]
     assert all(row is not None for row in rows)
     assert len({row["job_id"] for row in rows}) == 6
+
+
+def test_quick_resume_excludes_its_album_even_with_another_free_slot(jobs, monkeypatch):
+    db, module, manager = jobs
+    db.set_setting("max_running_jobs", "2")
+    _job(db, "job_active", "101")
+    _job(db, "job_sibling", "101")
+    _job(db, "job_other", "102")
+    entered, release = threading.Event(), threading.Event()
+    def worker(job_id, *args, stop_event, **kwargs):
+        if job_id == "job_active":
+            entered.set()
+            assert release.wait(5)
+        else:
+            assert stop_event.wait(5)
+    monkeypatch.setattr(module, "download_album_job", worker)
+    manager.schedule_next()
+    try:
+        assert entered.wait(2)
+        old_writer = manager._running_jobs['job_active']
+        assert manager.pause_job("job_active")[0] and manager.resume_job("job_active")[0]
+        manager.schedule_next()
+        assert db.get_job("job_sibling")["status"] == db.get_job("job_active")["status"] == "queued"
+        assert set(manager._running_jobs) == {"job_other", "job_active"}
+        release.set()
+        old_writer.join(3)
+        assert not old_writer.is_alive()
+        manager.schedule_next()
+        assert set(manager._running_jobs) == {"job_other", "job_sibling"}
+        assert db.get_job("job_active")["status"] == "queued"
+    finally:
+        release.set()
+        assert manager.stop(timeout=3)
 
 
 def test_recovery_cannot_requeue_a_claim_between_commit_and_registration(jobs, spawn, monkeypatch):
@@ -346,14 +375,13 @@ def test_failed_thread_start_keeps_cleanup_tracked_without_holding_manager_lock(
 
 
 @pytest.mark.parametrize("first", ["pause", "resume"])
-def test_per_job_notifications_follow_commits_without_blocking_other_jobs(jobs, spawn, monkeypatch, first):
+def test_per_job_commands_follow_commits_without_blocking_other_jobs(jobs, spawn, monkeypatch, first):
     db, module, manager = jobs
     _job(db)
     _job(db, "job_other", "456")
     db.set_setting("max_running_jobs", "2")
     manager.schedule_next()
     manager.schedule_next()
-    event = manager.get_pause_event("job_one")
     if first == "resume":
         assert manager.pause_job("job_one")[0]
     committed, release = threading.Event(), threading.Event()
@@ -391,9 +419,9 @@ def test_per_job_notifications_follow_commits_without_blocking_other_jobs(jobs, 
         _responsive(manager, spawn, expected=2)
     finally:
         release.set()
-    assert older.result()[0] and newer.result()[0]
-    assert event.is_set() == (first == "pause")
-    assert db.get_job("job_one")["status"] == ("running" if first == "pause" else "paused")
+    assert older.result()[0]
+    assert newer.result()[0] == (first == "pause")
+    assert db.get_job("job_one")["status"] == "queued"
 
 
 def test_resume_waiting_for_sqlite_and_executor_exit_cannot_strand_running_row(jobs, spawn, monkeypatch):
@@ -401,7 +429,7 @@ def test_resume_waiting_for_sqlite_and_executor_exit_cannot_strand_running_row(j
     _job(db)
     entered, release, returning = threading.Event(), threading.Event(), threading.Event()
 
-    def worker(*args, stop_event):
+    def worker(*args, stop_event, **kwargs):
         entered.set()
         assert release.wait(5)
         returning.set()
@@ -429,24 +457,31 @@ def test_resume_waiting_for_sqlite_and_executor_exit_cannot_strand_running_row(j
         assert not executor.is_alive()
         assert manager.get_running_count() == 0
         assert db.get_job("job_one")["status"] == "queued"
-        assert "job_one" not in manager._pause_events
     finally:
         release.set()
 
 
-def test_pause_clear_cannot_erase_a_concurrent_stop_wakeup(jobs, monkeypatch):
-    db, _, manager = jobs
-    _job(db, status="running")
-    event = manager.get_pause_event("job_one")
-    original_clear = event.clear
-
-    def clear_after_stop():
-        manager.request_stop()
-        original_clear()
-
-    monkeypatch.setattr(event, "clear", clear_after_stop)
-    assert manager.pause_job("job_one") == (True, "已暂停")
-    assert event.is_set()
+def test_pause_after_claim_before_registration_does_not_start_writer(jobs, spawn, monkeypatch):
+    db, module, manager = jobs
+    _job(db)
+    claimed, release = threading.Event(), threading.Event()
+    original = db.claim_next_queued_job
+    executions = []
+    def hold_claim(excluded):
+        row = original(excluded)
+        claimed.set()
+        assert release.wait(5)
+        return row
+    monkeypatch.setattr(db, "claim_next_queued_job", hold_claim)
+    monkeypatch.setattr(module, "download_album_job", lambda *args, **kwargs: executions.append(args))
+    admission = spawn(manager.schedule_next)
+    try:
+        assert claimed.wait(2)
+        assert manager.pause_job("job_one") == (True, "已暂停")
+    finally:
+        release.set()
+    admission.result()
+    assert not executions and manager.get_running_count() == 0
     assert db.get_job("job_one")["status"] == "paused"
 
 

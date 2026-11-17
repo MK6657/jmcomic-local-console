@@ -74,8 +74,8 @@ def test_shutdown_requeue_and_orphan_resume_append_after_waiting_without_duplica
     _job("job_waiting", "300", created_at="2026-02-01T00:00:00")
     assert task_commands.requeue_interrupted("job_old_running")
     assert not task_commands.requeue_interrupted("job_old_running")
-    assert task_commands.resume_download("job_old_paused", has_executor=False)[0]
-    assert not task_commands.resume_download("job_old_paused", has_executor=False)[0]
+    assert task_commands.resume_download("job_old_paused")[0]
+    assert not task_commands.resume_download("job_old_paused")[0]
     assert len(db.get_all_jobs()) == 3
     assert _claim_all() == ["job_waiting", "job_old_running", "job_old_paused"]
 
@@ -157,7 +157,7 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
     monkeypatch.setattr(jobs, "job_manager", manager)
     update_settings({"timeout": "5", "retry_times": "0", "max_running_jobs": "1",
                      "image_threads": "1", "photo_threads": "1", "auto_pack": "false"})
-    state = SimpleNamespace(now=1000.0, active=0, clients=[], order=[],
+    state = SimpleNamespace(now=1000.0, active=0, clients=[], order=[], faults=True, first_title="Blocked",
                             counts=Counter(), block_on_slow_attempt=1,
                             entered=threading.Event(), release=threading.Event(), lock=threading.Lock())
     monkeypatch.setattr(transfer, "_clock", lambda: state.now)
@@ -194,7 +194,7 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
                 state.counts[path] += 1
                 attempt = state.counts[path]
             try:
-                if path == "/images/100/00001.webp":
+                if state.faults and path == "/images/100/00001.webp":
                     if attempt == state.block_on_slow_attempt:
                         state.entered.set()
                         assert state.release.wait(5)
@@ -202,7 +202,7 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
                     # budget gate, rather than a mock worker, must terminate it.
                     state.now += timeout + 0.01
                     raise TimeoutError("fixture exhausted request deadline")
-                if path == "/images/100/00003.webp":
+                if state.faults and path == "/images/100/00003.webp":
                     raise ConnectionError("fixture unavailable on this node")
                 return SimpleNamespace(status_code=200)
             finally:
@@ -224,7 +224,7 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
             photo = Photo(album_id)
             super().__init__([photo])
             self.album_id = album_id
-            self.name = "Blocked" if album_id == "100" else "Normal"
+            self.name = state.first_title if album_id == "100" else "Normal"
             self.author = "Fixture"
             self.tags = []
             self.episode_list = [(photo.photo_id, 1, photo.name)]
@@ -352,3 +352,324 @@ def test_recovered_task_does_not_block_real_normal_download_after_restart(real_d
     assert manager.stop(timeout=3)
     assert state.active == 0 and all(instance.root.closed for instance in state.clients)
     assert db.get_job("job_old_bad")["created_at"] == "2026-01-01T00:00:00"
+
+
+@pytest.fixture
+def paused_page(real_download_pipeline, monkeypatch):
+    from core import database as db, jm_service, storage
+    from core.settings import update_settings
+    from PIL import Image
+
+    manager, state, downloads = real_download_pipeline
+    state.faults = False
+    update_settings({"skip_existing": False})
+    album = downloads / "Blocked_100"
+    album.mkdir()
+    chapter = jm_service._chapter_output_dir(album, SimpleNamespace(photo_id="71", name="Chapter"))
+    for name in ("00002.webp", "00003.webp"):
+        Image.new("RGB", (8, 8), "red").save(chapter / name, "WEBP")
+    old = (chapter / "00002.webp").read_bytes()
+    entered, release = threading.Event(), threading.Event()
+    publish = storage.StagedFile.publish
+
+    def gated(staged, validate, **kwargs):
+        def validate_then_hold(path):
+            valid = validate(path)
+            if staged.target == chapter / "00002.webp" and not entered.is_set():
+                entered.set()
+                assert release.wait(10)
+            return valid
+        return publish(staged, validate_then_hold, **kwargs)
+
+    monkeypatch.setattr(storage.StagedFile, "publish", gated)
+    _job("job_first", "100")
+    _job("job_next", "200", created_at="2026-02-01T00:00:00")
+    manager.start()
+    try:
+        assert entered.wait(5)
+        assert db.get_job("job_first")["done_pages"] == 1
+        assert manager.pause_job("job_first") == (True, "已暂停")
+        yield manager, state, chapter, old, release
+    finally:
+        release.set()
+        assert manager.stop(timeout=5)
+
+
+@pytest.mark.parametrize("quick", [False, True], ids=["resume-after-restart", "resume-during-write"])
+def test_pause_drains_then_runs_next_before_resuming_same_pages(paused_page, quick):
+    from core import database as db
+    from core.job_manager import JobManager
+    manager, state, chapter, old, release = paused_page
+    first_page = chapter / "00001.webp"
+    signature = first_page.stat().st_mtime_ns, first_page.read_bytes()
+    if quick:
+        assert manager.resume_job("job_first")[0]
+        assert not manager.resume_job("job_first")[0]
+    manager.schedule_next()
+    assert db.get_job("job_first")["status"] == ("queued" if quick else "paused")
+    assert db.get_job("job_next")["status"] == "queued" and state.order == ["100"]
+    assert manager.get_running_count() == 1 and (chapter / "00002.webp").read_bytes() == old
+    state.first_title = "New upstream title"
+    release.set()
+    _await_status("job_next", "completed")
+    resumed = manager if quick else JobManager()
+    try:
+        if not quick:
+            assert manager.stop(timeout=3)
+            assert (db.get_job("job_first")["status"], db.get_job("job_first")["done_pages"]) == ("paused", 2)
+            assert resumed.recover_interrupted() == 0
+            assert resumed.resume_job("job_first")[0]
+        completed = _await_status("job_first", "completed")
+    finally:
+        assert resumed.stop(timeout=3)
+    assert state.order == ["100", "200", "100"]
+    assert completed["done_pages"] == completed["total_pages"] == 3
+    assert completed["output_path"] == str(chapter.parent)
+    assert (first_page.stat().st_mtime_ns, first_page.read_bytes()) == signature
+    assert all((chapter / name).read_bytes() != old for name in ("00002.webp", "00003.webp"))
+    assert {path: count for path, count in state.counts.items() if path.startswith("/images/")} == {
+        "/images/100/00001.webp": 1, "/images/100/00002.webp": 1, "/images/100/00003.webp": 1,
+        "/images/200/00001.webp": 1,
+    }
+    assert {row["job_id"] for row in db.get_all_jobs()} == {"job_first", "job_next"}
+    assert [row["job_id"] for row in db.resource_records(["100"])] == ["job_first"]
+    assert not list(db.DB_DIR.glob("resume-*.json"))
+    assert all(instance.root.closed for instance in state.clients)
+
+
+@pytest.mark.parametrize("quick", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+def test_interrupt_before_page_replacement_preserves_old_file_and_owner(paused_page, quick, cancel):
+    from core import database as db, storage
+    manager, state, chapter, old, release = paused_page
+    if quick:
+        assert manager.resume_job("job_first")[0]
+    if cancel:
+        assert manager.cancel_job("job_first")[0]
+        assert not manager.resume_job("job_first")[0]
+    assert not manager.stop(timeout=0.02)
+    with pytest.raises(RuntimeError, match="停止中"):
+        manager.start()
+    assert manager.get_running_count() == 1 and db.get_job("job_next")["status"] == "queued"
+    release.set()
+    assert manager.stop(timeout=3)
+    job = db.get_job("job_first")
+    assert job["status"] == ("canceled" if cancel else "queued" if quick else "paused")
+    assert job["done_pages"] == 1 and not job['error_message']
+    assert not db.resource_records(["100"])
+    assert (chapter / "00002.webp").read_bytes() == old
+    assert not (chapter / storage.STAGING_DIRECTORY).exists()
+    assert state.counts['/images/100/00003.webp'] == 0 and state.order == ["100"]
+    assert all(instance.root.closed for instance in state.clients) and manager.get_running_count() == 0
+
+
+@pytest.fixture
+def drained_pause(paused_page):
+    from core import database as db
+    manager, state, chapter, _, release = paused_page
+    release.set()
+    _await_status("job_next", "completed")
+    assert manager.stop(timeout=3)
+    assert db.get_job("job_first")["status"] == "paused"
+    assert len(list(db.DB_DIR.glob("resume-*.json"))) == 1
+    state.counts.clear()
+    return state, chapter
+
+
+@pytest.mark.parametrize("change", ["moved", "deleted", "occupied", "outside"])
+def test_resume_rebuilds_only_a_safe_original_directory(drained_pause, tmp_path, change):
+    from core import database as db
+    from core.job_manager import JobManager
+    state, chapter = drained_pause
+    original = chapter.parent
+    moved = tmp_path / "kept-original"
+    assert original.resolve().is_relative_to(tmp_path.resolve()) and moved.parent == tmp_path
+    page = chapter / "00001.webp"
+    saved = page.read_bytes()
+    if change == "deleted":
+        for name in (".jm-chapter.json", "00001.webp", "00002.webp", "00003.webp"):
+            (chapter / name).unlink()
+        chapter.rmdir()
+        original.rmdir()
+    else:
+        original.rename(moved)
+    if change == "occupied":
+        original.write_bytes(b"keep this file")
+    elif change == "outside":
+        db.update_job("job_first", output_path=str(moved))
+    state.first_title = "Changed while paused"
+    resumed = JobManager()
+    try:
+        assert resumed.resume_job("job_first")[0]
+        job = _await_status("job_first", "completed" if change in ("moved", "deleted") else "failed")
+    finally:
+        assert resumed.stop(timeout=3)
+    requests = {path: count for path, count in state.counts.items() if path.startswith("/images/")}
+    if change in ("moved", "deleted"):
+        assert job["output_path"] == str(original) and job["done_pages"] == job["total_pages"] == 3
+        assert requests == {f"/images/100/{page:05d}.webp": 1 for page in (1, 2, 3)}
+        assert len(list(original.rglob("*.webp"))) == 3
+    else:
+        assert not requests and "无法续传" in job["error_message"]
+        if change == "occupied":
+            assert "文件占用" in job["error_message"] and original.read_bytes() == b"keep this file"
+        else:
+            assert "下载根目录" in job["error_message"] and not original.exists()
+    if change != "deleted":
+        assert (moved / chapter.name / page.name).read_bytes() == saved
+    assert not list(db.DB_DIR.glob("resume-*.json"))
+
+
+@pytest.mark.parametrize("skip", [True, False], ids=["verify-existing", "explicit-refresh"])
+def test_full_restore_without_resume_sidecar_obeys_skip_existing(drained_pause, tmp_path, monkeypatch, skip):
+    from core import database as db, jm_service, path_guard
+    from core.backup import create_backup
+    from core.job_manager import JobManager
+    from core.restore import restore_backup
+    from core.settings import invalidate_settings_cache, update_settings
+    from PIL import Image
+    state, chapter = drained_pause
+    update_settings({"skip_existing": skip})
+    (chapter / "00002.webp").write_bytes(b"damaged page")
+    (chapter / "00003.webp").unlink()
+    source_downloads = chapter.parents[1]
+    archive = tmp_path / "paused-full.zip"
+    create_backup(db.DB_PATH, source_downloads, archive, include_downloads=True, service_stopped=True)
+    restored = restore_backup(archive, tmp_path / "restored")
+    assert restored.resources_included and not list(restored.database.parent.glob("resume-*.json"))
+    monkeypatch.setattr(db, "DB_DIR", restored.database.parent)
+    monkeypatch.setattr(db, "DB_PATH", restored.database)
+    monkeypatch.setattr(path_guard, "DOWNLOAD_ROOT", restored.downloads)
+    monkeypatch.setattr(jm_service, "DOWNLOAD_ROOT", restored.downloads)
+    invalidate_settings_cache()
+    restored_chapter = restored.downloads / chapter.relative_to(source_downloads)
+    saved = (restored_chapter / "00001.webp").read_bytes()
+    resumed = JobManager()
+    try:
+        assert db.get_job("job_first")["status"] == "paused"
+        assert resumed.resume_job("job_first")[0]
+        job = _await_status("job_first", "completed")
+    finally:
+        assert resumed.stop(timeout=3)
+    assert job["done_pages"] == job["total_pages"] == 3 and job["output_path"] == str(restored_chapter.parent)
+    assert [state.counts[f"/images/100/{page:05d}.webp"] for page in (1, 2, 3)] == [0 if skip else 1, 1, 1]
+    if skip:
+        assert (restored_chapter / "00001.webp").read_bytes() == saved
+    for page in (1, 2, 3):
+        with Image.open(restored_chapter / f"{page:05d}.webp") as image:
+            image.load()
+    assert not list(db.DB_DIR.glob("resume-*.json"))
+    assert (chapter / "00002.webp").read_bytes() == b"damaged page" and not (chapter / "00003.webp").exists()
+
+
+@pytest.mark.parametrize("keep_record", [False, True], ids=["lost-checkpoint", "known-pages"])
+def test_refresh_resume_verifies_changed_pages_and_requires_confirmation(drained_pause, keep_record):
+    from core import database as db
+    from core.job_manager import JobManager
+    state, chapter = drained_pause
+    record, = db.DB_DIR.glob("resume-*.json")
+    if not keep_record:
+        record.unlink()
+    (chapter / "00002.webp").write_bytes(b"damaged after pause")
+    resumed = JobManager()
+    try:
+        assert resumed.resume_job("job_first")[0]
+        assert _await_status("job_first", "completed")["done_pages"] == 3
+    finally:
+        assert resumed.stop(timeout=3)
+    assert [state.counts[f"/images/100/{page:05d}.webp"] for page in (1, 2, 3)] == [0 if keep_record else 1, 1, 1]
+    assert not record.exists()
+
+
+@pytest.mark.parametrize("discard", ["cancel-paused", "delete-queued"])
+def test_discard_resume_record_without_removing_published_pages(drained_pause, client, discard):
+    from core import database as db
+    from core.job_manager import JobManager
+    _, chapter = drained_pause
+    saved = (chapter / "00001.webp").read_bytes()
+    if discard == "cancel-paused":
+        assert JobManager().cancel_job("job_first")[0]
+        assert db.get_job("job_first")["status"] == "canceled"
+    else:
+        db.set_setting("schedule_enabled", "true")
+        db.set_setting("schedule_end", "0")
+        db.set_setting("schedule_start", "0")
+        assert JobManager().resume_job("job_first")[0]
+        assert db.get_job("job_first")["status"] == "queued"
+        assert client.delete('/api/jobs/job_first').status_code == 200
+        assert db.get_job("job_first") is None
+    assert not list(db.DB_DIR.glob("resume-*.json"))
+    assert (chapter / "00001.webp").read_bytes() == saved
+
+
+@pytest.mark.parametrize("mode", ["flat", "pack-delete", "pack-only"])
+def test_pause_after_file_finalization_only_refuses_nonrepeatable_work(real_download_pipeline, monkeypatch, mode):
+    from core import database as db, jm_service
+    from core.settings import update_settings
+    manager, state, downloads = real_download_pipeline
+    state.faults = False
+    update_settings({"skip_existing": False, "organize_mode": "flat" if mode == "flat" else "none",
+                     "auto_pack": mode != "flat", "delete_originals": mode == "pack-delete"})
+    applied, release = threading.Event(), threading.Event()
+    finalize = jm_service.finalize_files
+    def after_files(*args, **kwargs):
+        output = finalize(*args, **kwargs)
+        applied.set()
+        assert release.wait(10)
+        return output
+    monkeypatch.setattr(jm_service, "finalize_files", after_files)
+    _job("job_files", "100")
+    manager.schedule_next()
+    try:
+        assert applied.wait(5)
+        folder = downloads / "Blocked_100"
+        if mode == "flat":
+            assert len(list(folder.glob("*.webp"))) == 3
+        elif mode == "pack-delete":
+            assert list(folder.glob("*.cbz")) and not list(folder.rglob("*.webp"))
+        paused, message = manager.pause_job("job_files")
+        assert paused == (mode == "pack-only")
+        if paused:
+            assert manager.resume_job("job_files")[0]
+        else:
+            assert "正在整理" in message and db.get_job("job_files")["status"] == "running"
+            assert not manager.resume_job("job_files")[0]
+        writer = manager._running_jobs["job_files"]
+    finally:
+        release.set()
+    writer.join(5)
+    if mode == "pack-only":
+        manager.schedule_next()
+    assert _await_status("job_files", "completed")["done_pages"] == 3
+    assert manager.stop(timeout=3) and not manager._finalizing_jobs
+    assert [state.counts[f"/images/100/{page:05d}.webp"] for page in (1, 2, 3)] == [1, 1, 1]
+
+
+def test_quick_resume_wins_before_flat_files_and_skips_confirmed_pages(real_download_pipeline, monkeypatch):
+    from core import database as db
+    from core.settings import update_settings
+    manager, state, downloads = real_download_pipeline
+    state.faults = False
+    update_settings({"skip_existing": False, "organize_mode": "flat"})
+    entering, release = threading.Event(), threading.Event()
+    begin = manager.begin_file_finalization
+    def before_files(job_id):
+        if job_id == "job_writing" and not entering.is_set():
+            entering.set()
+            assert release.wait(10)
+        return begin(job_id)
+    monkeypatch.setattr(manager, "begin_file_finalization", before_files)
+    _job("job_writing", "100")
+    _job("job_waiting", "200")
+    manager.start()
+    try:
+        assert entering.wait(5)
+        assert db.get_job("job_writing")["done_pages"] == 3
+        assert manager.pause_job("job_writing")[0] and manager.resume_job("job_writing")[0]
+        assert not list((downloads / "Blocked_100").glob("*.webp"))
+    finally:
+        release.set()
+    _await_status("job_writing", "completed")
+    assert manager.stop(timeout=3) and state.order == ["100", "200", "100"]
+    assert len(list((downloads / "Blocked_100").glob("*.webp"))) == 3
+    assert [state.counts[f"/images/100/{page:05d}.webp"] for page in (1, 2, 3)] == [1, 1, 1]

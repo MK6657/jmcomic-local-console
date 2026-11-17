@@ -1,6 +1,7 @@
 """Disposable loopback regression: real libcurl + SDK image decoding, no upstream."""
 import argparse
 from collections import Counter
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -14,8 +15,12 @@ import time
 from urllib.parse import urlsplit
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--two-stalls", action="store_true", help="stall both bad pages instead of returning corrupt bytes for page 3")
-two_stalls = parser.parse_args().two_stalls
+scenario = parser.add_mutually_exclusive_group()
+scenario.add_argument("--two-stalls", action="store_true", help="stall both bad pages instead of returning corrupt bytes for page 3")
+scenario.add_argument("--pause", action="store_true", help="resume only after the waiting album finishes")
+scenario.add_argument("--quick-resume", action="store_true", help="resume while the second page is still in flight")
+args = parser.parse_args()
+pause_run = args.pause or args.quick_resume
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 temporary = tempfile.TemporaryDirectory(prefix="jm-stalled-queue-")
@@ -32,15 +37,19 @@ assert db.DB_PATH.resolve().is_relative_to(Path(temporary.name).resolve())
 assert jm_service.DOWNLOAD_ROOT.resolve().is_relative_to(Path(temporary.name).resolve())
 app.create_app()
 settings.update_settings({"timeout": 5, "retry_times": 0, "image_threads": 1,
-                          "photo_threads": 1, "max_running_jobs": 1, "auto_update_check": False})
+                          "photo_threads": 1, "max_running_jobs": 1, "auto_update_check": False,
+                          "skip_existing": not pause_run})
 payload = io.BytesIO()
 Image.new("RGB", (16, 16), "blue").save(payload, "PNG")
 payload = payload.getvalue()
 release = threading.Event()
+inflight = threading.Event()
 requests = []
 slow_path = "/media/photos/101/00001.png"
 third_path = "/media/photos/101/00003.png"
-faults = {slow_path: "stall", third_path: "stall" if two_stalls else "corrupt"}
+second_path = "/media/photos/101/00002.png"
+next_path = "/media/photos/102/00001.png"
+faults = {second_path: "hold"} if pause_run else {slow_path: "stall", third_path: "stall" if args.two_stalls else "corrupt"}
 stalled = []
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -51,6 +60,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        if fault == "hold":
+            inflight.set()
+            assert release.wait(10)
         if fault == "stall":
             stalled.append(self.path)
             release.wait()
@@ -103,34 +115,70 @@ manager = job_module.JobManager()
 job_module.job_manager = manager
 bad = manager.create_job("101", "Stalled", [])
 good = manager.create_job("102", "Healthy", [])
+
+
+def wait_for(predicate):
+    limit = start + 30
+    while time.monotonic() < limit:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise AssertionError("loopback queue did not reach the expected state")
+
+
 start = time.monotonic()
 try:
     manager.start()
-    limit = start + 30
-    while time.monotonic() < limit:
-        first, second = db.get_job(bad), db.get_job(good)
-        if first["status"] == "failed" and second["status"] == "completed" and manager.get_running_count() == 0:
-            break
-        time.sleep(0.05)
+    if pause_run:
+        assert inflight.wait(5)
+        partial = db.get_job(bad)
+        assert partial["done_pages"] == 1
+        saved, = Path(partial["output_path"]).rglob("00001.webp")
+        digest = hashlib.sha256(saved.read_bytes()).hexdigest()
+        assert manager.pause_job(bad)[0]
+        if args.quick_resume:
+            assert manager.resume_job(bad)[0] and db.get_job(bad)["status"] == "queued"
+        manager.schedule_next()
+        assert manager.get_running_count() == 1 and db.get_job(good)["status"] == "queued"
+        assert requests == [slow_path, second_path]
+        release.set()
+        if not args.quick_resume:
+            wait_for(lambda: db.get_job(good)["status"] == "completed" and manager.get_running_count() == 0)
+            partial = db.get_job(bad)
+            assert (partial["status"], partial["done_pages"]) == ("paused", 2)
+            assert manager.resume_job(bad)[0]
+        first_status = "completed"
     else:
-        raise AssertionError("stalled queue did not advance")
-    assert requests == [slow_path, "/media/photos/101/00002.png", third_path, "/media/photos/102/00001.png"], requests
-    assert stalled == ([slow_path, third_path] if two_stalls else [slow_path])
-    assert (first["done_pages"], first["total_pages"]) == (1, 3)
-    assert all(f"第 {page} 页下载失败" in first["error_message"] for page in (1, 3))
+        first_status = "failed"
+    wait_for(lambda: db.get_job(bad)["status"] == first_status and db.get_job(good)["status"] == "completed"
+             and manager.get_running_count() == 0)
+    first, second = db.get_job(bad), db.get_job(good)
+    if pause_run:
+        assert requests == [slow_path, second_path, next_path, third_path], requests
+        assert hashlib.sha256(saved.read_bytes()).hexdigest() == digest
+        assert len(db.get_all_jobs()) == 2 and first["done_pages"] == first["total_pages"] == 3
+        expected_first = ["00001.webp", "00002.webp", "00003.webp"]
+    else:
+        assert requests == [slow_path, second_path, third_path, next_path], requests
+        assert stalled == ([slow_path, third_path] if args.two_stalls else [slow_path])
+        assert (first["done_pages"], first["total_pages"]) == (1, 3)
+        assert all(f"第 {page} 页下载失败" in first["error_message"] for page in (1, 3))
+        expected_first = ["00002.webp"]
     assert second["done_pages"] == second["total_pages"] == 1
-    for job, expected in ((first, "00002.webp"), (second, "00001.webp")):
-        images = list(Path(job["output_path"]).rglob("*.webp"))
-        assert [path.name for path in images] == [expected]
-        with Image.open(images[0]) as image:
-            assert image.format == "WEBP"
-            image.load()
-    print(json.dumps({"scenario": "two_stalls" if two_stalls else "stall_and_corrupt",
-                      "bad_status": first["status"], "good_status": second["status"],
+    for job, expected in ((first, expected_first), (second, ["00001.webp"])):
+        images = sorted(Path(job["output_path"]).rglob("*.webp"))
+        assert [path.name for path in images] == expected
+        for path in images:
+            with Image.open(path) as image:
+                assert image.format == "WEBP"
+                image.load()
+    mode = "quick_resume" if args.quick_resume else "pause" if args.pause else "two_stalls" if args.two_stalls else "stall_and_corrupt"
+    print(json.dumps({"scenario": mode, ("first_status" if pause_run else "bad_status"): first["status"],
+                      "good_status": second["status"],
                       "seconds": round(time.monotonic()-start, 3),
-                      "requests_per_page": dict(Counter(requests)), "stalled_pages": stalled,
+                      "requests_per_page": dict(Counter(requests)), "request_order": requests, "stalled_pages": stalled,
                       "remaining_executors": manager.get_running_count(),
-                      "verified_images": 2, "upstream_requests": 0}))
+                      "verified_images": len(expected_first) + 1, "upstream_requests": 0}))
 finally:
     release.set()
     assert manager.stop(timeout=3)

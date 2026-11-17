@@ -495,7 +495,7 @@ def test_download_job_thread_has_its_own_request_id(client, monkeypatch):
     from core import job_manager as jm_module, logger as lm
     seen = []
 
-    def fake_job(job_id, album_id, photo_ids, *, stop_event=None):
+    def fake_job(job_id, album_id, photo_ids, **kwargs):
         seen.append(lm.current_request_id())
         worker = threading.Thread(target=lm.bind_request_id(lambda: seen.append(lm.current_request_id())))
         worker.start()

@@ -69,18 +69,13 @@ def test_orphan_pause_resumes_to_queued_before_dispatch(client, monkeypatch):
     assert manager.get_running_count() == 0
 
 
-def test_owned_pause_resumes_its_executor_and_wakes_event(client, monkeypatch):
+def test_quick_resume_queues_same_job_while_old_executor_drains(client, monkeypatch):
     import core.job_manager as module
     from core import database as db
     manager = module.JobManager()
-    started, proceed, resumed = threading.Event(), threading.Event(), threading.Event()
-    observed = []
-    def worker(job_id, album_id, photos, *, stop_event):
-        event = manager.get_pause_event(job_id)
+    started, proceed = threading.Event(), threading.Event()
+    def worker(job_id, album_id, photos, *, stop_event, **kwargs):
         started.set()
-        assert event.wait(5)
-        observed.append(db.get_job(job_id)["status"])
-        resumed.set()
         assert proceed.wait(5)
     monkeypatch.setattr(module, "download_album_job", worker)
     _job("job_paused")
@@ -89,8 +84,10 @@ def test_owned_pause_resumes_its_executor_and_wakes_event(client, monkeypatch):
         assert started.wait(3)
         assert manager.pause_job("job_paused")[0]
         assert manager.resume_job("job_paused")[0]
-        assert resumed.wait(3)
-        assert observed == ["running"]
+        assert db.get_job("job_paused")["status"] == "queued"
+        assert not manager.resume_job("job_paused")[0]
+        manager.schedule_next()
+        assert len(db.get_all_jobs()) == 1
         assert manager.get_running_count() == 1
     finally:
         manager.request_stop()
@@ -99,13 +96,12 @@ def test_owned_pause_resumes_its_executor_and_wakes_event(client, monkeypatch):
     assert db.get_job("job_paused")["status"] == "queued"
 
 
-def test_pause_cannot_erase_a_concurrent_resume_notification(client, monkeypatch):
+def test_resume_orders_after_concurrent_pause_commit(client, monkeypatch):
     from core import database as db
     from core.job_manager import JobManager
     manager = JobManager()
     _job("job_pause_race", status="running")
     manager._running_jobs["job_pause_race"] = Mock(is_alive=Mock(return_value=True))
-    event = manager.get_pause_event("job_pause_race")
     committed, release, resume_entered = threading.Event(), threading.Event(), threading.Event()
     transition = db.transition_job_status
     def delayed_pause(*args, **kwargs):
@@ -129,24 +125,18 @@ def test_pause_cannot_erase_a_concurrent_resume_notification(client, monkeypatch
     resuming.join(timeout=3)
     assert not pausing.is_alive() and not resuming.is_alive()
     assert all(ok for ok, message in outcomes) and len(outcomes) == 2
-    assert db.get_job("job_pause_race")["status"] == "running"
-    assert event.is_set()
+    assert db.get_job("job_pause_race")["status"] == "queued"
 
 
 @pytest.mark.parametrize("paused", [False, True])
-def test_shutdown_requeues_running_preserves_user_pause_and_wakes_waiters(client, monkeypatch, paused):
+def test_shutdown_requeues_running_preserves_user_pause(client, monkeypatch, paused):
     import core.job_manager as module
     from core import database as db
     manager = module.JobManager()
-    entered, waiting = threading.Event(), threading.Event()
-    def worker(job_id, album_id, photos, *, stop_event):
-        pause_event = manager.get_pause_event(job_id)
+    entered = threading.Event()
+    def worker(job_id, album_id, photos, *, stop_event, **kwargs):
         entered.set()
-        if paused:
-            assert waiting.wait(5)
-            assert pause_event.wait(5)
-        else:
-            assert stop_event.wait(5)
+        assert stop_event.wait(5)
     monkeypatch.setattr(module, "download_album_job", worker)
     _job("job_shutdown")
     db.add_wishlist("123", "Lifecycle")
@@ -154,7 +144,6 @@ def test_shutdown_requeues_running_preserves_user_pause_and_wakes_waiters(client
     assert entered.wait(3)
     if paused:
         assert manager.pause_job("job_shutdown")[0]
-        waiting.set()
     assert manager.stop(timeout=3)
     assert manager.get_running_count() == 0
     job = db.get_job("job_shutdown")
@@ -172,7 +161,7 @@ def test_stop_uses_one_total_budget_and_cannot_restart_undrained_workers(client,
     manager = module.JobManager()
     entered = threading.Barrier(3)
     release = threading.Event()
-    def worker(job_id, album_id, photos, *, stop_event):
+    def worker(job_id, album_id, photos, *, stop_event, **kwargs):
         entered.wait(timeout=5)
         assert release.wait(5)  # emulate an in-flight request that cannot yet stop
     monkeypatch.setattr(module, "download_album_job", worker)
@@ -306,11 +295,14 @@ def test_stop_catches_a_start_that_overlapped_its_nonblocking_request(client, mo
     assert manager._stop_event.is_set()
 
 
-def test_pause_event_created_after_stop_signal_is_already_awake(client):
+def test_stopping_manager_cannot_resume_paused_work(client):
+    from core import database as db
     from core.job_manager import JobManager
     manager = JobManager()
+    _job("job_late_pause", status="paused")
     manager.request_stop()
-    assert manager.get_pause_event("job_late_pause").is_set()
+    assert not manager.resume_job("job_late_pause")[0]
+    assert db.get_job("job_late_pause")["status"] == "paused"
     assert manager.stop(timeout=0)
 
 
@@ -330,7 +322,7 @@ def test_user_cancel_during_shutdown_is_not_requeued(client, monkeypatch):
     from core import database as db
     manager = module.JobManager()
     entered, release = threading.Event(), threading.Event()
-    def worker(job_id, album_id, photos, *, stop_event):
+    def worker(job_id, album_id, photos, *, stop_event, **kwargs):
         entered.set()
         assert release.wait(5)
     monkeypatch.setattr(module, "download_album_job", worker)
@@ -363,7 +355,7 @@ def test_exception_while_shutdown_does_not_mark_task_failed(client, monkeypatch)
     from core import database as db
     manager = module.JobManager()
     entered = threading.Event()
-    def worker(job_id, album_id, photos, *, stop_event):
+    def worker(job_id, album_id, photos, *, stop_event, **kwargs):
         entered.set()
         assert stop_event.wait(5)
         raise OSError("request interrupted while stopping")

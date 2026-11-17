@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import database as db
+from .download_checkpoint import discard_checkpoint
 from .logger import log, set_request_id, clear_request_id
 from .progress import progress_manager
 from .jm_service import download_album_job
@@ -41,7 +42,8 @@ class JobManager:
         self._job_controls: dict[str, _JobControl] = {}
         self._running_jobs: dict[str, threading.Thread] = {}
         self._running_albums: dict[str, str] = {}
-        self._pause_events: dict[str, threading.Event] = {}  # job_id → Event
+        self._finalizing_jobs: set[str] = set()
+        self._schedule_wakeup = threading.Event()
         self._stop_event = threading.Event()
         self._scheduler_thread: Optional[threading.Thread] = None
 
@@ -79,19 +81,6 @@ class JobManager:
                 if not control.users:
                     del self._job_controls[job_id]
 
-    def get_pause_event(self, job_id: str) -> threading.Event:
-        """获取/创建暂停恢复通知事件"""
-        with self._lock:
-            if job_id not in self._pause_events:
-                self._pause_events[job_id] = threading.Event()
-            if self._stop_event.is_set():
-                self._pause_events[job_id].set()
-            return self._pause_events[job_id]
-
-    def clear_pause_event(self, job_id: str):
-        with self._lock:
-            self._pause_events.pop(job_id, None)
-
     def start(self):
         """Idempotently start one scheduler; never revive an undrained generation."""
         with self._lock:
@@ -114,10 +103,9 @@ class JobManager:
                 raise
 
     def request_stop(self) -> None:
-        """Stop admission immediately and wake paused executors without waiting."""
+        """Stop admission immediately and wake the scheduler without waiting."""
         self._stop_event.set()
-        for event in self._pause_events.copy().values():
-            event.set()
+        self._schedule_wakeup.set()
 
     def stop(self, timeout: float = 5) -> bool:
         """Join scheduler and workers within one budget; retain undrained ownership."""
@@ -128,12 +116,10 @@ class JobManager:
         try:
             # A concurrent start may have completed between the nonblocking
             # request and acquiring this lock; stop that generation as well.
-            self._stop_event.set()
+            self.request_stop()
             self._stop_waiters += 1
             scheduler = self._scheduler_thread
             workers = tuple(self._running_jobs.values())
-            for event in self._pause_events.values():
-                event.set()
         finally:
             self._lock.release()
         try:
@@ -179,13 +165,15 @@ class JobManager:
         return result
 
     def _scheduler_loop(self):
-        """调度器后台主循环：每 2 秒尝试调度一次"""
+        """执行器排空时调度下一项；空闲时也定期检查入队和时间窗口。"""
         while not self._stop_event.is_set():
+            self._schedule_wakeup.clear()
             try:
                 self._schedule_next()
             except Exception as e:
                 log.error(f"调度器异常: {e}")
-            self._stop_event.wait(2)
+            if not self._stop_event.is_set():
+                self._schedule_wakeup.wait(2)
 
     def _schedule_next(self):
         """尝试从队列中原子地取出下一个 queued 任务并启动下载线程"""
@@ -224,7 +212,7 @@ class JobManager:
             # A command can commit after claim, before its job ID is known to
             # this gate. Never start a claim that was canceled or requeued.
             current = db.get_job(job_id)
-            if current is None or current["status"] not in ("running", "paused"):
+            if current is None or current["status"] != "running":
                 return
             try:
                 photo_ids = json.loads(next_job["selected_photo_ids"] or "[]")
@@ -274,9 +262,11 @@ class JobManager:
         # 本任务的记录（含章节/图片工作线程与 jmcomic 库的重试/失败记录）共用一个 request_id，
         # 日志查看器的“只看此请求”可以串起整个任务的经过
         set_request_id()
+        checkpoint = None
         try:
             if not self._stop_event.is_set():
-                download_album_job(job_id, album_id, photo_ids, stop_event=self._stop_event)
+                checkpoint = download_album_job(job_id, album_id, photo_ids, stop_event=self._stop_event,
+                                                begin_file_finalization=self.begin_file_finalization)
             log.info(f"下载执行器退出 job_id={job_id} album_id={album_id}")
         except Exception as e:
             log.error(f"任务执行异常 job_id={job_id} error={e}")
@@ -296,6 +286,12 @@ class JobManager:
                     # Resume may have committed while this executor was already
                     # returning. Retire under the same per-job gate and release
                     # any unfinished running row; pause/cancel/results survive.
+                    if checkpoint is not None:
+                        job = db.get_job(job_id)
+                        checkpoint.retire(job["status"] if job else None)
+                except Exception as error:
+                    log.error(f"保存续传记录失败 job_id={job_id} error={error}")
+                try:
                     requeue_interrupted(job_id)
                 except Exception as error:
                     # Leave a running row recoverable on next startup if storage
@@ -306,9 +302,10 @@ class JobManager:
                 finally:
                     clear_request_id()
                     with self._changed:
-                        self._pause_events.pop(job_id, None)
+                        self._finalizing_jobs.discard(job_id)
                         self._running_jobs.pop(job_id, None)
                         self._running_albums.pop(job_id, None)
+                        self._schedule_wakeup.set()
                         self._changed.notify_all()
 
     def cancel_job(self, job_id: str) -> tuple[bool, str]:
@@ -319,11 +316,38 @@ class JobManager:
         - queued 立即取消
         - running/paused 标记取消，等待线程结束
         """
-        result = cancel_download(job_id)
-        if result == (True, "已取消"):
-            log.info(f"取消任务 job_id={job_id}")
+        with self._job_control(job_id):
+            result = cancel_download(job_id)
+            if result[0]:
+                discard_checkpoint(job_id)
+            if result == (True, "已取消"):
+                log.info(f"取消任务 job_id={job_id}")
         return result
 
+    def remove_job(self, job_id: str):
+        """Remove disposable history and its resume file under the same gate as retirement."""
+        with self._job_control(job_id):
+            job = db.get_job(job_id)
+            if job is None:
+                raise TaskCommandError("not_found", "任务不存在", 404)
+            if job["status"] in ("running", "paused"):
+                raise TaskCommandError("status", "任务正在下载中，请先取消后再删除", 400)
+            db.delete_job(job_id)
+            discard_checkpoint(job_id)
+
+    def begin_file_finalization(self, job_id: str) -> bool:
+        """Order the first non-repeatable file operation against pause, without locking I/O."""
+        with self._job_control(job_id):
+            if self._stop_event.is_set():
+                return False
+            job = db.get_job(job_id)
+            if not job or job["status"] != "running":
+                return False
+            with self._lock:
+                if self._stop_event.is_set():
+                    return False
+                self._finalizing_jobs.add(job_id)
+            return True
 
     def pause_job(self, job_id: str) -> tuple[bool, str]:
         """
@@ -335,20 +359,17 @@ class JobManager:
             if not accepted:
                 return False, "下载执行器正在停止，无法暂停"
             with self._job_control(job_id):
+                with self._lock:
+                    finalizing = job_id in self._finalizing_jobs
+                if finalizing:
+                    job = db.get_job(job_id)
+                    if job and job["status"] == "running":
+                        return False, "任务正在整理或清理已下载的页面，无法暂停"
                 ok = db.transition_job_status(job_id, ["running"], "paused")
                 if not ok:
                     job = db.get_job(job_id)
                     status = job["status"] if job else "不存在"
                     return False, f"当前状态为「{status}」，无法暂停"
-                # Serialize commit and notification with resume/retirement.
-                with self._lock:
-                    ev = self._pause_events.get(job_id)
-                    if ev:
-                        ev.clear()
-                        # Check *after* clear: request_stop() does not acquire
-                        # _lock, and its wakeup must never be erased.
-                        if self._stop_event.is_set():
-                            ev.set()
         log.info(f"暂停任务 job_id={job_id}")
         return True, "已暂停"
 
@@ -362,17 +383,12 @@ class JobManager:
             if not accepted:
                 return False, "下载执行器正在停止，无法恢复"
             with self._job_control(job_id):
-                with self._lock:
-                    thread = self._running_jobs.get(job_id)
-                    has_executor = bool(thread is not None and thread.is_alive() and not self._stop_event.is_set())
-                ok, message = resume_download(job_id, has_executor=has_executor)
+                ok, message = resume_download(job_id)
                 if not ok:
                     return ok, message
                 with self._lock:
-                    ev = self._pause_events.get(job_id)
-                    if ev:
-                        ev.set()
-            if not has_executor:
+                    draining = job_id in self._running_jobs
+            if not draining:
                 try:
                     self.schedule_next()
                 except Exception as error:

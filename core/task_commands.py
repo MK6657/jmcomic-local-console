@@ -10,6 +10,7 @@ import os
 
 from . import database as db
 from . import update_store
+from .download_checkpoint import discard_checkpoint
 from .validation import validate_numeric
 
 
@@ -98,19 +99,20 @@ def enqueue_download(album_id: str, title: str, photo_ids: list[str]) -> Enqueue
 
 
 def finish_download(job_id: str, to_status: str, *, photo_ids=(), **extra) -> bool:
-    """Commit a running/paused result, bookmark facts and chapter baseline together."""
+    """Only the still-running attempt may publish a terminal result and its side effects."""
     if to_status not in ("completed", "failed"):
         raise ValueError("下载结果只能是 completed 或 failed")
     with db.transaction() as conn:
         row = conn.execute("SELECT album_id FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
             return False
-        if not db.transition_job_status(job_id, ["running", "paused"], to_status, conn=conn, **extra):
+        if not db.transition_job_status(job_id, ["running"], to_status, conn=conn, **extra):
             return False
         db._refresh_wishlist_after_job_delete(conn, [row["album_id"]])
         if to_status == "completed":
             update_store.absorb_downloaded(row["album_id"], photo_ids, conn=conn)
-        return True
+    discard_checkpoint(job_id)
+    return True
 
 
 def cancel_download(job_id: str) -> tuple[bool, str]:
@@ -218,19 +220,15 @@ def requeue_interrupted(job_id: str) -> bool:
         return bool(changed)
 
 
-def resume_download(job_id: str, *, has_executor: bool) -> tuple[bool, str]:
-    """Resume an owned executor, or queue an interrupted paused job for scheduling."""
+def resume_download(job_id: str) -> tuple[bool, str]:
+    """Append the same job behind waiting work, even if its former writer is draining."""
     with db.transaction() as conn:
         row = conn.execute("SELECT album_id, status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None or row["status"] != "paused":
             status = row["status"] if row else "不存在"
             return False, f"当前状态为「{status}」，无法恢复"
-        if has_executor:
-            conn.execute("UPDATE jobs SET status='running', updated_at=? WHERE job_id=? AND status='paused'",
-                         (datetime.now().isoformat(), job_id))
-        else:
-            conn.execute("UPDATE jobs SET status='queued', updated_at=?, queued_at=? "
-                         "WHERE job_id=? AND status='paused'",
-                         (datetime.now().isoformat(), queue_tail_time(conn), job_id))
+        conn.execute("UPDATE jobs SET status='queued', updated_at=?, queued_at=? "
+                     "WHERE job_id=? AND status='paused'",
+                     (datetime.now().isoformat(), queue_tail_time(conn), job_id))
         _sync_wishlist(conn, row["album_id"])
         return True, "已恢复"

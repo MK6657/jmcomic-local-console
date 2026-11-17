@@ -55,11 +55,10 @@ def _fault(db, table):
                      f"BEGIN SELECT RAISE(ABORT,'audit {table} write fault'); END")
 
 
-@pytest.mark.parametrize("initial", ["running", "paused"])
-def test_finish_completed_commits_job_catalog_bookmark_and_baseline(database, initial):
+def test_finish_completed_commits_job_catalog_bookmark_and_baseline(database):
     from core.task_commands import finish_download
     _bookmark_and_baseline(database)
-    job_id = _job(database, status=initial)
+    job_id = _job(database)
     assert finish_download(job_id, "completed", photo_ids=["102"], done_pages=7,
                            completed_at="2026-02-01", output_path="offline-output") is True
     job = database.get_job(job_id)
@@ -70,11 +69,10 @@ def test_finish_completed_commits_job_catalog_bookmark_and_baseline(database, in
     assert _checks(database) == {"baseline": ["101", "102"], "pending": [{"photo_id": "103"}], "count": 1}
 
 
-@pytest.mark.parametrize("initial", ["running", "paused"])
-def test_finish_failed_commits_status_without_absorbing_chapters(database, initial):
+def test_finish_failed_commits_status_without_absorbing_chapters(database):
     from core.task_commands import finish_download
     _bookmark_and_baseline(database)
-    job_id = _job(database, status=initial)
+    job_id = _job(database)
     before = _checks(database)
     assert finish_download(job_id, "failed", photo_ids=["102"], done_pages=2, error_message="image failed") is True
     assert database.get_job(job_id)["error_message"] == "image failed"
@@ -99,7 +97,7 @@ def test_finish_derives_bookmark_from_all_remaining_jobs(database, to_status, re
     assert database.get_wishlist("123")["download_status"] == expected
 
 
-@pytest.mark.parametrize("initial", ["queued", "canceled", "completed", "failed", "unknown", None])
+@pytest.mark.parametrize("initial", ["paused", "queued", "canceled", "completed", "failed", "unknown", None])
 @pytest.mark.parametrize("result", ["completed", "failed"])
 def test_finish_never_overwrites_non_executor_or_missing_jobs(database, initial, result):
     from core.task_commands import finish_download

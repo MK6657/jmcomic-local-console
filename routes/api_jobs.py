@@ -9,7 +9,7 @@ from pathlib import Path
 
 from flask import Blueprint, request, jsonify, Response, stream_with_context
 
-from core.database import get_all_jobs, get_job, delete_job, clear_jobs_by_status
+from core.database import get_all_jobs, get_job, clear_jobs_by_status
 import core.database as db
 from core.job_manager import job_manager
 from core.task_commands import TaskCommandError
@@ -298,15 +298,10 @@ def remove_job(job_id: str):
     err = _check_job_id(job_id)
     if err:
         return err
-    job = get_job(job_id)
-    if not job:
-        return jsonify({"status": "error", "message": "任务不存在"}), 404
-
-    # running 任务不能删除,必须先取消
-    if job["status"] in ("running", "paused"):
-        return jsonify({"status": "error", "message": "任务正在下载中，请先取消后再删除"}), 400
-
-    delete_job(job_id)
+    try:
+        job_manager.remove_job(job_id)
+    except TaskCommandError as error:
+        return jsonify({"status": "error", "message": str(error)}), error.http_status
     log.info(f"API删除任务 job_id={job_id}")
     return jsonify({"status": "ok", "message": "已删除"})
 

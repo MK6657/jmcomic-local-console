@@ -87,30 +87,16 @@ def test_stop_during_image_preserves_old_page_without_retry_or_failure(job, rais
     assert db.get_job("job_shutdown_test")["status"] == "running"
 
 
-def test_shutdown_wakes_paused_wait_without_canceled_event(job):
+@pytest.mark.parametrize("status", ["paused", "queued"])
+def test_paused_or_requeued_executor_yields_without_canceled_event(job, status):
     from core import database as db, jm_service
     _, tracker = job
     db.transition_job_status(
-        "job_shutdown_test", ["queued", "running", "paused", "completed", "failed", "canceled"], "paused",
+        "job_shutdown_test", ["running"], status,
     )
-    stop, resume, done = threading.Event(), threading.Event(), threading.Event()
     tracker.push = Mock()
-    result = []
-    def run():
-        result.append(jm_service._should_stop("job_shutdown_test", "123", tracker, resume, stop))
-        done.set()
-    thread = threading.Thread(target=run)
-    thread.start()
-    try:
-        stop.set()
-        resume.set()
-        assert done.wait(2)
-    finally:
-        stop.set()
-        resume.set()
-        thread.join(3)
-    assert result == [True]
-    assert db.get_job("job_shutdown_test")["status"] == "paused"
+    assert jm_service._should_stop("job_shutdown_test", tracker, threading.Event())
+    assert db.get_job("job_shutdown_test")["status"] == status
     tracker.push.assert_not_called()
 
 

@@ -98,7 +98,7 @@
                 <input type="number" id="image_threads" name="image_threads"
                        class="form-control" min="1" max="50"
                        value="{{ settings.image_threads or 20 }}">
-                <div class="form-text">同时下载的图片数量，建议 10-30</div>
+                <div class="form-text">所有下载任务和章节共用这个上限；在线阅读单独计数。</div>
                 <div class="invalid-feedback"></div>
             </div>
             <div class="col-6 col-md-3" data-setting-key="photo_threads">
@@ -125,7 +125,7 @@
                     下载完成后自动调整目录结构。<br>
                     <strong>不整理：</strong>保持 <code>downloads/漫画名/章节/图片</code> 结构；<br>
                     <strong>按作者整理：</strong>重组为 <code>downloads/作者名/漫画名/章节/图片</code>；<br>
-                    <strong>扁平化：</strong>合并为 <code>downloads/漫画名/图片</code>（章节前缀命名）。
+                    <strong>扁平化：</strong>按章节和页号命名。重下同一页时复用相同内容，遇到不同版本则分别保留。
                 </div>
             </div>
         </div>
