@@ -21,10 +21,12 @@
 维护命令沿用现有CLI，正常备份/恢复需先关闭本程序；恢复只写入不存在的新实例目录：
 
 ```powershell
-.\JMComic.exe cli backup --output 'D:\PrivateBackups\jmcomic.zip'
-.\JMComic.exe cli backup-info 'D:\PrivateBackups\jmcomic.zip'
-.\JMComic.exe cli restore 'D:\PrivateBackups\jmcomic.zip' --to 'D:\JMComicRestored'
+.\JMComic.exe cli backup --include-downloads --output 'D:\PrivateBackups\jmcomic-with-pages.zip'
+.\JMComic.exe cli backup-info 'D:\PrivateBackups\jmcomic-with-pages.zip'
+.\JMComic.exe cli restore 'D:\PrivateBackups\jmcomic-with-pages.zip' --to 'D:\JMComicRestored'
 ```
+
+只需数据库和文件清单时，省略 `--include-downloads`；这种备份不包含漫画图片。
 
 升级前先备份，关闭旧版本，再将新包解压到另一个目录验证。通过环境变量或恢复到全新实例决定使用的数据位置；不要将整包覆盖到个人实例，不自动降级数据库。旧版程序不能打开升级后的新版数据库。
 
@@ -59,7 +61,7 @@ python -m venv .venv-build
 .\.venv-build\Scripts\python.exe tests/check_windows_release.py 'releases\windows-x64-实际指纹' --check-launcher
 ```
 
-它核实ZIP哈希/CRC，解压到含中文和空格的临时目录，再从无Python的PATH及无关工作目录运行EXE自检；检查继承的实例目录未被读取或创建，以及便携CLI能验证一个空数据库备份。`--check-launcher` 额外验证单实例锁被占用时，启动器的实际EXE子进程会退出，不接管或停止已有服务。
+它核实ZIP哈希/CRC，解压到含中文和空格的临时目录，再从无Python的PATH及无关工作目录运行EXE自检；检查继承的实例目录未被读取或创建，以及便携CLI能校验一份合成旧库的备份。`--check-launcher` 额外验证单实例锁被占用时，启动器的实际EXE子进程会退出，不接管或停止已有服务。另加 `--check-restore` 可让解压出的 EXE 从 v2 临时实例制作完整备份，再故意切换下载根向同名 ZIP 备份。后一次必须拒绝，原包哈希不变，且能恢复到新目录；脚本会核对恢复后的图片字节和任务路径。这一项调用普通维护命令，须在服务锁空闲时执行。
 
 产物尚未签名。当前机器构建及自检不能替代干净Windows虚拟机的兼容性验收；真实上游、完整安装/卸载体验、Docker仍需分别验收。
 
