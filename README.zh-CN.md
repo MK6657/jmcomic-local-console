@@ -18,7 +18,7 @@ git clone --branch codex/refactor-windows --single-branch https://github.com/MK6
 cd jmcomic-backend-review
 ```
 
-原审计快照为 `7ae6ccb`，此分支现已继续加入[审计修复](docs/AUDIT_FIXES.md)，包含SSE/导出容量、任务分页、元数据预算、更新检查停止及数据库忙时的任务控制。
+原审计快照为 `7ae6ccb`，此分支现已继续加入[审计修复](docs/AUDIT_FIXES.md)，包含SSE/导出容量、任务分页、元数据预算、更新检查停止、数据库忙时的任务控制及启动/恢复共用的可信结构校验。
 复检当前版本时请记录克隆后的 HEAD。完整运行验收使用 Windows；仅下载 GitHub 默认分支会拿到原版本。
 
 ## 环境要求

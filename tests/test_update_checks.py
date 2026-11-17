@@ -377,7 +377,11 @@ def test_old_database_gets_update_tables_idempotently(client, download):
     assert download("ja", ["71"]) == "completed"
     conn = db.get_db()
     try:
-        conn.executescript("DROP TABLE album_update_checks; DROP TABLE update_check_log;")  # a pre-PR-A database
+        # Model an older supported schema: a current v4 missing these tables is
+        # corruption and must not silently replace their lost contents.
+        conn.executescript("DROP TABLE album_update_checks; DROP TABLE update_check_log; PRAGMA user_version=3;")
+        conn.execute("UPDATE jobs SET queued_at=created_at WHERE queued_at IS NULL")
+        conn.commit()
         before = [tuple(r) for r in conn.execute("SELECT * FROM jobs ORDER BY id")]
     finally:
         conn.close()
@@ -393,7 +397,7 @@ def test_old_database_gets_update_tables_idempotently(client, download):
         conn.close()
     assert {"album_update_checks", "update_check_log", "idx_update_checks_next", "idx_update_checks_new",
             "idx_update_check_log_started"} <= names
-    assert after == before and rows == 0 and logs == 0     # the migration inserts nothing and never touches jobs
+    assert after == before and rows == 0 and logs == 0  # no new records or changes to this filled queue
 
 
 @pytest.mark.parametrize("value", ["yes", "1", 1, None, ""])

@@ -400,6 +400,7 @@ def test_existing_databases_get_the_superseded_column(client, tmp_path, monkeypa
     old = tmp_path / "old-install"
     old.mkdir()
     conn = sqlite3.connect(old / "app.db")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
     conn.execute("""CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT UNIQUE NOT NULL,
         album_id TEXT NOT NULL, title TEXT, selected_photo_ids TEXT, status TEXT NOT NULL DEFAULT 'queued',
         total_pages INTEGER DEFAULT 0, done_pages INTEGER DEFAULT 0, current_photo TEXT, current_image TEXT,

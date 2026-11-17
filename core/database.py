@@ -11,11 +11,14 @@ from datetime import datetime
 
 from .path_utils import get_data_dir, get_backup_dir, get_download_root
 from .instance_lock import maintenance_lock
+from .database_schema import (
+    CURRENT_SCHEMA_VERSION, BASE_SCHEMA_SQL, RESOURCE_TABLE_SQL, RESOURCE_INDEX_SQL,
+    QUEUE_INDEX_SQL, catalog_triggers, validate_schema, SchemaError,
+)
 
 # 资源库最大条目安全上限（防止全表扫描 OOM）
 _LIBRARY_MAX_ITEMS = 10000
 
-CURRENT_SCHEMA_VERSION = 4
 DB_DIR = get_data_dir()
 DB_PATH = DB_DIR / "app.db"
 _initialization_lock = threading.RLock()
@@ -31,9 +34,16 @@ def _existing_schema() -> int | None:
         return None
     source = sqlite3.connect(DB_PATH.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
     try:
+        source.execute("PRAGMA query_only=ON")
+        source.execute("PRAGMA trusted_schema=OFF")
+        source.execute("BEGIN")  # Version and definitions come from one read snapshot.
         version = source.execute("PRAGMA user_version").fetchone()[0]
         if version > CURRENT_SCHEMA_VERSION:
             raise RuntimeError("数据库版本高于当前程序，已停止初始化，请使用匹配版本")
+        try:
+            validate_schema(source, version)
+        except (SchemaError, sqlite3.Error) as error:
+            raise RuntimeError(f"数据库结构校验失败，已停止初始化，请从有效备份恢复到新目录：{error}") from error
         return version
     finally:
         source.close()
@@ -44,6 +54,7 @@ def get_db() -> sqlite3.Connection:
     DB_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA trusted_schema=OFF")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -94,127 +105,12 @@ def _initialize_db():
     conn = get_db()
     try:
         cursor = conn.cursor()
-        cursor.executescript("""
-            CREATE TABLE IF NOT EXISTS jobs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id TEXT UNIQUE NOT NULL,
-                album_id TEXT NOT NULL,
-                title TEXT,
-                selected_photo_ids TEXT,
-                status TEXT NOT NULL DEFAULT 'queued',
-                total_pages INTEGER DEFAULT 0,
-                done_pages INTEGER DEFAULT 0,
-                current_photo TEXT,
-                current_image TEXT,
-                output_path TEXT,
-                error_message TEXT,
-                created_at TEXT,
-                updated_at TEXT,
-                completed_at TEXT,
-                superseded_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS search_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                keyword TEXT NOT NULL,
-                created_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_search_history_created ON search_history(created_at);
-
-            CREATE TABLE IF NOT EXISTS wishlist (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                album_id TEXT UNIQUE NOT NULL,
-                title TEXT,
-                author TEXT,
-                cover_url TEXT,
-                added_at TEXT,
-                download_status TEXT NOT NULL DEFAULT 'none'
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-            CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
-            CREATE INDEX IF NOT EXISTS idx_jobs_status_album_id ON jobs(status, album_id);
-            CREATE INDEX IF NOT EXISTS idx_jobs_album_latest ON jobs(album_id, status, created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_wishlist_download_status ON wishlist(download_status);
-
-            CREATE TABLE IF NOT EXISTS album_tags (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                album_id    TEXT    NOT NULL,
-                tag         TEXT    NOT NULL,
-                source      TEXT    NOT NULL DEFAULT 'auto',
-                created_at  TEXT,
-                UNIQUE(album_id, tag)
-            );
-            CREATE INDEX IF NOT EXISTS idx_album_tags_album_id ON album_tags(album_id);
-            CREATE INDEX IF NOT EXISTS idx_album_tags_tag ON album_tags(tag);
-            CREATE INDEX IF NOT EXISTS idx_album_tags_source ON album_tags(source);
-
-            CREATE TABLE IF NOT EXISTS album_detail_cache (
-                album_id TEXT PRIMARY KEY,
-                detail_json TEXT NOT NULL,
-                cover_cdn_url TEXT DEFAULT '',
-                cached_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS album_meta (
-                album_id       TEXT PRIMARY KEY,
-                title          TEXT DEFAULT '',
-                author         TEXT DEFAULT '',
-                cover_url      TEXT DEFAULT '',
-                tags_synced_at TEXT,
-                updated_at     TEXT
-            );
-
-            -- 检查新章节（core/update_store.py）：每部漫画一行基线 + 最近一次检查的结论。
-            -- 只有检查和下载任务的两个记录点写这两张表；检查从不建下载任务、不碰文件。
-            CREATE TABLE IF NOT EXISTS album_update_checks (
-                album_id        TEXT PRIMARY KEY,
-                baseline_ids    TEXT,                        -- 已知章节 id 的 JSON 列表（上游顺序，下载完成时并入）；NULL = 还没有基线
-                baseline_source TEXT,                        -- 'download' | 'first_check'
-                baseline_at     TEXT,
-                gone_ids        TEXT NOT NULL DEFAULT '[]',  -- 已知章节在上游不见了、且已经确认过的
-                removed_ids     TEXT NOT NULL DEFAULT '[]',  -- 发现新章节的那次检查同时不见了的已知章节（'changed'）
-                upstream_count  INTEGER,
-                new_chapters    TEXT NOT NULL DEFAULT '[]',  -- JSON [{photo_id, index, title, confirmed_at}]，上游顺序
-                new_count       INTEGER NOT NULL DEFAULT 0,  -- = len(new_chapters)
-                result          TEXT,                        -- 最近一次成功检查的结论：baseline / no_update / new / changed；NULL = 从未成功
-                last_success_at TEXT,
-                last_attempt_at TEXT,                        -- 发请求之前写（租约）
-                last_trigger    TEXT,                        -- 'auto' | 'manual'
-                error_kind      TEXT,                        -- 成功后为 NULL；network / timeout / not_found / upstream_error
-                error_detail    TEXT,                        -- 只记异常类名，不记网址、代理
-                fail_count      INTEGER NOT NULL DEFAULT 0,  -- 连续失败次数
-                next_check_at   TEXT,                        -- 最早的下一次自动检查
-                created_at      TEXT,
-                updated_at      TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_update_checks_next ON album_update_checks(next_check_at);
-            CREATE INDEX IF NOT EXISTS idx_update_checks_new ON album_update_checks(new_count);
-
-            CREATE TABLE IF NOT EXISTS update_check_log (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                album_id       TEXT NOT NULL,
-                trigger        TEXT NOT NULL,
-                started_at     TEXT NOT NULL,
-                finished_at    TEXT,
-                outcome        TEXT NOT NULL,
-                error_kind     TEXT,
-                error_type     TEXT,
-                requests       INTEGER NOT NULL DEFAULT 0,
-                upstream_count INTEGER,
-                new_count      INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_update_check_log_started ON update_check_log(started_at);
-        """)
+        cursor.executescript(BASE_SCHEMA_SQL)
         conn.commit()
 
         # ── Schema 版本迁移 ──
         _run_migrations(conn)
+        validate_schema(conn, CURRENT_SCHEMA_VERSION)
 
         # 存量回填：为已完成任务中缺少 album_meta 的条目补全元数据
         backfill_missing_meta()
@@ -247,10 +143,18 @@ def _run_migrations(conn):
         _migrate_resource_catalog(conn)
     if version < 4:
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             if "queued_at" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
                 conn.execute("ALTER TABLE jobs ADD COLUMN queued_at TEXT")
+            # Queue bookkeeping must not replace independent catalog metadata
+            # with disposable job history. DDL and backfill roll back together.
+            triggers = catalog_triggers()
+            for name in triggers:
+                conn.execute(f'DROP TRIGGER "{name}"')
             conn.execute("UPDATE jobs SET queued_at=created_at WHERE queued_at IS NULL")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, queued_at, id)")
+            conn.execute(QUEUE_INDEX_SQL)
+            for statement in triggers.values():
+                conn.execute(statement)
             conn.execute("PRAGMA user_version = 4")
 
 
@@ -267,37 +171,14 @@ def _migrate_resource_catalog(conn):
     assignments = ", ".join(f"{name}=excluded.{name}" for name in columns if name != "job_id")
     with conn:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""CREATE TABLE IF NOT EXISTS resource_catalog (
-            job_id TEXT PRIMARY KEY,
-            job_order INTEGER NOT NULL,
-            album_id TEXT NOT NULL,
-            title TEXT,
-            selected_photo_ids TEXT,
-            output_path TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            completed_at TEXT,
-            superseded_at TEXT
-        )""")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_catalog_album_latest "
-                     "ON resource_catalog(album_id, created_at DESC, job_order DESC)")
+        conn.execute(RESOURCE_TABLE_SQL)
+        conn.execute(RESOURCE_INDEX_SQL)
         conn.execute(
             f"INSERT INTO resource_catalog (job_order, {names}) "
             f"SELECT id, {names} FROM jobs WHERE status='completed' "
             f"ON CONFLICT(job_id) DO UPDATE SET job_order=excluded.job_order, {assignments}")
-        values = ", ".join(f"NEW.{name}" for name in columns)
-        for event in ("INSERT", "UPDATE"):
-            conn.execute(f"""CREATE TRIGGER IF NOT EXISTS catalog_completed_job_{event.lower()}
-                AFTER {event} ON jobs WHEN NEW.status = 'completed'
-                BEGIN
-                    INSERT INTO resource_catalog (job_order, {names}) VALUES (NEW.id, {values})
-                    ON CONFLICT(job_id) DO UPDATE SET job_order=excluded.job_order, {assignments};
-                END""")
-        conn.execute("""CREATE TRIGGER IF NOT EXISTS catalog_revoked_completion
-            AFTER UPDATE OF status ON jobs WHEN OLD.status = 'completed' AND NEW.status != 'completed'
-            BEGIN
-                DELETE FROM resource_catalog WHERE job_id = NEW.job_id;
-            END""")
+        for statement in catalog_triggers().values():
+            conn.execute(statement)
         conn.execute("PRAGMA user_version = 3")
 
 

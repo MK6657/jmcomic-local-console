@@ -36,7 +36,7 @@ Get-ChildItem -LiteralPath '.\static\js' -Filter '*.js' -File | ForEach-Object {
 }
 ```
 
-每条命令均需成功退出。第三批本机完整套件1914 passed、2 skipped（200.16秒），跳过为文件符号链接权限。请记录自己的结果及跳过原因，详见 [修复证据](AUDIT_FIXES.md)。若环境为 Linux/macOS 或缺少 Windows 执行器，可以进行静态审查并运行适用的离线检查，但需明确哪些原生 Windows 路径、命名互斥锁、停机事件及 EXE 行为没有验证。不要把其他系统的结果写成 Windows 发行验收。
+每条命令均需成功退出。第四批本机完整套件2003 passed、2 skipped（213.65秒），跳过为文件符号链接权限。请记录自己的结果及跳过原因，详见 [修复证据](AUDIT_FIXES.md)。若环境为 Linux/macOS 或缺少 Windows 执行器，可以进行静态审查并运行适用的离线检查，但需明确哪些原生 Windows 路径、命名互斥锁、停机事件及 EXE 行为没有验证。不要把其他系统的结果写成 Windows 发行验收。
 
 不要逐个直接运行被默认收集排除的历史 `test_smoke.py`、`test_endpoints.py`、`test_e2e_integration.py` 等脚本，它们可能访问网络或修改数据。详见 [独立审查委托](INDEPENDENT_BACKEND_AUDIT.md)。
 
@@ -60,6 +60,14 @@ Get-ChildItem -LiteralPath '.\static\js' -Filter '*.js' -File | ForEach-Object {
 
 退出码应为 0，末行 JSON 的 `status` 应为 `ok`。其他下载停滞、后台请求排空和启动专项脚本的范围与命令见 [独立审查委托](INDEPENDENT_BACKEND_AUDIT.md)。真实上游搜索、详情、在线阅读和下载需要分别验收，以上本机检查不证明它们可用。
 
+第四批的启动/恢复结构专项可单独运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_schema_startup.py tests/test_restore_schema.py
+```
+
+重点观察v4缺表/索引/trigger时是否在写连接前拒绝、合法v0–v3是否先快照再迁移、修改约束的有效SQLite备份是否拒绝且无目标/暂存残留，以及v3恢复后首次启动是否保留独立目录记录。正常哈希和`quick_check`不能代替这些结构与业务检查；不要手工改动个人数据库来测试。
+
 ## 4. 可选的启动与构建
 
 需要实际打开浏览器界面时，在独立克隆目录执行：
@@ -74,4 +82,4 @@ Git 源码不含便携 EXE、个人数据库、下载文件或本地虚拟环境
 
 ## 5. 交给其他模型的任务文本
 
-> 请克隆公开仓库 https://github.com/MK6657/jmcomic-local-console 的 codex/refactor-windows 分支并记录HEAD。先读 AGENTS.md、docs/GITHUB_REVIEW.md、docs/AUDIT_FIXES.md 和 docs/INDEPENDENT_BACKEND_AUDIT.md。审查当前完整差异 c310e3f..HEAD，尤其复核原审计交付版之后 e4a6057..HEAD 的修复。7ae6ccb是历史审计快照，不要用它代替最新版本。独立检查任务完成/取消的事务一致性、状态守卫、超时章节缓存、异常图片处理、HTTP错误及停机所有权。用独立环境和临时数据运行适用测试，保留默认离线边界，不访问真实上游、不自动下载、不修改产品代码。输出Markdown问题报告，包含严重性、准确文件行号、触发条件、影响、证据、修复建议及未验证范围；静态推断与实际复现分开，非Windows环境须明确原生验收未完成。
+> 请克隆公开仓库 https://github.com/MK6657/jmcomic-local-console 的 codex/refactor-windows 分支并记录HEAD。先读 AGENTS.md、docs/GITHUB_REVIEW.md、docs/AUDIT_FIXES.md 和 docs/INDEPENDENT_BACKEND_AUDIT.md。审查当前完整差异 c310e3f..HEAD，尤其复核原审计交付版之后 e4a6057..HEAD 的修复。7ae6ccb是历史审计快照，不要用它代替最新版本。独立检查任务完成/取消的事务一致性、状态守卫、超时章节缓存、异常图片处理、HTTP错误、停机所有权及启动/恢复的可信schema边界，包含旧库迁移后的资源目录保留。用独立环境和临时数据运行适用测试，保留默认离线边界，不访问真实上游、不自动下载、不修改产品代码。输出Markdown问题报告，包含严重性、准确文件行号、触发条件、影响、证据、修复建议及未验证范围；静态推断与实际复现分开，非Windows环境须明确原生验收未完成。

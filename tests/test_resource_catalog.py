@@ -215,6 +215,7 @@ def test_v2_migration_preserves_latest_order_superseded_and_runs_once(client, do
     folder = downloads / "Legacy_3001"
     _page(folder)
     connection = sqlite3.connect(legacy / "app.db")
+    connection.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
     connection.execute("""CREATE TABLE jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT UNIQUE NOT NULL, album_id TEXT NOT NULL,
         title TEXT, selected_photo_ids TEXT, status TEXT NOT NULL DEFAULT 'queued', total_pages INTEGER DEFAULT 0,

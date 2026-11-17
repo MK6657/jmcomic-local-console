@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
-import re
 import shutil
 import sqlite3
 import stat
@@ -45,14 +44,7 @@ _REPARSE_POINT = 0x400
 _WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
                      *(f"lpt{i}" for i in range(1, 10)), *(f"com{i}" for i in "¹²³"),
                      *(f"lpt{i}" for i in "¹²³")}
-_KNOWN_TABLES = {"jobs", "settings", "search_history", "wishlist", "album_tags",
-                 "album_detail_cache", "album_meta", "album_update_checks", "update_check_log",
-                 "resource_catalog", "sqlite_sequence"}
-_JOB_COLUMNS = {"id", "job_id", "album_id", "title", "selected_photo_ids", "status", "total_pages",
-                "done_pages", "current_photo", "current_image", "output_path", "error_message",
-                "created_at", "updated_at", "completed_at", "superseded_at", "queued_at"}
-_RESOURCE_COLUMNS = {"job_id", "job_order", "album_id", "title", "selected_photo_ids", "output_path",
-                     "created_at", "updated_at", "completed_at", "superseded_at"}
+
 
 
 def _check_deadline(deadline: float) -> None:
@@ -117,64 +109,15 @@ def _map_output(value, parser, source_root, destination: Path):
     return str(destination.joinpath(*_safe_parts(relative.parts)))
 
 
-def _normal_sql(value: str) -> str:
-    # Preserve literal case: 'COMPLETED' would change a trigger's comparison.
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def _known_catalog_triggers() -> dict[str, str]:
-    columns = ("job_id", "album_id", "title", "selected_photo_ids", "output_path", "created_at",
-               "updated_at", "completed_at", "superseded_at")
-    names = ", ".join(columns)
-    values = ", ".join(f"NEW.{name}" for name in columns)
-    assignments = ", ".join(f"{name}=excluded.{name}" for name in columns if name != "job_id")
-    result = {}
-    for event in ("INSERT", "UPDATE"):
-        name = f"catalog_completed_job_{event.lower()}"
-        result[name] = f"""CREATE TRIGGER {name}
-            AFTER {event} ON jobs WHEN NEW.status = 'completed'
-            BEGIN
-                INSERT INTO resource_catalog (job_order, {names}) VALUES (NEW.id, {values})
-                ON CONFLICT(job_id) DO UPDATE SET job_order=excluded.job_order, {assignments};
-            END"""
-    result["catalog_revoked_completion"] = """CREATE TRIGGER catalog_revoked_completion
-        AFTER UPDATE OF status ON jobs WHEN OLD.status = 'completed' AND NEW.status != 'completed'
-        BEGIN
-            DELETE FROM resource_catalog WHERE job_id = NEW.job_id;
-        END"""
-    return result
-
-
 def _validate_schema(conn, manifest_version: int) -> dict[str, str]:
-    from .database import CURRENT_SCHEMA_VERSION
+    from .database_schema import validate_schema, SchemaError
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != manifest_version or not 0 <= version <= CURRENT_SCHEMA_VERSION:
-        raise RestoreError("unsupported_schema", "备份数据库版本不受当前程序支持，目标实例未发布")
-    objects = conn.execute("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL").fetchall()
-    tables = {row[1] for row in objects if row[0] == "table"}
-    if not {"jobs", "settings"} <= tables or not tables <= _KNOWN_TABLES:
-        raise RestoreError("unsupported_schema", "备份数据库结构不受当前程序支持，目标实例未发布")
-    if any(row[0] == "view" or (row[0] == "table" and "virtual table" in row[2].casefold()) for row in objects):
-        raise RestoreError("unsupported_schema", "备份数据库结构不受当前程序支持，目标实例未发布")
-    checks = {"jobs": ({"job_id", "album_id", "status", "output_path"}, _JOB_COLUMNS),
-              "settings": ({"key", "value"}, {"key", "value"})}
-    if version >= 4:
-        checks["jobs"][0].add("queued_at")
-    if version >= 3:
-        if "resource_catalog" not in tables:
-            raise RestoreError("unsupported_schema", "备份资源目录结构不完整，目标实例未发布")
-        checks["resource_catalog"] = ({"job_id", "output_path"}, _RESOURCE_COLUMNS)
-    elif "resource_catalog" in tables:
-        raise RestoreError("unsupported_schema", "备份资源目录版本不一致，目标实例未发布")
-    for table, (required, allowed) in checks.items():
-        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        if not required <= columns or not columns <= allowed:
-            raise RestoreError("unsupported_schema", "备份数据库字段不受当前程序支持，目标实例未发布")
-    triggers = {row[1]: row[2] for row in objects if row[0] == "trigger"}
-    known = _known_catalog_triggers() if version >= 3 else {}
-    if triggers.keys() != known.keys() or any(_normal_sql(sql) != _normal_sql(known[name]) for name, sql in triggers.items()):
-        raise RestoreError("unsupported_schema", "备份数据库触发器不受当前程序支持，目标实例未发布")
-    return triggers
+    if version != manifest_version:
+        raise RestoreError("unsupported_schema", "备份数据库版本与清单不一致，目标实例未发布")
+    try:
+        return validate_schema(conn, version)
+    except (SchemaError, sqlite3.Error):
+        raise RestoreError("unsupported_schema", "备份数据库结构不受当前程序支持，目标实例未发布") from None
 
 
 def _rewrite_database(path: Path, manifest: dict, final_downloads: Path, deadline: float) -> tuple[int, int, int]:
@@ -195,11 +138,16 @@ def _rewrite_database(path: Path, manifest: dict, final_downloads: Path, deadlin
                 counts.append(0)
                 continue
             count = 0
-            for job_id, output in connection.execute(f"SELECT job_id, output_path FROM {table}").fetchall():
+            for row_id, output in connection.execute(f"SELECT rowid, output_path FROM {table}").fetchall():
                 _check_deadline(deadline)
                 mapped = _map_output(output, parser, source, final_downloads)
                 if output not in (None, ""):
-                    connection.execute(f"UPDATE {table} SET output_path=? WHERE job_id=?", (mapped, job_id))
+                    # SQLite permits NULL in TEXT PRIMARY KEY columns. Use the
+                    # validated ordinary table's row identity, including those rows.
+                    changed = connection.execute(f"UPDATE {table} SET output_path=? WHERE rowid=?",
+                                                 (mapped, row_id)).rowcount
+                    if changed != 1:
+                        raise RestoreError("invalid_database", "恢复路径映射失败，目标实例未发布")
                     count += 1
             counts.append(count)
         connection.execute("INSERT INTO settings(key, value) VALUES ('download_root', ?) "
