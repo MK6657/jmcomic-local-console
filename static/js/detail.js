@@ -322,11 +322,8 @@
             timeoutMs: 15000
         })
         .then(function (data) {
-            if (data.status === 'ok') {
-                if (typeof showToast === 'function') showToast('已加入下载队列', 'success');
-            } else {
-                if (typeof showToast === 'function') showToast(data.message || '创建任务失败', 'danger');
-            }
+            var result = window.jobCreationFeedback(data);
+            if (typeof showToast === 'function') showToast(result.message, result.type);
         })
         .catch(function (err) {
             if (err && err.name === 'AbortError') return; // pagehide 中止，静默

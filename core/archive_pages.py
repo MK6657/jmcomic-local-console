@@ -38,6 +38,7 @@ import zipfile
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path, PurePosixPath
 
 from .file_tree import _REPARSE_POINT, natural_key
@@ -106,10 +107,11 @@ class ArchiveIndex:
     def format(self) -> str:
         return self.path.suffix.lower().lstrip(".")
 
-    @property
+    @cached_property
     def reader_pages(self) -> tuple:
-        """阅读器显示的页"""
-        return tuple(page for page in self.pages if page.readable)
+        """只在索引建成时筛选一次。每张图仍从当前包中读取并校验。"""
+        readable = tuple(page for page in self.pages if page.readable)
+        return self.pages if len(readable) == len(self.pages) else readable
 
     def find(self, name: str):
         """按页名找阅读器页：(序号从 1 起, 页)；名字对不上时按 page_key（同一页换了格式）；找不到 → None"""

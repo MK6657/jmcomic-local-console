@@ -209,6 +209,21 @@ window.encodeJobId = function (id) {
   return encodeURIComponent(id);
 };
 
+window.jobCreationFeedback = function (data) {
+  if (data && data.status === 'error') {
+    return { outcome: 'failed', type: 'danger', message: data.message || '创建任务失败' };
+  }
+  var id = data && data.job_id ? '（ID：' + data.job_id + '）' : '';
+  var ok = data && data.status === 'ok';
+  if (ok && data.created === true && data.reason === 'created') {
+    return { outcome: 'created', type: 'success', message: '已创建下载任务' + id };
+  }
+  if (ok && data.created === false && data.reason === 'already_active') {
+    return { outcome: 'reused', type: 'info', message: '已有相同的下载任务，未重复创建' + id };
+  }
+  return { outcome: 'unknown', type: 'warning', message: '未能确认是否新建任务，请在下载管理中核对' + id };
+};
+
 /**
  * “阅读”按钮（搜索 / 资源库 / 收藏 / 下载管理共用），每部漫画都有。
  * 链接始终是 /read/<id>，由服务端在点击时决定：本地可读（core.local_availability）→ 打开本地文件，

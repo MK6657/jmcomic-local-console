@@ -67,7 +67,8 @@
   function retryJob(jobId) {
     apiFetch('/api/jobs/' + encodeJobId(jobId) + '/retry', { method: 'POST' })
       .then(function (data) {
-        showToast('已创建新任务 (新ID: ' + data.job_id + ')', 'success');
+        var result = window.jobCreationFeedback(data);
+        showToast(result.message, result.type);
         refreshJobs();
       })
       .catch(function (err) {
@@ -91,59 +92,11 @@
   // ── 导出 ZIP / PDF ──
 
   function exportZip(jobId) {
-    downloadExport('/api/export/' + encodeJobId(jobId) + '/zip', 'ZIP');
+    window.downloadExport('/api/export/' + encodeJobId(jobId) + '/zip', 'ZIP');
   }
 
   function exportPdf(jobId) {
-    downloadExport('/api/export/' + encodeJobId(jobId) + '/pdf', 'PDF');
-  }
-
-  /**
-   * 导出通用处理：调用 API 获取 blob 并下载
-   * @param {string} url
-   * @param {string} label 'ZIP' | 'PDF'
-   */
-  function downloadExport(url, label) {
-    showToast('⏳ 正在生成 ' + label + ' 文件...', 'info');
-    // 需要原始 Response（blob），不走 apiFetch；手动注册 AbortController，
-    // pagehide 时由 utils.js 统一 abort，避免大文件导出请求残留占用连接池
-    var controller = new AbortController();
-    window.registerAbortable(controller);
-    fetch(url, { method: 'POST', signal: controller.signal })
-      .then(function (r) {
-        if (!r.ok) {
-          return r.json().then(function (data) {
-            throw new Error(data.message || '导出失败');
-          });
-        }
-        // 本程序不会回 204：这是下载工具（如 IDM）接管了带附件的响应，自己保存文件，只给页面一个空响应。
-        // 不再另存一个空文件，也不说“导出完成”
-        if (r.status === 204) return null;
-        return r.blob();
-      })
-      .then(function (blob) {
-        if (blob === null) {
-          showToast('ℹ️ ' + label + ' 已交给下载工具保存，请在下载工具里查看', 'info');
-          return;
-        }
-        if (!blob.size) throw new Error('导出的文件是空的');
-        var filename = label === 'ZIP' ? 'download.zip' : 'download.pdf';
-        var link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(link.href);
-        showToast('✅ ' + label + ' 导出完成', 'success');
-      })
-      .catch(function (err) {
-        if (err && err.name === 'AbortError') return; // pagehide 中止，静默
-        showToast('❌ ' + label + ' 导出失败: ' + (err.message || '网络错误'), 'danger');
-      })
-      .finally(function () {
-        window.unregisterAbortable(controller);
-      });
+    window.downloadExport('/api/export/' + encodeJobId(jobId) + '/pdf', 'PDF');
   }
 
   // ── 批量清理 ──
@@ -184,8 +137,8 @@
   /**
    * 批量重试当前失败页（串行，用户确认的范围不跨页扩展）
    */
-  function batchRetryFailed() {
-    var msg = '确定重试本页显示的「失败」任务？\n\n其他页不会重试。将逐个加入队列，原有失败记录保留。';
+  async function batchRetryFailed(button) {
+    var msg = '确定重试本页显示的「失败」任务？\n\n其他页不会重试。已有相同任务时不会重复创建，原失败记录保留。';
     if (!confirmAction(msg)) return;
 
     var container = document.getElementById('failed-section');
@@ -203,30 +156,27 @@
       return;
     }
 
-    var total = jobIds.length;
-    var done = 0;
-
-    function retryNext(index) {
-      if (index >= jobIds.length) {
-        showToast('本页重试结束，共 ' + total + ' 个（成功 ' + done + ' 个）', 'success');
-        refreshJobs();
-        return;
+    var counts = { created: 0, reused: 0, failed: 0, unknown: 0 };
+    button.disabled = true;
+    try {
+      for (var jobId of jobIds) {
+        try {
+          var data = await apiFetch('/api/jobs/' + encodeJobId(jobId) + '/retry', { method: 'POST' });
+          counts[window.jobCreationFeedback(data).outcome]++;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return;
+          if (err && err.status) counts.failed++; else counts.unknown++;
+        }
       }
-
-      apiFetch('/api/jobs/' + encodeJobId(jobIds[index]) + '/retry', { method: 'POST' })
-        .then(function () {
-          done++;
-          retryNext(index + 1);
-        })
-        .catch(function (e) {
-          // pagehide 中止时终止整条重试链并静默（后续请求也必然被中止），
-          // 避免 bfcache 恢复后弹出"成功 0 个"的误导性汇总
-          if (e && e.name === 'AbortError') return;
-          retryNext(index + 1);
-        });
+      var message = '本页重试：新建 ' + counts.created + '，复用 ' + counts.reused + '，失败 ' + counts.failed;
+      if (counts.unknown) message += '，结果未确认 ' + counts.unknown + '（请核对任务列表）';
+      var type = counts.created ? 'success' : 'info';
+      if (counts.failed || counts.unknown) type = counts.failed === jobIds.length ? 'danger' : 'warning';
+      showToast(message, type);
+      refreshJobs();
+    } finally {
+      button.disabled = false;
     }
-
-    retryNext(0);
   }
 
   // ── 按钮事件：一个委托监听器（静态工具栏 + 动态任务卡片） ──
@@ -240,7 +190,7 @@
     'open-folder': function (el) { window.openFolder(el.getAttribute('data-job-id')); },
     'export-zip': function (el) { exportZip(el.getAttribute('data-job-id')); },
     'export-pdf': function (el) { exportPdf(el.getAttribute('data-job-id')); },
-    'batch-retry': function () { batchRetryFailed(); },
+    'batch-retry': batchRetryFailed,
     'jobs-page': function (el) {
       var page = Number(el.getAttribute('data-page'));
       if (!Number.isSafeInteger(page) || page < 1) return;

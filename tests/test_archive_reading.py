@@ -6,6 +6,7 @@ import io
 import os
 import re
 import shutil
+import subprocess
 import threading
 import warnings
 import zipfile
@@ -577,12 +578,25 @@ def test_exports_stop_at_a_damaged_later_page(client, downloads, exports_tmp, fm
 
 
 def test_export_buttons_never_save_an_empty_file():
-    # With a download manager (e.g. IDM) installed, the browser gets an empty 204 while the manager saves the file;
-    # the page used to save that as a 0-byte download.zip and say the export was complete.
-    source = (STATIC_JS / "downloads.js").read_text(encoding="utf-8")
-    export = source[source.index("function downloadExport"):source.index("// ── 批量清理")]
-    assert "r.status === 204" in export and "已交给下载工具" in export
-    assert "if (!blob.size) throw new Error(" in export
+    if not NODE:
+        pytest.skip("requires Node.js")
+    script = r"""
+const assert = require('node:assert/strict');
+const messages = [], saved = [], active = new Set();
+global.window = {registerAbortable(c){ active.add(c); return c; }, unregisterAbortable(c){active.delete(c);}};
+global.showToast = (text, level) => messages.push(level);
+global.document = {body:{appendChild(){}}, createElement(){return {click(){saved.push(this.download);},remove(){}};}};
+require(process.argv[1]);
+(async () => {
+  for (const [status, body, last] of [[204,null,'info'],[200,'','danger'],[503,'{"message":"busy"}','danger'],[200,'pdf','success']]) {
+    global.fetch = (url, opts) => {assert.equal(opts.method, 'POST'); return new Response(body, {status});};
+    await window.downloadExport('/api/library/123/export/pdf','PDF','JM123');
+    assert.equal(messages.at(-1), last); assert.equal(active.size,0);
+  }
+  assert.deepEqual(saved, ['JM123.pdf']);
+})().catch(e => {console.error(e); process.exitCode = 1;});
+"""
+    subprocess.run([NODE, "-e", script, str(STATIC_JS / "export.js")], check=True, timeout=10)
 
 
 def test_preview_error_only_enlarges_its_own_icon():

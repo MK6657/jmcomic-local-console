@@ -345,6 +345,16 @@
         // “阅读”每张卡片都有：已下载打开本地文件，否则在线阅读（utils.js readLink）
         var read = window.readLink.create(albumId, window.readLink.stateFor(item.readable, item.archive_problem), 'btn-sm');
         if (read) buttons.appendChild(read);
+        if (item.readable) {
+            ['ZIP', 'PDF'].forEach(function (format) {
+                var button = el('button', 'btn btn-outline-secondary btn-sm', format);
+                button.type = 'button';
+                button.dataset.action = 'export-' + format.toLowerCase();
+                button.title = '将本地已下载的内容导出为 ' + format;
+                button.setAttribute('aria-label', '导出 ' + format);
+                buttons.appendChild(button);
+            });
+        }
         actions.appendChild(buttons);
         body.appendChild(actions);
 
@@ -866,6 +876,10 @@
                 removeCardTag(albumId, target.dataset.tag || '', e);
             } else if (action === 'toggle-wishlist') {
                 if (albumId) toggleLibraryWishlist(albumId, target);
+            } else if (albumId && (action === 'export-zip' || action === 'export-pdf')) {
+                var format = action === 'export-zip' ? 'zip' : 'pdf';
+                window.downloadExport('/api/library/' + encodeURIComponent(albumId) + '/export/' + format,
+                    format.toUpperCase(), 'JM' + albumId);
             } else if (action === 'filter-author') {
                 setAuthorFilter(target.dataset.author || '');
             } else if (action === 'clear-filters') {

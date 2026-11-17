@@ -498,21 +498,8 @@
       timeoutMs: 15000
     })
     .then(function (data) {
-      if (data.status === 'ok') {
-        // 优先使用全局 Toast，fallback 到页面内的 alert
-        if (typeof showToast === 'function') {
-          showToast('✅ 已加入下载队列', 'success');
-        } else {
-          showGlobalAlert('✅ 已加入下载队列', 'success');
-        }
-      } else {
-        var msg = '❌ ' + (data.message || '创建任务失败');
-        if (typeof showToast === 'function') {
-          showToast(msg, 'danger');
-        } else {
-          showGlobalAlert(msg, 'danger');
-        }
-      }
+      var result = window.jobCreationFeedback(data);
+      (typeof showToast === 'function' ? showToast : showGlobalAlert)(result.message, result.type);
     })
     .catch(function (err) {
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默

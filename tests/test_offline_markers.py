@@ -338,7 +338,10 @@ def test_read_button_helper_picks_the_look_not_the_destination():
 def test_every_list_always_offers_read(script, call):
     source = (STATIC_JS / script).read_text(encoding="utf-8").replace("\r\n", "\n")
     assert call in source
-    assert "if (item.readable)" not in source  # no longer only for downloaded comics
+    # Library export controls depend on local availability. Its read button is
+    # verified on both online-only and readable cards in test_library_card_click.
+    if script != "library.js":
+        assert "if (item.readable)" not in source
     assert "'/read/' +" not in source  # the link is built by the shared helper only
 
 

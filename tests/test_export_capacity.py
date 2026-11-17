@@ -72,6 +72,50 @@ def rejected(response, status, reason=None):
         assert response.json["reason"] == reason
 
 
+@pytest.mark.parametrize("fmt", ["pdf", "zip"])
+def test_library_exports_catalog_after_history_cleanup(env, fmt):
+    import pikepdf
+    second = png(size=(11, 7))
+    env.archive({"1.png": png(), "2.png": second}, remove_loose=False)
+    url = f"/api/library/123/export/{fmt}"
+    # Entry points share their one lease, including while sending the file.
+    held = env.post("zip")
+    try:
+        rejected(env.client.post(url), 503, "export_busy")
+    finally:
+        held.close()
+    assert env.client.post("/api/jobs/clear/completed").status_code == 200
+    assert db.get_job("capacity") is None
+    rejected(env.post(fmt), 404)
+    env.limit(pages=1)
+    rejected(env.client.post(url), 413, "export_limit")
+    env.limit(pages=2)
+    with env.client.post(url) as response:
+        assert response.status_code == 200
+        with io.BytesIO(response.data) as content:
+            if fmt == "zip":
+                with zipfile.ZipFile(content) as exported:
+                    assert exported.namelist() == ["Album/1.png", "Album/2.png"]
+                    assert exported.read("Album/2.png") == second
+            else:
+                with pikepdf.Pdf.open(content) as exported:
+                    assert len(exported.pages) == 2
+    assert db.get_job("capacity") is None
+
+
+@pytest.mark.parametrize("fmt", ["pdf", "zip"])
+def test_library_export_uses_only_current_readable_resource(env, fmt):
+    route = "/api/library/{}/export/" + fmt
+    rejected(env.client.post(route.format("not-an-album")), 400)
+    rejected(env.client.post(route.format("999")), 404)
+    (env.album / "1.png").unlink()
+    (env.album / "unused.bmp").write_bytes(b"not a reader page")
+    rejected(env.client.post(route.format("123")), 404)
+    (env.album / "1.png").write_bytes(png())
+    assert db.mark_completed_jobs_superseded("123", str(env.album), "next") == 1
+    rejected(env.client.post(route.format("123")), 404)
+
+
 @pytest.mark.parametrize("fmt", ["zip", "pdf"])
 def test_unclosed_response_retains_one_shared_lease(env, fmt):
     response = env.post(fmt)

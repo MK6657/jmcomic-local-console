@@ -25,7 +25,7 @@ import core.database as db
 from core import archive_pages
 from core.logger import log
 from core.path_guard import DOWNLOAD_ROOT, is_safe_path
-from core.validation import validate_job_id, EXPORT_IMAGE_EXTENSIONS
+from core.validation import validate_job_id, validate_numeric, is_allowed_image, EXPORT_IMAGE_EXTENSIONS
 from core.file_tree import is_link, _entry_is_link, natural_key
 from core.storage import is_temporary_path
 from core.export_budget import ExportBudget, ExportLimit, ExportTimeout, BudgetedWriter
@@ -42,7 +42,7 @@ _COPY_CHUNK = 1024 * 1024
 
 def _export_capacity(view):
     @wraps(view)
-    def guarded(job_id):
+    def guarded(**source):
         if not _EXPORT_SLOT.acquire(blocking=False):
             return (jsonify(status="error", reason="export_busy", message="已有导出正在生成或下载，请稍后重试"),
                     503, {"Retry-After": _RETRY_AFTER})
@@ -61,7 +61,7 @@ def _export_capacity(view):
 
         try:
             budget = ExportBudget()
-            response = view(job_id, budget)
+            response = view(budget=budget, **source)
             budget.check()
             if isinstance(response, Response) and response.status_code == 200:
                 response.call_on_close(release)
@@ -74,21 +74,21 @@ def _export_capacity(view):
             return (jsonify(status="error", reason="export_timeout", message=str(e)),
                     503, {"Retry-After": _RETRY_AFTER})
         except archive_pages.ArchiveBusy as e:
-            log.warning(f"导出时压缩包暂时读不了 job_id={job_id} error={e}")
+            log.warning(f"导出时压缩包暂时读不了 source={source} error={e}")
             return jsonify(status="error", reason="archive_busy", message=_ARCHIVE_BUSY), 503
         except archive_pages.ArchiveError as e:
-            log.warning(f"导出时压缩包页读取失败 job_id={job_id} error={e}")
+            log.warning(f"导出时压缩包页读取失败 source={source} error={e}")
             return jsonify(status="error", reason="archive_corrupt", message=_PAGE_READ_FAILED), 422
         except ExportSourceUnreadable as e:
-            log.warning(f"导出时无法完整列出下载目录 job_id={job_id} error={e.__cause__}")
+            log.warning(f"导出时无法完整列出下载目录 source={source} error={e.__cause__}")
             return (jsonify(status="error", reason="export_source_unreadable",
                             message="部分下载内容无法读取，已取消导出。请检查目录是否存在、是否有读取权限，再重试。"),
                     503, {"Retry-After": _RETRY_AFTER})
         except OSError as e:
-            log.error(f"导出临时文件读写失败 job_id={job_id} error={e}")
+            log.error(f"导出临时文件读写失败 source={source} error={e}")
             return jsonify(status="error", message="临时空间不足或无法读写临时文件，已取消导出"), 500
         except Exception as e:
-            log.error(f"导出失败 job_id={job_id} error={e}")
+            log.error(f"导出失败 source={source} error={e}")
             return jsonify(status="error", message="导出失败，已取消导出"), 500
         finally:
             if not transferred:
@@ -139,32 +139,36 @@ class ExportSourceUnreadable(RuntimeError):
     """A complete page inventory cannot be established; never send a partial attachment."""
 
 
-def _check_job(job_id: str):
-    """校验任务是否存在、已完成、并有合法输出路径"""
-    if not validate_job_id(job_id):
-        return None, (jsonify({"status": "error", "message": "job_id 格式非法"}), 400)
-    job = db.get_job(job_id)
-    if not job:
-        return None, (jsonify({"status": "error", "message": "任务不存在"}), 404)
-    if job["status"] != "completed":
-        return None, (jsonify({"status": "error", "message": "任务未完成"}), 400)
-    if job.get("superseded_at"):
+def _export_directory(job_id=None, album_id=None):
+    """任务导出认这次下载；专辑导出与阅读器一样认资源目录里最近一次成功记录。"""
+    if album_id is not None:
+        if not validate_numeric(album_id):
+            return None, (jsonify(status="error", message="album_id 必须是纯数字"), 400)
+        record = db.get_completed_job_by_album_id(album_id)
+        if not record or record.get("superseded_at"):
+            return None, (jsonify(status="error", message="未找到可导出的本地资源"), 404)
+    else:
+        if not validate_job_id(job_id):
+            return None, (jsonify(status="error", message="job_id 格式非法"), 400)
+        record = db.get_job(job_id)
+        if not record:
+            return None, (jsonify(status="error", message="任务不存在"), 404)
+        if record["status"] != "completed":
+            return None, (jsonify(status="error", message="任务未完成"), 400)
+    if record.get("superseded_at"):
         # 目录被删除后又被后来的下载重新建出（core.local_availability）：里面已不是这次下载的完整内容
         return None, (jsonify({"status": "error", "message": "这次下载的文件已不在（目录已被重新下载），请从最新的下载任务导出"}), 404)
-    output_path = job.get("output_path", "")
+    output_path = record.get("output_path")
     if not output_path:
         return None, (jsonify({"status": "error", "message": "任务无输出路径"}), 404)
-    if not is_safe_path(output_path):
+    output_dir = Path(output_path)
+    if not is_safe_path(output_dir) or output_dir.resolve() == DOWNLOAD_ROOT.resolve():
         return None, (jsonify({"status": "error", "message": "输出路径越权"}), 403)
-    return job, None
-
-
-def _resolve_output_dir(job):
-    """获取任务输出目录（存在且为目录），否则返回 None"""
-    output_dir = Path(job["output_path"])
-    if not output_dir.exists() or not output_dir.is_dir():
-        return None
-    return output_dir
+    if not output_dir.is_dir():
+        return None, (jsonify(status="error", message="下载目录不存在"), 404)
+    if is_link(output_dir):
+        return None, (jsonify(status="error", message="输出目录不能是链接"), 403)
+    return output_dir, None
 
 
 # 压缩包打不开 / 没有图片时导出的说明
@@ -329,6 +333,20 @@ def _merge_export_pages(output_dir, files, index, budget):
     return entries
 
 
+def _export_entries(output_dir, budget, *, images_only, library):
+    """One bounded inventory for both entry points. Do not scan again for library availability."""
+    files = _collect_files(output_dir, budget, images_only=images_only)
+    has_images = any(path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS for path in files)
+    index, err = _archive_for_export(output_dir, has_images, budget)
+    if err:
+        return None, None, err
+    if not index and not has_images:
+        return None, None, (jsonify(status="error", message="下载目录中没有图片"), 404)
+    if library and index is None and not any(is_allowed_image(path.suffix) for path in files):
+        return None, None, (jsonify(status="error", message="资源中没有可离线阅读的图片"), 404)
+    return _merge_export_pages(output_dir, files, index, budget), index, None
+
+
 def _read_archive_page(read, source, budget):
     budget.check()
     data = read(source)  # shared reader pins entries and checks signature/CRC/size
@@ -382,28 +400,20 @@ def _send_tmp_file(tmp_path: str, mimetype: str, download_name: str):
 
 
 @api_export_bp.post("/api/export/<job_id>/zip")
+@api_export_bp.post("/api/library/<album_id>/export/zip")
 @_export_capacity
-def export_zip(job_id: str, budget):
+def export_zip(budget, job_id=None, album_id=None):
     """导出下载目录为 ZIP 文件"""
-    job, err = _check_job(job_id)
+    output_dir, err = _export_directory(job_id, album_id)
     if err:
         return err
-    output_dir = _resolve_output_dir(job)
-    if output_dir is None:
-        return jsonify({"status": "error", "message": "下载目录不存在"}), 404
     tmp_path = None
     sent = False
     try:
         # 打包出的 .cbz / .zip 不再装进导出的 ZIP；章节标记等其他文件照旧放进去；空文件（中断的下载留下的）不算页
-        files = _collect_files(output_dir, budget)
-        has_images = any(f.suffix.lower() in EXPORT_IMAGE_EXTENSIONS for f in files)
-        index, err = _archive_for_export(output_dir, has_images, budget)
+        entries, index, err = _export_entries(output_dir, budget, images_only=False, library=album_id is not None)
         if err:
             return err
-        # 散图没有的页从压缩包补（保留章节路径和页序，同一页用散图）
-        entries = _merge_export_pages(output_dir, files, index, budget)
-        if not has_images and not any(isinstance(source, archive_pages.ArchivePage) for _, source in entries):
-            return jsonify({"status": "error", "message": "下载目录中没有图片"}), 404
         safe_name = _safe_export_name(output_dir)
         # 使用临时文件避免大 ZIP 全量缓冲内存
         tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
@@ -670,15 +680,13 @@ def _build_pdf(images: list[Path], out_stream, budget=None) -> int:
 
 
 @api_export_bp.post("/api/export/<job_id>/pdf")
+@api_export_bp.post("/api/library/<album_id>/export/pdf")
 @_export_capacity
-def export_pdf(job_id: str, budget):
+def export_pdf(budget, job_id=None, album_id=None):
     """导出下载目录为 PDF 文件（每张图片一页，按文件名排序）"""
-    job, err = _check_job(job_id)
+    output_dir, err = _export_directory(job_id, album_id)
     if err:
         return err
-    output_dir = _resolve_output_dir(job)
-    if output_dir is None:
-        return jsonify({"status": "error", "message": "下载目录不存在"}), 404
 
     names = {}          # 从压缩包解出的临时文件名 → 压缩包里的页名（报错时用）
     extract_dir = None  # 压缩包里的页按顺序解到系统临时目录（不是下载目录），沿用按文件生成 PDF 的流程
@@ -686,15 +694,11 @@ def export_pdf(job_id: str, budget):
     sent = False
     try:
         try:
-            images = _collect_files(output_dir, budget, images_only=True)
+            entries, index, err = _export_entries(output_dir, budget, images_only=True, library=album_id is not None)
         except (ValueError, OSError):
             return jsonify(status="error", message="无法安全读取下载目录"), 403
-        index, err = _archive_for_export(output_dir, bool(images), budget)
         if err:
             return err
-        entries = _merge_export_pages(output_dir, images, index, budget)
-        if not entries:
-            return jsonify({"status": "error", "message": "下载目录中没有图片"}), 404
         pages = []
         if any(isinstance(source, archive_pages.ArchivePage) for _, source in entries):
             extract_dir = tempfile.mkdtemp(prefix="jm-pdf-pages-")
@@ -727,12 +731,12 @@ def export_pdf(job_id: str, budget):
             return jsonify(status="error", message="PDF 页数不完整，已取消导出，请检查原图"), 422
 
         safe_name = _safe_export_name(output_dir)
-        log.info(f"PDF 导出完成 job_id={job_id} pages={page_count}/{len(pages)}")
+        log.info(f"PDF 导出完成 album_id={album_id} job_id={job_id} pages={page_count}/{len(pages)}")
         response = _send_tmp_file(tmp_path, "application/pdf", f"{safe_name}.pdf")
         sent = True
         return response
     except IncompletePdfError as e:
-        log.warning(f"PDF 完整性检查失败 job_id={job_id} failed={len(e.images)}")
+        log.warning(f"PDF 完整性检查失败 album_id={album_id} job_id={job_id} failed={len(e.images)}")
         return jsonify(status="error", message=str(e), failed_images=[names.get(n, n) for n in e.images]), 422
     finally:
         if not sent:

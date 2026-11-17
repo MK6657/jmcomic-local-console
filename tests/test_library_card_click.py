@@ -376,6 +376,19 @@ const cardIds = p => p.grid.children.filter(k => k.classList && k.classList.cont
     r.actionRequests = p.newRequests(from).map(q => q.method + ' ' + q.url);
   }
 
+  out.localActions = [];
+  for (const readable of [false, true]) {
+    const p = page({cardClick: 'true'}), data = listReply(456), exports = [];
+    data.items[0].readable = readable;
+    p.win.downloadExport = (...args) => exports.push(args);
+    p.respond('/api/library?', data); await flush();
+    const card = find(p.grid, hasClass('library-card'));
+    for (const action of ['export-zip', 'export-pdf']) {
+      const button = find(card, x => x.dataset.action === action);
+      if (button) p.click(button);
+    }
+    out.localActions.push({read: !!find(card, hasClass('read-link')), exports});
+  }
   console.log(JSON.stringify(out));
 })().catch(err => { console.error(err && err.stack || err); process.exit(1); });
 """
@@ -414,6 +427,14 @@ def test_the_initial_state_comes_from_data_card_click(harness):
     # anything but "true" keeps the default (off)
     assert harness["initial"]["missing"] == {"attr": None, "cls": False, "opens": []}
     assert harness["initial"]["empty"] == {"attr": "", "cls": False, "opens": []}
+
+
+def test_read_is_available_on_both_cards_and_only_local_books_offer_export(harness):
+    assert harness["localActions"] == [
+        {"read": True, "exports": []},
+        {"read": True, "exports": [["/api/library/456/export/zip", "ZIP", "JM456"],
+                                   ["/api/library/456/export/pdf", "PDF", "JM456"]]},
+    ]
 
 
 def test_blank_space_opens_nothing_when_the_setting_is_off(harness):

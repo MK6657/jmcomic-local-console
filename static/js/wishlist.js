@@ -369,8 +369,12 @@
       if (data.status === 'ok') {
         var w = data.window || {};
         var start = scheduledStart(w);
-        if (!(data.job_ids || []).length && (data.skipped || []).length) {
-          toast('这部漫画已在下载队列中，没有重复创建任务', 'info');
+        if (!(data.job_ids || []).length) {
+          if ((data.skipped || []).some(function (row) { return row.reason === 'active'; })) {
+            toast('这部漫画已在下载队列中，没有重复创建任务', 'info');
+          } else {
+            toast(data.message || '未能确认是否新建任务，请在下载管理中核对', 'warning');
+          }
         } else if (w.enabled && (w.never || w.invalid)) {
           toast('已加入下载队列；定时下载的时间段设置不对，任务不会自动开始', 'warning');
         } else if (start) {
@@ -573,25 +577,102 @@
   }
 
   // ── 导入收藏清单（文件） ──
+  var FILE_IMPORT_BATCH = 200;
+  var fileImportButton = document.getElementById('wishlist-import-file-btn');
+  var pendingImport = null;
+  var importInterrupted = false;
+  var fileNotice, fileMessage, retryImportButton;
+
+  function fileImportStatus(message, kind, canRetry) {
+    if (!fileNotice) {
+      fileNotice = el('div');
+      fileMessage = el('span');
+      fileMessage.setAttribute('role', 'status');
+      fileNotice.appendChild(fileMessage);
+      retryImportButton = el('button', 'btn btn-sm btn-outline-primary ms-2', '重试此批并继续导入');
+      retryImportButton.type = 'button';
+      retryImportButton.addEventListener('click', function () { runFileImport(); });
+      fileNotice.appendChild(retryImportButton);
+      fileImportButton.closest('.d-flex').after(fileNotice);
+    }
+    fileNotice.className = 'alert alert-' + kind + ' mb-3';
+    fileMessage.textContent = message;
+    retryImportButton.hidden = !canRetry;
+  }
+
+  function importCounts(progress) {
+    return '已确认 ' + progress.offset + '/' + progress.items.length + ' 条：新增 ' + progress.added
+      + '，已存在 ' + progress.skipped + '，失败 ' + progress.failed + (progress.firstError || '');
+  }
+
+  async function runFileImport(file) {
+    if (fileImportButton.disabled || (!file && !pendingImport)) return;
+    fileImportButton.disabled = true;
+    importInterrupted = false;
+    try {
+      if (file) {
+        pendingImport = null;
+        fileImportStatus('正在读取收藏文件…', 'info');
+        var text = await file.text();
+        var items;
+        try { items = JSON.parse(text); } catch (_) { throw new Error('JSON 解析失败，请检查文件格式'); }
+        if (!Array.isArray(items)) throw new Error('收藏文件必须是 JSON 数组');
+        if (!items.length) { fileImportStatus('文件中没有收藏记录', 'info'); return; }
+        pendingImport = { items: items, offset: 0, added: 0, skipped: 0, failed: 0, retried: false };
+      } else {
+        pendingImport.retried = true;
+      }
+      var progress = pendingImport;
+      while (progress.offset < progress.items.length) {
+        if (importInterrupted) throw new Error('已离开收藏页');
+        var batch = progress.items.slice(progress.offset, progress.offset + FILE_IMPORT_BATCH);
+        fileImportStatus('正在导入第 ' + (progress.offset + 1) + ' 至 ' + (progress.offset + batch.length)
+          + ' 条。' + importCounts(progress), 'info');
+        var form = new FormData();
+        form.append('file', new Blob([JSON.stringify(batch)], { type: 'application/json' }), 'wishlist.json');
+        var data = await window.apiFetch('/api/wishlist/import-file', { method: 'POST', body: form, timeoutMs: 60000 });
+        if (!data || data.status !== 'ok') throw new Error((data && data.message) || '未收到导入结果');
+        if (!Number.isSafeInteger(data.added) || data.added < 0 || !Number.isSafeInteger(data.skipped_existing)
+          || data.skipped_existing < 0 || !Array.isArray(data.errors)
+          || data.added + data.skipped_existing + data.errors.length !== batch.length) {
+          throw new Error('服务返回的计数与本批条数不符');
+        }
+        var first = data.errors[0];
+        if (!progress.firstError && first && Number.isInteger(first.index)) {
+          progress.firstError = '（第 ' + (progress.offset + first.index + 1) + ' 条：' + (first.message || '导入失败') + '）';
+        }
+        progress.added += data.added;
+        progress.skipped += data.skipped_existing;
+        progress.failed += data.errors.length;
+        progress.offset += batch.length;
+      }
+      var summary = '导入结束。' + importCounts(progress) + '。';
+      if (progress.retried) summary += '重试前已写入的收藏按已存在计数。';
+      if (progress.failed) summary += '可修正后重新选择文件导入，已有收藏会跳过。';
+      fileImportStatus(summary, progress.failed ? 'warning' : 'success');
+      pendingImport = null;
+      if (!importInterrupted) loadWishlist(1);
+    } catch (err) {
+      var reason = err.name === 'AbortError' ? '请求中断' : err.message;
+      if (pendingImport) {
+        fileImportStatus('导入暂停：' + reason + '。' + importCounts(pendingImport) + '。可从第 '
+          + (pendingImport.offset + 1) + ' 条重试，已经写入的收藏会计为已存在。', 'warning', true);
+        if (!importInterrupted) loadWishlist(currentPage);
+      } else {
+        fileImportStatus('文件未导入：' + reason, 'danger');
+      }
+    } finally {
+      fileImportButton.disabled = false;
+    }
+  }
+
   async function importWishlistFile(input) {
     var file = input.files[0];
-    if (!file) return;
-    var formData = new FormData();
-    formData.append('file', file);
-    try {
-      var data = await window.apiFetch('/api/wishlist/import-file', { method: 'POST', body: formData, timeoutMs: 60000 });
-      if (data.status === 'ok') {
-        toast('导入成功: 新增 ' + data.added + ', 跳过 ' + data.skipped_existing, 'success');
-        loadWishlist(1);
-      } else {
-        toast(data.message || '导入失败', 'danger');
-      }
-    } catch(e) {
-      if (e && e.name === 'AbortError') { input.value = ''; return; } // pagehide 中止，静默
-      toast((e && e.status) ? (e.message || '导入失败') : ('导入失败: ' + e.message), 'danger');
-    }
     input.value = '';
+    if (file) await runFileImport(file);
   }
+
+  window.addEventListener('pagehide', function () { importInterrupted = true; });
 
   function refreshList() {
     loadWishlist(currentPage);
@@ -647,7 +728,7 @@
   statusSelect.addEventListener('change', searchWishlist);
   sortSelect.addEventListener('change', searchWishlist);
   document.getElementById('wishlist-export-btn').addEventListener('click', exportWishlist);
-  document.getElementById('wishlist-import-file-btn').addEventListener('click', function () {
+  fileImportButton.addEventListener('click', function () {
     document.getElementById('import-file-input').click();
   });
   document.getElementById('import-file-input').addEventListener('change', function () {
