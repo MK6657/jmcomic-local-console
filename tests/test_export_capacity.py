@@ -144,6 +144,65 @@ def test_scan_stops_even_when_entries_will_not_be_exported(env, fmt):
     rejected(env.post(fmt), 413, "export_limit")
 
 
+@pytest.mark.parametrize("fmt", ["zip", "pdf"])
+@pytest.mark.parametrize("failure", ["directory", "iterator", "entry"])
+def test_unreadable_chapter_refuses_partial_export_then_recovers(env, monkeypatch, fmt, failure):
+    first, second = env.album / "01", env.album / "02"
+    first.mkdir()
+    second.mkdir()
+    (env.album / "1.png").rename(first / "1.png")
+    (second / "1.png").write_bytes(png())
+    scandir = api_export.os.scandir
+
+    class BadEntry:
+        def __init__(self, entry):
+            self.entry = entry
+
+        def __getattr__(self, name):
+            return getattr(self.entry, name)
+
+        def stat(self, **kwargs):
+            raise PermissionError("cannot read page metadata")
+
+    def unreadable(path):
+        if Path(path) != second:
+            return scandir(path)
+        if failure == "directory":
+            raise PermissionError("cannot open chapter")
+
+        class Listing:
+            def __enter__(self):
+                self.entries = scandir(path)
+                return self
+
+            def __iter__(self):
+                for entry in self.entries:
+                    if failure == "iterator":
+                        raise PermissionError("cannot finish listing chapter")
+                    yield BadEntry(entry)
+
+            def __exit__(self, *exc):
+                self.entries.close()
+        return Listing()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(api_export.os, "scandir", unreadable)
+        response = env.post(fmt)
+        assert response.status_code == 503, f"expected refusal, got HTTP {response.status_code}"
+        rejected(response, 503, "export_source_unreadable")
+    assert list(env.exports.iterdir()) == []
+    response = env.post(fmt)  # the failed scan released its export slot
+    assert response.status_code == 200
+    if fmt == "zip":
+        with zipfile.ZipFile(io.BytesIO(response.data)) as zf:
+            assert zf.namelist() == ["Album/01/1.png", "Album/02/1.png"] and zf.testzip() is None
+    else:
+        import pikepdf
+        with pikepdf.Pdf.open(io.BytesIO(response.data)) as pdf:
+            assert len(pdf.pages) == 2
+    response.close()
+
+
 def test_scan_checks_deadline_between_ignored_entries(env, monkeypatch):
     (env.album / "1.png").unlink()
     for number in range(10):

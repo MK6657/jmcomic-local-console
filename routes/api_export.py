@@ -79,6 +79,11 @@ def _export_capacity(view):
         except archive_pages.ArchiveError as e:
             log.warning(f"导出时压缩包页读取失败 job_id={job_id} error={e}")
             return jsonify(status="error", reason="archive_corrupt", message=_PAGE_READ_FAILED), 422
+        except ExportSourceUnreadable as e:
+            log.warning(f"导出时无法完整列出下载目录 job_id={job_id} error={e.__cause__}")
+            return (jsonify(status="error", reason="export_source_unreadable",
+                            message="部分下载内容无法读取，已取消导出。请检查目录是否存在、是否有读取权限，再重试。"),
+                    503, {"Retry-After": _RETRY_AFTER})
         except OSError as e:
             log.error(f"导出临时文件读写失败 job_id={job_id} error={e}")
             return jsonify(status="error", message="临时空间不足或无法读写临时文件，已取消导出"), 500
@@ -128,6 +133,10 @@ class IncompletePdfError(ValueError):
     def __init__(self, images):
         self.images = [path.name for path in images]
         super().__init__(f"有 {len(self.images)} 张图片损坏或无法转换，已取消 PDF 导出；请修复或重新下载图片后重试")
+
+
+class ExportSourceUnreadable(RuntimeError):
+    """A complete page inventory cannot be established; never send a partial attachment."""
 
 
 def _check_job(job_id: str):
@@ -259,25 +268,21 @@ def _collect_files(output_dir, budget, images_only=False):
     arbitrarily many ignored entries before yielding. Check every directory
     entry here, then sort only the bounded selection with the same natural key.
     """
-    if is_link(output_dir):
-        raise ValueError("源目录不能是符号链接或目录联接")
     files, pending = [], [output_dir]
     while pending:
         budget.check()
         folder = pending.pop()
-        if is_link(folder):
-            continue
         if is_temporary_path(folder):
             continue
         try:
-            listing = os.scandir(folder)
-        except OSError:
-            continue
-        with listing:
-            for entry in listing:
-                budget.visit()
-                try:
-                    if _entry_is_link(entry) or is_temporary_path(entry.name):
+            if is_link(folder):
+                if folder == output_dir:
+                    raise ValueError("源目录不能是符号链接或目录联接")
+                continue
+            with os.scandir(folder) as listing:
+                for entry in listing:
+                    budget.visit()
+                    if is_temporary_path(entry.name) or _entry_is_link(entry):
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(Path(entry.path))
@@ -286,19 +291,19 @@ def _collect_files(output_dir, budget, images_only=False):
                         continue
                     path = Path(entry.path)
                     size = entry.stat(follow_symlinks=False).st_size
-                except OSError:
-                    continue
-                if path.suffix.lower() in archive_pages.ARCHIVE_SUFFIXES:
-                    if folder == output_dir:
-                        budget.archive_paths.append(path)
-                    continue
-                if size <= 0:
-                    continue
-                is_page = path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS
-                if (images_only and not is_page) or not is_safe_path(path):
-                    continue
-                budget.add_source(path, size, is_page)
-                files.append(path)
+                    if path.suffix.lower() in archive_pages.ARCHIVE_SUFFIXES:
+                        if folder == output_dir:
+                            budget.archive_paths.append(path)
+                        continue
+                    if size <= 0:
+                        continue
+                    is_page = path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS
+                    if (images_only and not is_page) or not is_safe_path(path):
+                        continue
+                    budget.add_source(path, size, is_page)
+                    files.append(path)
+        except OSError as e:
+            raise ExportSourceUnreadable() from e
     budget.check()
     files.sort(key=lambda path: natural_key(path.relative_to(output_dir)))
     budget.check()
