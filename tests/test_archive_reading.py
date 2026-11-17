@@ -1,12 +1,15 @@
 """Archive-only offline reading: CBZ / app-packed ZIP as the page source for the readers, the shared
 "readable offline" rule, the lists' reasons and both exports. Everything happens in pytest's tmp folders:
 the real downloads/ and runtime/ are never touched."""
+import hashlib
 import io
 import os
 import re
 import shutil
+import threading
 import warnings
 import zipfile
+from functools import partialmethod
 from pathlib import Path
 
 import pytest
@@ -730,7 +733,7 @@ def download(client, downloads, monkeypatch):
 
     def run(job_id, photo_ids, outcome="completed", written=None):
         def chapter(job_id, album_id, album, album_dir, photo, total_pages, done_pages, pending_images,
-                    failed_pages, *rest):
+                    failed_pages, *rest, stop_event=None):
             folder = jm_service._chapter_output_dir(album_dir, photo)
             for n in range(1, (written or len(photo)) + 1):
                 (folder / f"{n:05d}.webp").write_bytes(f"{photo.photo_id}-{n}".encode())
@@ -756,6 +759,167 @@ def _archived(downloads):
     archive_pages.clear_cache()
     index = archive_pages.read_index(downloads / "Name_3001" / "Name_3001.cbz")
     return {p.name.split("__")[1]: archive_pages.read_page(index, p).decode() for p in index.pages}
+
+
+@pytest.mark.parametrize("stop_after", [1, 3], ids=["loose-member", "copied-member"])
+def test_pack_control_stop_waits_for_member_then_requeues(downloads, download, monkeypatch, stop_after):
+    from core import database as db, jm_service, job_manager as jobs
+    from core.packer import CbzPacker
+    from core.storage import STAGING_DIRECTORY
+    assert download("old", ["71"])["status"] == "completed"
+    folder = downloads / "Name_3001"
+    archive = folder / "Name_3001.cbz"
+    old_hash = hashlib.sha256(archive.read_bytes()).digest()
+    manager = jobs.JobManager()
+    monkeypatch.setattr(jobs, "job_manager", manager)
+    reached, release = threading.Event(), threading.Event()
+    written, queries_after_stop = [], []
+    lookup = jm_service._download_canceled
+
+    def watch_lookup(job_id):
+        if release.is_set():
+            queries_after_stop.append(job_id)
+        return lookup(job_id)
+
+    def after_member(current, total):
+        written.append(current)
+        if current == stop_after:
+            reached.set()
+            assert release.wait(10)
+
+    monkeypatch.setattr(jm_service, "_download_canceled", watch_lookup)
+    monkeypatch.setattr(CbzPacker, "pack", partialmethod(CbzPacker.pack, on_progress=after_member))
+    db.insert_job("packing", "3001", "Name", ["72"])
+    manager.schedule_next()
+    try:
+        assert reached.wait(5)
+        assert manager.stop(timeout=0) is False
+        assert manager.get_running_count() == 1 and db.get_job("packing")["status"] == "running"
+    finally:
+        release.set()
+        assert manager.stop(timeout=5)
+    assert hashlib.sha256(archive.read_bytes()).digest() == old_hash
+    assert written == list(range(1, stop_after + 1))
+    assert queries_after_stop == []
+    assert db.get_job("packing")["status"] == "queued"
+    assert [row["job_id"] for row in db.resource_records(["3001"])] == ["old"]
+    assert len(list(folder.rglob("*.webp"))) == 2 and not (folder / STAGING_DIRECTORY).exists()
+
+
+def test_pack_control_between_crc_members(tmp_path, monkeypatch):
+    from core.packer import CbzPacker
+    from core.storage import STAGING_DIRECTORY, is_temporary_path
+    folder = loose(tmp_path / "Album")
+    target = comic(folder)
+    previous = target.read_bytes()
+    opened = []
+    open_member = zipfile.ZipFile.open
+
+    def observe(archive, name, *args, **kwargs):
+        if archive.mode == "r" and is_temporary_path(archive.filename):
+            opened.append(name)
+        return open_member(archive, name, *args, **kwargs)
+
+    def checkpoint():
+        if "第1话/1.png" in opened:
+            raise InterruptedError("stop during CRC")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", observe)
+    with pytest.raises(InterruptedError, match="stop during CRC"):
+        CbzPacker().pack(folder, target, check_control=checkpoint)
+    assert opened == ["ComicInfo.xml", "第1话/1.png"]
+    assert target.read_bytes() == previous and not (folder / STAGING_DIRECTORY).exists()
+
+
+@pytest.mark.parametrize("fmt", ["cbz", "zip"])
+def test_pack_control_cancel_inside_the_final_publish_lock(downloads, download, monkeypatch, fmt):
+    from core import packer, storage
+    from core.task_commands import cancel_download
+    _pack_format(fmt)
+    assert download("old", ["71"])["status"] == "completed"
+    folder = downloads / "Name_3001"
+    archive = folder / f"Name_3001.{fmt}"
+    old_hash = hashlib.sha256(archive.read_bytes()).digest()
+    check_target = storage._check_target
+
+    def cancel_after_checks(path):
+        check_target(path)
+        if path == archive and packer._publish_lock.locked():
+            assert cancel_download("packing")[0]
+
+    monkeypatch.setattr(storage, "_check_target", cancel_after_checks)
+    assert download("packing", ["72"])["status"] == "canceled"
+    assert hashlib.sha256(archive.read_bytes()).digest() == old_hash
+    assert len(list(folder.rglob("*.webp"))) == 2 and not (folder / storage.STAGING_DIRECTORY).exists()
+
+
+def test_pack_control_cancel_after_first_original_keeps_the_rest(downloads, download, monkeypatch):
+    from core import database as db
+    from core.task_commands import cancel_download
+    assert download("old", ["72"])["status"] == "completed"
+    folder = downloads / "Name_3001"
+    chapter = folder / "第1话__71"
+    removed = []
+    unlink = Path.unlink
+
+    def cancel_after_unlink(path, *args, **kwargs):
+        unlink(path, *args, **kwargs)
+        if path.parent == chapter and path.suffix == ".webp":
+            removed.append(path)
+            if len(removed) == 1:
+                assert cancel_download("packing")[0]
+
+    monkeypatch.setattr(Path, "unlink", cancel_after_unlink)
+    assert download("packing", ["71"])["status"] == "canceled"
+    assert len(removed) == 1
+    expected = {chapter / f"{number:05d}.webp": f"71-{number}".encode() for number in (1, 2, 3)}
+    assert {path: path.read_bytes() for path in chapter.glob("*.webp")} == {
+        path: data for path, data in expected.items() if path != removed[0]}
+    with zipfile.ZipFile(folder / "Name_3001.cbz") as archive:
+        assert archive.testzip() is None
+        assert {name: archive.read(name) for name in archive.namelist() if name.endswith(".webp")} == {
+            **{path.relative_to(folder).as_posix(): data for path, data in expected.items()},
+            "第2话__72/00001.webp": b"72-1", "第2话__72/00002.webp": b"72-2"}
+    assert [row["job_id"] for row in db.resource_records(["3001"])] == ["old"]
+
+
+@pytest.mark.parametrize(("selection", "title"), [(["72"], "Name"), ([], "Name"), ([], "Renamed")],
+                         ids=["add-chapter", "redownload-all", "renamed-redownload"])
+def test_author_directory_keeps_successful_resource_on_cancel(client, downloads, download, monkeypatch, selection, title):
+    from core import database as db
+    from core.packer import CbzPacker
+    from core.settings import update_settings
+    from core.task_commands import cancel_download
+    old = download("old", ["71"])
+    folder = Path(old["output_path"])
+    assert folder == downloads / "Name_3001" and old["status"] == "completed"
+    urls = [page["url"] for page in client.get("/api/preview/3001").get_json()["pages"]]
+    db.delete_job("old")
+    update_settings({"organize_mode": "by_author"})
+    monkeypatch.setattr(_Album, "name", title)
+    at_cancel = []
+
+    def after_member(current, total):
+        if current == 1:
+            at_cancel.append(Path(db.get_job("retry")["output_path"]))
+            assert cancel_download("retry")[0]
+
+    monkeypatch.setattr(CbzPacker, "pack", partialmethod(CbzPacker.pack, on_progress=after_member))
+    assert download("retry", selection)["status"] == "canceled"
+    assert at_cancel == [folder] and list(downloads.iterdir()) == [folder]
+    assert [client.get(url).data for url in urls] == [b"71-1", b"71-2", b"71-3"]
+    assert db.get_completed_job_by_album_id("3001")["output_path"] == str(folder)
+
+
+def test_author_directory_new_book_is_organized_and_packed(client, downloads, download):
+    from core.settings import update_settings
+    update_settings({"organize_mode": "by_author"})
+    job = download("new", [])
+    folder = downloads / "someone" / "Name_3001"
+    assert job["status"] == "completed" and Path(job["output_path"]) == folder
+    assert not (downloads / "Name_3001").exists() and not list(folder.rglob("*.webp"))
+    data = client.get("/api/preview/3001").get_json()
+    assert (data["source"], data["total_pages"]) == ("archive", 5)
 
 
 def test_a_chapter_only_update_keeps_the_archived_chapters(client, downloads, download):

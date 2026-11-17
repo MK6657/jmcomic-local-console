@@ -17,6 +17,9 @@ def network(monkeypatch):
     session = SimpleNamespace(curl_options={}, retry=object())
     def get(url, **kwargs):
         calls.append((url, kwargs["timeout"]))
+        if url.endswith("/unavailable"):
+            clock.now += 1
+            raise ConnectionError("missing page")
         if "first.invalid" in url:
             clock.now += 2
             raise ConnectionError("bad node")
@@ -46,13 +49,20 @@ def test_different_image_node_uses_remaining_budget_and_same_path_query(network)
     assert client.retry_times == 9 and root.session.curl_options is before
 
 
-def test_image_retry_setting_is_an_actual_attempt_limit(network):
+@pytest.mark.parametrize(("attempts", "expected_hosts"), [
+    (1, ["first.invalid"]),
+    (2, ["first.invalid", "second.invalid"]),
+    (9, ["first.invalid", "second.invalid", "third.invalid"]),
+])
+def test_image_attempt_limit_never_repeats_a_node_within_a_pass(network, monkeypatch, attempts, expected_hosts):
     from core import image_download
+    from jmcomic import JmModuleConfig
     client, calls, _, _ = network
-    with pytest.raises(ConnectionError):
-        image_download.download_image(client, img_url="https://first.invalid/image", img_save_path="unused",
-                                      scramble_id=None, decode_image=False, timeout=5, attempts=1)
-    assert len(calls) == 1
+    monkeypatch.setattr(JmModuleConfig, "DOMAIN_IMAGE_LIST", ["second.invalid", "first.invalid", "third.invalid"])
+    with pytest.raises(ConnectionError, match="missing page"):
+        image_download.download_image(client, img_url="https://first.invalid/unavailable", img_save_path="unused",
+                                      scramble_id=None, decode_image=False, timeout=5, attempts=attempts)
+    assert calls == [(f"https://{host}/unavailable", 5 - index) for index, host in enumerate(expected_hosts)]
     assert client.retry_times == 9
 
 

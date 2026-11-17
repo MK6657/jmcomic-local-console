@@ -1,9 +1,11 @@
 """Recover interrupted work behind the queue, without moving user history or ownership."""
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -143,6 +145,7 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
     """Keep the actual task/chapter/page/storage pipeline; fake only SDK transport."""
     from core import image_download, jm_service, job_manager as jobs, path_guard, transfer
     from core.settings import update_settings
+    from jmcomic import JmModuleConfig
     from PIL import Image
     from curl_cffi import CurlOpt
 
@@ -154,11 +157,13 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
     monkeypatch.setattr(jobs, "job_manager", manager)
     update_settings({"timeout": "5", "retry_times": "0", "max_running_jobs": "1",
                      "image_threads": "1", "photo_threads": "1", "auto_pack": "false"})
-    state = SimpleNamespace(now=1000.0, active=0, clients=[], requests=[], order=[],
+    state = SimpleNamespace(now=1000.0, active=0, clients=[], order=[],
+                            counts=Counter(), block_on_slow_attempt=1,
                             entered=threading.Event(), release=threading.Event(), lock=threading.Lock())
     monkeypatch.setattr(transfer, "_clock", lambda: state.now)
     monkeypatch.setattr(image_download, "_good_host", None)
     monkeypatch.setattr(image_download, "_failed_hosts", {})
+    monkeypatch.setattr(JmModuleConfig, "DOMAIN_IMAGE_LIST", ["alternate.invalid", "spare.invalid"])
 
     class Session:
         def __init__(self, owner):
@@ -183,17 +188,22 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
             assert kwargs.get("stream") is False
             assert 0 < self.session.curl_options[CurlOpt.TIMEOUT_MS] <= 5000
             self.active = True
+            path = urlsplit(url).path
             with state.lock:
                 state.active += 1
-                state.requests.append((url, timeout))
+                state.counts[path] += 1
+                attempt = state.counts[path]
             try:
-                if "/images/100/" in url:
-                    state.entered.set()
-                    assert state.release.wait(5)
+                if path == "/images/100/00001.webp":
+                    if attempt == state.block_on_slow_attempt:
+                        state.entered.set()
+                        assert state.release.wait(5)
                     # Consume the *transport's provided remaining timeout*. The
                     # budget gate, rather than a mock worker, must terminate it.
                     state.now += timeout + 0.01
                     raise TimeoutError("fixture exhausted request deadline")
+                if path == "/images/100/00003.webp":
+                    raise ConnectionError("fixture unavailable on this node")
                 return SimpleNamespace(status_code=200)
             finally:
                 self.active = False
@@ -202,11 +212,12 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
 
     class Photo(list):
         def __init__(self, album_id):
-            super().__init__([SimpleNamespace(download_url=f"https://images.invalid/images/{album_id}/00001.webp",
-                                               scramble_id=None, is_gif=False)])
+            page_count = 3 if album_id == "100" else 1
+            self.page_arr = [f"{index:05d}.webp" for index in range(1, page_count + 1)]
+            super().__init__(SimpleNamespace(download_url=f"https://images.invalid/images/{album_id}/{name}",
+                                             scramble_id=None, is_gif=False) for name in self.page_arr)
             self.photo_id = "71"
             self.name = "Chapter"
-            self.page_arr = ["00001.webp"]
 
     class Album(list):
         def __init__(self, album_id):
@@ -260,29 +271,69 @@ def _await_status(job_id, expected, timeout=5):
     pytest.fail(f"{job_id} did not reach {expected}; last status: {job['status']}")
 
 
-def test_bounded_real_download_failure_releases_capacity_only_after_transport_exits(real_download_pipeline):
+@pytest.mark.parametrize(("retries", "slow_attempts", "broken_attempts"), [(0, 1, 1), (1, 2, 4)])
+def test_bad_pages_finish_and_scheduler_runs_next_album(real_download_pipeline, retries, slow_attempts, broken_attempts):
     from core import database as db
+    from core.settings import update_settings
+    from PIL import Image
     manager, state, downloads = real_download_pipeline
+    update_settings({"retry_times": retries})
     _job("job_bad", "100")
     _job("job_good", "200", created_at="2026-02-01T00:00:00")
     manager.start()
     assert state.entered.wait(3)
     assert state.active == 1
-    manager.schedule_next()
     assert db.get_job("job_good")["status"] == "queued"
     assert manager.get_running_count() == 1  # A status timeout never detaches a live writer.
     state.release.set()
-    _await_status("job_bad", "failed")
-    _await_status("job_good", "completed")
+    bad = _await_status("job_bad", "failed")
+    good = _await_status("job_good", "completed")
     assert manager.stop(timeout=3)
     assert state.active == 0 and manager.get_running_count() == 0
     assert all(instance.root.closed for instance in state.clients)
-    image_attempts = [(url, timeout) for url, timeout in state.requests if "/images/100/" in url]
-    assert len(image_attempts) == 2  # first pass plus bounded final retry; no hidden SDK retries
-    assert all(0 < timeout <= 5 for _, timeout in image_attempts)
+    assert state.order == ["100", "200"]
+    assert {path: count for path, count in state.counts.items() if path.startswith("/images/")} == {
+        "/images/100/00001.webp": slow_attempts, "/images/100/00002.webp": 1,
+        "/images/100/00003.webp": broken_attempts, "/images/200/00001.webp": 1,
+    }
+    assert (bad["done_pages"], bad["total_pages"]) == (1, 3)
+    assert all(f"第 {page} 页下载失败" in bad["error_message"] for page in (1, 3))
+    assert good["done_pages"] == good["total_pages"] == 1
     assert db.resource_records(["100"]) == []
     assert len(db.resource_records(["200"])) == 1
-    assert len(list((downloads / "Normal_200").rglob("00001.webp"))) == 1
+    for directory, expected in (("Blocked_100", "00002.webp"), ("Normal_200", "00001.webp")):
+        pages = list((downloads / directory).rglob("*.webp"))
+        assert [path.name for path in pages] == [expected]
+        with Image.open(pages[0]) as image:
+            image.verify()
+
+
+@pytest.mark.parametrize("interrupt", ["cancel", "stop"])
+def test_interrupt_in_second_pass_preserves_good_page_and_stops_retrying(real_download_pipeline, interrupt):
+    from core import database as db
+    from core.settings import update_settings
+    manager, state, downloads = real_download_pipeline
+    update_settings({"retry_times": 1})
+    state.block_on_slow_attempt = 2
+    _job("job_interrupted", "100")
+    manager.start()
+    assert state.entered.wait(3)
+    if interrupt == "cancel":
+        assert manager.cancel_job("job_interrupted")[0]
+    else:
+        assert not manager.stop(timeout=0.01)
+    assert manager.get_running_count() == state.active == 1
+    state.release.set()
+    if interrupt == "cancel":
+        _job("job_after_cancel", "200")
+        _await_status("job_after_cancel", "completed")
+    assert manager.stop(timeout=3)
+    job = db.get_job("job_interrupted")
+    assert job["status"] == ("canceled" if interrupt == "cancel" else "queued")
+    assert job["error_message"] is None and job["done_pages"] == 1
+    assert state.counts["/images/100/00001.webp"] == state.counts["/images/100/00003.webp"] == 2
+    assert [page.name for page in (downloads / "Blocked_100").rglob("*.webp")] == ["00002.webp"]
+    assert state.active == manager.get_running_count() == 0 and all(instance.root.closed for instance in state.clients)
 
 
 def test_recovered_task_does_not_block_real_normal_download_after_restart(real_download_pipeline):

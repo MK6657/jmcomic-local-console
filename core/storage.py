@@ -75,13 +75,14 @@ class StagedFile:
         self._published = False
         self._closed = False
 
-    def publish(self, validate, *, lock=None) -> Path:
+    def publish(self, validate, *, lock=None, before_replace=None) -> Path:
         """Validate a complete regular file, then replace the destination on this disk.
 
         ``validate(path)`` must return true; rejection or any exception preserves the
         old destination.  Directory identities and link checks are repeated before
         publication. An optional publication lock covers only the final checks and
         rename, so a full archive CRC check does not serialize unrelated packers.
+        ``before_replace()`` may raise to veto publication after all checks, inside the lock.
         This guards replacement of staging directories between calls;
         it is not a promise of power-loss durability or protection from a privileged
         process racing the final filesystem operation.
@@ -99,6 +100,8 @@ class StagedFile:
             if signature(before) != signature(after):
                 raise IOError("暂存文件在校验期间发生变化，原文件已保留")
             _check_target(self.target)
+            if before_replace is not None:
+                before_replace()
             os.replace(self.path, self.target)
             self._published = True
         return self.target

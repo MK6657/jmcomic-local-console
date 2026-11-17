@@ -16,6 +16,18 @@ from .storage import staged_file
 _publish_lock = threading.Lock()
 
 
+class _VerifyingArchive(zipfile.ZipFile):
+    """Let testzip stream each member's CRC, with a checkpoint before opening the next."""
+
+    def __init__(self, path, checkpoint):
+        self._checkpoint = checkpoint
+        super().__init__(path)
+
+    def open(self, *args, **kwargs):
+        self._checkpoint()
+        return super().open(*args, **kwargs)
+
+
 class Packer(ABC):
     """打包器抽象基类"""
 
@@ -24,7 +36,7 @@ class Packer(ABC):
         """返回文件扩展名，如 .cbz"""
 
     @abstractmethod
-    def pack(self, source_dir: Path, output_path: Path, on_progress=None) -> Path:
+    def pack(self, source_dir: Path, output_path: Path, on_progress=None, *, check_control=None) -> Path:
         """
         将 source_dir 中的所有图片打包为指定格式。
 
@@ -32,6 +44,7 @@ class Packer(ABC):
             source_dir: 源目录，包含图片文件
             output_path: 输出目标路径（不含扩展名或含最终扩展名）
             on_progress: 可选回调 on_progress(current, total)
+            check_control: 可选回调；在成员之间和发布前调用，抛出异常可中断打包
 
         Returns:
             最终生成的压缩包完整路径
@@ -57,7 +70,7 @@ class CbzPacker(Packer):
                     log.warning(f"打包跳过空的或过大的图片: {entry} ({size} 字节)")
         return images
 
-    def pack(self, source_dir: Path, output_path: Path, on_progress=None, base=None) -> Path:
+    def pack(self, source_dir: Path, output_path: Path, on_progress=None, base=None, *, check_control=None) -> Path:
         """
         将 source_dir 中的所有图片打包为 .cbz 文件。
 
@@ -73,6 +86,8 @@ class CbzPacker(Packer):
         - 上下文退出时清理本次暂存文件，失败保留已有压缩包
         - 同时生成 ComicInfo.xml 包含 Title/Series/Writer
         """
+        checkpoint = check_control if check_control is not None else lambda: None
+        checkpoint()
         source_dir = Path(source_dir)
         if not source_dir.exists() or not source_dir.is_dir():
             raise FileNotFoundError(f"源目录不存在: {source_dir}")
@@ -114,10 +129,12 @@ class CbzPacker(Packer):
                     writer="",
                     page_count=total,
                 )
+                checkpoint()
                 zf.writestr("ComicInfo.xml", comic_info_xml)
 
                 # 写入所有图片
                 for idx, img_path in enumerate(image_files, start=1):
+                    checkpoint()
                     arcname = str(img_path.relative_to(source_dir))
                     # 使用 / 作为路径分隔符（ZIP 标准）
                     arcname = arcname.replace("\\", "/")
@@ -131,21 +148,24 @@ class CbzPacker(Packer):
                     pages = [page for owner, page in keep if owner is index]
                     if not pages:
                         continue
+                    checkpoint()
                     with archive_pages.open_pages(index) as read:
                         for page in pages:
+                            checkpoint()
                             zf.writestr(page.name, read(page))
                             idx += 1
                             if on_progress and callable(on_progress):
                                 on_progress(idx, total)
 
             def complete_archive(path):
-                with zipfile.ZipFile(path) as archive:
+                checkpoint()
+                with _VerifyingArchive(path, checkpoint) as archive:
                     return (len(archive.infolist()) == total + 1
                             and archive.namelist().count("ComicInfo.xml") == 1
                             and archive.testzip() is None)
 
             # 所有页面写完并验证后才替换旧包。
-            staged.publish(complete_archive, lock=_publish_lock)
+            staged.publish(complete_archive, lock=_publish_lock, before_replace=check_control)
             log.info(
                 f"CBZ 打包完成: {output_path} ({total} 张图片)"
             )
