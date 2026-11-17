@@ -23,6 +23,7 @@
 
   var currentQuery = '';
   var currentPage = 1;
+  var MAX_PAGE = 500;
   var currentSort = 'latest';
   var currentPageSize = 20;
   var lastResults = null;
@@ -89,7 +90,7 @@
     var params = new URLSearchParams(window.location.search);
     currentQuery = params.get('keyword') || '';
     currentSort = ['latest', 'views', 'likes'].indexOf(params.get('sort')) >= 0 ? params.get('sort') : 'latest';
-    currentPage = Math.max(1, Math.min(500, parseInt(params.get('page'), 10) || 1));
+    currentPage = Math.max(1, Math.min(MAX_PAGE, parseInt(params.get('page'), 10) || 1));
     currentPageSize = [20, 50, 100].indexOf(Number(params.get('page_size'))) >= 0 ? Number(params.get('page_size')) : 20;
     if (!currentQuery) return false;
     searchInput.value = currentQuery;
@@ -283,8 +284,9 @@
 
   function renderResults(data) {
     var items = data.items || [];
-    var total = data.total || 0;
-    var totalPages = Math.ceil(total / currentPageSize);
+    var total = data.total;
+    var totalPages = Math.min(MAX_PAGE, total == null
+      ? currentPage + (data.has_more ? 1 : 0) : Math.ceil(total / currentPageSize));
     var albumIds = items.map(function (item) { return item.album_id; });
 
     // 批量查询收藏状态（15s 超时 + abortKey 去重，防止页面跳转/翻页时堆积占用浏览器连接池）
@@ -318,7 +320,7 @@
 
     if (items.length === 0) {
       resultsDiv.innerHTML = '<div class="text-center text-muted py-5"><i class="bi bi-inbox" style="font-size:3rem;"></i><p class="mt-3">没有找到相关结果</p></div>';
-      paginationDiv.innerHTML = '';
+      renderPagination(currentPage, totalPages);
       return;
     }
 
@@ -440,7 +442,7 @@
   }
 
   function renderPagination(page, totalPages) {
-    if (totalPages <= 1) {
+    if (totalPages <= 1 && page <= 1) {
       paginationDiv.innerHTML = '';
       return;
     }
@@ -448,7 +450,8 @@
     var html = '<nav aria-label="搜索结果分页"><ul class="pagination justify-content-center">';
 
     // 上一页
-    html += '<li class="page-item' + (page <= 1 ? ' disabled' : '') + '">' + pageButton(page - 1, '&laquo;', '上一页', page <= 1) + '</li>';
+    var previous = Math.max(1, Math.min(page - 1, totalPages));
+    html += '<li class="page-item' + (page <= 1 ? ' disabled' : '') + '">' + pageButton(previous, '&laquo;', '上一页', page <= 1) + '</li>';
 
     // 页码
     var start = Math.max(1, page - 2);

@@ -5,7 +5,7 @@
 from flask import Blueprint, jsonify, request
 
 from core.database import add_search_history, get_search_history, delete_search_history, clear_search_history
-from core.jm_service import search_albums
+from core.jm_service import MAX_SEARCH_PAGE, search_albums
 from core.logger import log
 from core.upstream import known_failure
 from core.validation import validate_numeric  # P1-8 统一 album_id 校验
@@ -26,7 +26,7 @@ def search():
     page = request.args.get("page", 1, type=int)
     if not page or page < 1:
         page = 1
-    page = min(page, 500)
+    page = min(page, MAX_SEARCH_PAGE)
     sort = request.args.get("sort", "latest")
     if sort not in _VALID_SORTS:
         sort = "latest"
@@ -45,6 +45,7 @@ def search():
             "status": "ok",
             "items": items,
             "total": result["total"],
+            "has_more": result["has_more"],
             "page": result["page"],
             "page_size": page_size,
         })

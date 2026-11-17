@@ -250,6 +250,25 @@ const snapStore = (search, extra) => new Map([[KEY, JSON.stringify(Object.assign
   p.pageshow(true);
   out.bfcacheReturn = { searches: p.searches(), scrolls: p.scrolls.slice(), takes: p.takes() };
 
+  p = load({ search: HERE });
+  const enabledPage = label => {
+    const buttons = p.els.pagination.innerHTML.match(/<button\b[^>]*>/g) || [];
+    const button = buttons.find(tag => tag.includes('aria-label="' + label + '"') && !tag.includes(' disabled'));
+    return button ? Number(button.match(/data-page="(\d+)"/)[1]) : null;
+  };
+  await p.respond(0, { ...OK, total: null, has_more: true });
+  const next = enabledPage('下一页');
+  out.unknownPaging = { next, hiddenTotal: p.els['search-status'].classList.contains('d-none') };
+  if (next !== null) {
+    p.clickPage(next);
+    await p.respond(1, { ...OK, total: null, has_more: false });
+    out.unknownPaging.last = [enabledPage('上一页'), enabledPage('下一页')];
+    out.unknownPaging.url = p.searches()[1];
+  }
+  p = load({ search: HERE.replace('page=1', 'page=3') });
+  await p.respond(0, { status: 'ok', items: [], total: null, has_more: false });
+  out.unknownPaging.beyond = [enabledPage('上一页'), enabledPage('下一页')];
+
   console.log(JSON.stringify(out));
 })().catch(err => { console.error(err && err.stack || err); process.exit(1); });
 """
@@ -271,6 +290,13 @@ def harness():
 
 
 SEARCH_HERE = "/api/search?q=abc&page=1&page_size=20&sort=latest"
+
+
+def test_unknown_total_navigation_works_from_results_and_empty_pages(harness):
+    assert harness["unknownPaging"] == {
+        "next": 2, "hiddenTotal": True, "last": [1, None], "beyond": [2, None],
+        "url": "/api/search?q=abc&page=2&page_size=20&sort=latest",
+    }
 
 
 def test_a_snapshot_is_redrawn_at_the_return_place_without_searching(harness):

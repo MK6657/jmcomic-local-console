@@ -449,8 +449,46 @@ def _call_with_timeout(label: str, timeout: float, timeout_msg: str, fn, *args,
     return result
 
 
+MAX_SEARCH_PAGE = 500
+
+
+def _search_window(client, keyword, page, page_size, order_by):
+    """取 UI 页对应的 [start, end)；上游未给总数时多看一条以确认是否有下一页。"""
+    native_size = JmModuleConfig.PAGE_SIZE_SEARCH
+    start = (page - 1) * page_size
+    end = start + page_size
+    native_start = start // native_size * native_size
+    can_advance = page < MAX_SEARCH_PAGE
+    read_until = end + (1 if can_advance else 0)
+    rows = []
+    total = None
+    while native_start < read_until:
+        metadata_budget.check_current()
+        result = client.search(
+            search_query=keyword, page=native_start // native_size + 1, main_tag=0,
+            order_by=order_by, time=JmMagicConstants.TIME_ALL,
+            category=JmMagicConstants.CATEGORY_ALL, sub_category=None,
+        )
+        content = result.content
+        if getattr(result, "is_single_album", False) is True:
+            return (content[:1] if page == 1 else []), 1, False
+        reported_total = getattr(result, "total", None)
+        if reported_total == 0 and native_start == 0 and not content:
+            return [], 0, False
+        if reported_total is not None and reported_total > 0:
+            total = reported_total
+            read_until = min(end, total)
+        rows.extend(content[max(0, start - native_start):max(0, read_until - native_start)])
+        if total is None and len(content) < native_size:
+            break
+        native_start += native_size
+
+    has_more = end < total if total is not None else len(rows) > page_size
+    return rows[:page_size], total, can_advance and has_more
+
+
 def search_albums(keyword: str, page: int = 1, page_size: int = 20, sort: str = "latest"):
-    """搜索漫画，page_size 真实限制结果数量，带 25 秒超时"""
+    """搜索一个 UI 页，所有原生页共用一次搜索的超时与客户端租约。"""
     log.info(f"搜索 keyword={keyword} page={page} page_size={page_size} sort={sort}")
     client, _ = get_client()
 
@@ -462,28 +500,16 @@ def search_albums(keyword: str, page: int = 1, page_size: int = 20, sort: str = 
     }
 
     try:
-        search_page = _call_with_timeout(
+        rows, total, has_more = _call_with_timeout(
             f"搜索 keyword={keyword}", _operation_timeout(25), "搜索超时，请稍后重试",
-            client.search,
-            _call_client=client,
-            search_query=keyword,
-            page=page,
-            main_tag=0,
-            order_by=order_map.get(sort, JmMagicConstants.ORDER_BY_LATEST),
-            time=JmMagicConstants.TIME_ALL,
-            category=JmMagicConstants.CATEGORY_ALL,
-            sub_category=None,
+            _search_window, client, keyword, page, page_size,
+            order_map.get(sort, JmMagicConstants.ORDER_BY_LATEST), _call_client=client,
         )
-        # search_page.content 是已物化的普通列表（见 docs/reports/连接池并发分析报告.md）
-        all_items = list(search_page.content)
     finally:
         close_client(client)
 
-    # 真实限制page_size
-    sliced = all_items[:page_size]
-
     items = []
-    for album_id, info in sliced:
+    for album_id, info in rows:
         items.append({
             "album_id": str(album_id),
             "title": _safe_str(info.get("name", "")),
@@ -492,12 +518,10 @@ def search_albums(keyword: str, page: int = 1, page_size: int = 20, sort: str = 
             "cover_url": JmcomicText.get_album_cover_url(album_id),
         })
 
-    total = getattr(search_page, "total", None)
-    # 不提供虚假 total，让前端自己处理分页
-
     return {
         "items": items,
         "total": total,
+        "has_more": has_more,
         "page": page,
         "page_size": page_size,
     }
