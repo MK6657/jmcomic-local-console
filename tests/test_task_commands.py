@@ -15,7 +15,10 @@ def no_download_workers(monkeypatch):
 def _source(status="failed", *, job_id="job_source", chapters=None, output_path=None):
     from core import database as db
     db.insert_job(job_id, "123", "Original", ["11", "12"] if chapters is None else chapters)
-    db.update_job(job_id, status=status, output_path=output_path)
+    db.transition_job_status(
+        job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+        output_path=output_path,
+    )
     return job_id
 
 
@@ -222,7 +225,10 @@ def test_retry_api_returns_explicit_errors_and_reuses_a_successor(client):
     _source("running")
     live = client.post("/api/jobs/job_source/retry")
     assert live.status_code == 400 and live.json["reason"] == "status"
-    db.update_job("job_source", status="failed", selected_photo_ids='{"bad": "selection"}')
+    db.transition_job_status(
+        "job_source", ["queued", "running", "paused", "completed", "failed", "canceled"], "failed",
+        selected_photo_ids='{"bad": "selection"}',
+    )
     damaged = client.post("/api/jobs/job_source/retry")
     assert damaged.status_code == 409 and damaged.json["reason"] == "invalid_source"
     db.update_job("job_source", selected_photo_ids='["11", "12"]')

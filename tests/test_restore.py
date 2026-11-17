@@ -19,7 +19,10 @@ def source(client, tmp_path):
     folder.mkdir(parents=True)
     (folder / "00001.webp").write_bytes(b"published image bytes")
     db.insert_job("job_done", "123", "Keep this title", ["71"])
-    db.update_job("job_done", status="completed", output_path=str(folder.parent))
+    db.transition_job_status(
+        "job_done", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        output_path=str(folder.parent),
+    )
     db.add_wishlist("123", "Keep this title", "Author", "")
     db.add_album_tag("123", "my-tag")
     db.set_setting("download_root", str(downloads))
@@ -103,7 +106,10 @@ def test_inventory_restore_reports_missing_resources_and_preserves_pauses(source
     from core.restore import restore_backup
     for job_id, status in (("job_interrupted", "running"), ("job_paused", "paused")):
         db.insert_job(job_id, "456", "Other", ["81"])
-        db.update_job(job_id, status=status, output_path=str(source[1] / "Other_456"))
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+            output_path=str(source[1] / "Other_456"),
+        )
     backup = _backup(source, tmp_path / "inventory.zip")
     result = restore_backup(backup, tmp_path / "inventory-restored")
     assert not result.resources_included and result.restored_files == 0

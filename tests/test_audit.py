@@ -86,7 +86,10 @@ def test_bad_delete_filter_does_not_clear_tags(client, body):
 def create_job(path, status="completed"):
     from core import database as db
     db.insert_job("job_audit", "123", "Audit", [])
-    db.update_job("job_audit", status=status, output_path=str(path))
+    db.transition_job_status(
+        "job_audit", ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+        output_path=str(path),
+    )
 
 
 @pytest.fixture
@@ -224,7 +227,9 @@ def test_download_terminal_state_and_safe_packing(client, album_dir, monkeypatch
         make_image(target / "page.png")
         (target / "notes.txt").write_text("keep", encoding="utf-8")
         if outcome == "canceled":
-            db.update_job("job_audit", status="canceled")
+            db.transition_job_status(
+                "job_audit", ["queued", "running", "paused", "completed", "failed", "canceled"], "canceled",
+            )
         elif outcome == "success":
             args[6][0] = 1
         else:
@@ -311,7 +316,9 @@ def test_same_album_worker_is_not_scheduled_twice(client):
     from core.job_manager import JobManager
     manager = JobManager()
     db.insert_job("job_first", "123", "same", [])
-    db.update_job("job_first", status="canceled")
+    db.transition_job_status(
+        "job_first", ["queued", "running", "paused", "completed", "failed", "canceled"], "canceled",
+    )
     manager._running_jobs["job_first"] = Mock()
     manager._running_albums["job_first"] = "123"
     db.delete_job("job_first")

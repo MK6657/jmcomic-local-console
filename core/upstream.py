@@ -5,6 +5,7 @@ receive stable failure kinds instead of depending on SDK messages or HTML.
 """
 from __future__ import annotations
 
+from concurrent.futures import TimeoutError as FuturesTimeout
 import json
 import ssl
 
@@ -82,7 +83,7 @@ def classify_failure(error: Exception, *, timeout_message: str | None = None,
                    else f"上游服务返回异常（HTTP {status}），请稍后重试")
         return UpstreamFailure(kind, message, upstream_status=status)
     code = getattr(error, "code", None)
-    if isinstance(error, (TimeoutError, Timeout)) or code == 28:
+    if isinstance(error, (TimeoutError, FuturesTimeout, Timeout)) or code == 28:
         return UpstreamTimeout(timeout_message or "上游请求超时，请稍后重试")
     if isinstance(error, (ssl.SSLError, SSLError)) or code in (35, 51, 53, 54, 58, 59, 60, 64, 66, 77, 80, 82, 83, 90, 91):
         return UpstreamFailure("tls", "与上游建立安全连接失败，请检查网络设置或稍后重试")
@@ -95,7 +96,7 @@ def classify_failure(error: Exception, *, timeout_message: str | None = None,
 
 def known_failure(error: Exception) -> UpstreamFailure | None:
     """HTTP entry points must not disguise local programming/DB errors as upstream."""
-    if isinstance(error, (UpstreamFailure, JmcomicException, TimeoutError,
+    if isinstance(error, (UpstreamFailure, JmcomicException, TimeoutError, FuturesTimeout,
                           Timeout, ConnectionError, RequestsConnectionError, HTTPError, ssl.SSLError)):
         return classify_failure(error)
     # curl_cffi does not derive from requests.exceptions.RequestException.

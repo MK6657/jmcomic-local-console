@@ -194,7 +194,8 @@ def test_single_chapter_album_whose_page_list_fails_is_retryable(client, online)
 def test_album_whose_chapters_really_have_no_pages_is_404(client, online, monkeypatch):
     _, fake = online
     fake.album = FakeAlbum([FakePhoto("501", 0)])
-    monkeypatch.setattr(fake, "check_photo", lambda photo: None)  # fetched fine, still no pages
+    # An explicitly fetched empty list is different from missing metadata (None).
+    monkeypatch.setattr(fake, "check_photo", lambda photo: setattr(photo, "page_arr", []))
     assert client.get("/api/online/501").status_code == 404
 
 
@@ -365,7 +366,9 @@ def download_job(client, tmp_path, monkeypatch):
         runs.append(job_id)
         monkeypatch.setattr(jm_service, "get_client", lambda shared=True: (fake, None))
         db.insert_job(job_id, album_id, "GIF album", [])
-        db.update_job(job_id, status="running")
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "running",
+        )
         progress_manager.create_tracker(job_id)
         try:
             jm_service.download_album_job(job_id, album_id, [])

@@ -396,7 +396,7 @@ def queue_ahead(conn=None) -> int:
 
 
 _ALLOWED_JOB_COLUMNS = frozenset({
-    "status", "album_id", "title", "selected_photo_ids", "total_pages", "done_pages",
+    "album_id", "title", "selected_photo_ids", "total_pages", "done_pages",
     "current_photo", "current_image", "output_path", "error_message", "completed_at", "updated_at",
 })
 
@@ -528,9 +528,10 @@ def claim_next_queued_job(excluded_album_ids=()) -> dict | None:
         conn.close()
 
 
-def transition_job_status(job_id: str, from_statuses: list[str], to_status: str, **extra) -> bool:
+def transition_job_status(job_id: str, from_statuses: list[str], to_status: str, *, conn=None, **extra) -> bool:
     """原子状态转换：仅在当前状态在 from_statuses 中时才更新到 to_status。
-    返回 True 表示转换成功，False 表示状态不匹配（可能已被其他操作修改）。"""
+    返回 True 表示转换成功，False 表示状态不匹配（可能已被其他操作修改）。
+    conn 传入时借用调用方的事务，不提交、不回滚、不关闭连接。"""
     # 禁止 extra 覆盖基础字段（status/updated_at 由函数自动管理）
     _BASE_JOB_COLUMNS = frozenset({"status", "updated_at"})
     for k in extra:
@@ -545,16 +546,19 @@ def transition_job_status(job_id: str, from_statuses: list[str], to_status: str,
         vals.append(v)
     vals.append(job_id)
     placeholders = ",".join("?" for _ in from_statuses)
-    conn = get_db()
+    own = conn is None
+    conn = get_db() if own else conn
     try:
         cur = conn.execute(
             f"UPDATE jobs SET {sets} WHERE job_id=? AND status IN ({placeholders})",
             vals + from_statuses,
         )
-        conn.commit()
+        if own:
+            conn.commit()
         return cur.rowcount > 0
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
 def _refresh_wishlist_after_job_delete(conn, album_ids):

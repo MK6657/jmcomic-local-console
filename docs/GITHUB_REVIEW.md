@@ -9,12 +9,12 @@
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
 cd jmcomic-backend-review
 git status --short --branch
-git show -s --format="%H %s" 7ae6ccb
-git diff --stat c310e3f..7ae6ccb
-git diff --name-only 7ae6ccb..HEAD
+git show -s --format="%H %s" HEAD
+git diff --stat c310e3f..HEAD
+git diff --stat e4a6057..HEAD
 ```
 
-产品代码固定为 `7ae6ccbaea7a91296df1e211e8920190235d0df7`，重构前基线为 `c310e3f584d077771324a02b8a611bddb1de404c`。本次分支在产品代码之后只追加审查文档，最后一条应仅列出文档路径。默认克隆保留提交历史，不加 `--depth 1`，才能直接比较完整重构。
+原审计产品代码为 `7ae6ccbaea7a91296df1e211e8920190235d0df7`，重构前基线为 `c310e3f584d077771324a02b8a611bddb1de404c`。2026-11-17起，本分支在审计交付版本 `e4a6057` 后继续加入[审计修复](AUDIT_FIXES.md)。复检当前版本用 `c310e3f..HEAD` 看完整重构，`e4a6057..HEAD` 看修复增量；需要复现原报告时明确使用旧提交。默认克隆保留提交历史，不加 `--depth 1`。
 
 没有 Git 时，在分支页面选择 Code → Download ZIP。ZIP 可用于阅读和执行测试，但不含提交历史，不能在其中直接运行上述 Git 比较命令；静态差异可阅读 [GitHub 固定版本比较](https://github.com/MK6657/jmcomic-local-console/compare/c310e3f...7ae6ccb)。
 
@@ -36,7 +36,7 @@ Get-ChildItem -LiteralPath '.\static\js' -Filter '*.js' -File | ForEach-Object {
 }
 ```
 
-每条命令均需成功退出。最近一次本机完整回归为 1571 passed、2 skipped；请记录你自己的结果及跳过原因。若环境为 Linux/macOS 或缺少 Windows 执行器，可以进行静态审查并运行适用的离线检查，但需明确哪些原生 Windows 路径、命名互斥锁、停机事件及 EXE 行为没有验证。不要把其他系统的结果写成 Windows 发行验收。
+每条命令均需成功退出。首批审计修复后的本机完整回归为 1688 passed、2 skipped；请记录你自己的结果及跳过原因。若环境为 Linux/macOS 或缺少 Windows 执行器，可以进行静态审查并运行适用的离线检查，但需明确哪些原生 Windows 路径、命名互斥锁、停机事件及 EXE 行为没有验证。不要把其他系统的结果写成 Windows 发行验收。
 
 不要逐个直接运行被默认收集排除的历史 `test_smoke.py`、`test_endpoints.py`、`test_e2e_integration.py` 等脚本，它们可能访问网络或修改数据。详见 [独立审查委托](INDEPENDENT_BACKEND_AUDIT.md)。
 
@@ -65,4 +65,4 @@ Git 源码不含便携 EXE、个人数据库、下载文件或本地虚拟环境
 
 ## 5. 交给其他模型的任务文本
 
-> 请克隆公开仓库 https://github.com/MK6657/jmcomic-local-console 的 codex/refactor-windows 分支。先读 AGENTS.md、docs/GITHUB_REVIEW.md 和 docs/INDEPENDENT_BACKEND_AUDIT.md。产品代码固定为 7ae6ccb，审查完整差异 c310e3f..7ae6ccb；后续只追加文档。独立检查资源索引、任务去重与队列恢复、图片传输超时、设置持久化、文件发布、数据迁移及备份恢复、后台调用和停机所有权。用独立环境和临时数据运行适用测试，保留默认离线边界，不访问真实上游、不自动下载、不修改产品代码。输出 Markdown 问题报告，包含严重性、准确文件行号、触发条件、实际影响、复现证据、修复建议及未验证范围。静态推断与实际复现分开记录；若只有 Linux 环境，明确 Windows 原生验收未完成。
+> 请克隆公开仓库 https://github.com/MK6657/jmcomic-local-console 的 codex/refactor-windows 分支并记录HEAD。先读 AGENTS.md、docs/GITHUB_REVIEW.md、docs/AUDIT_FIXES.md 和 docs/INDEPENDENT_BACKEND_AUDIT.md。审查当前完整差异 c310e3f..HEAD，尤其复核原审计交付版之后 e4a6057..HEAD 的修复。7ae6ccb是历史审计快照，不要用它代替最新版本。独立检查任务完成/取消的事务一致性、状态守卫、超时章节缓存、异常图片处理、HTTP错误及停机所有权。用独立环境和临时数据运行适用测试，保留默认离线边界，不访问真实上游、不自动下载、不修改产品代码。输出Markdown问题报告，包含严重性、准确文件行号、触发条件、影响、证据、修复建议及未验证范围；静态推断与实际复现分开，非Windows环境须明确原生验收未完成。

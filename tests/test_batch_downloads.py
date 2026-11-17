@@ -82,7 +82,10 @@ def _tree(root):
 def _job(job_id, album_id, status, output_path=None, photo_ids=(), created_at=None, title="t"):
     from core import database as db
     db.insert_job(job_id, album_id, title, list(photo_ids))
-    db.update_job(job_id, status=status, output_path=str(output_path) if output_path else None)
+    db.transition_job_status(
+        job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+        output_path=str(output_path) if output_path else None,
+    )
     if created_at:
         _sql("UPDATE jobs SET created_at=? WHERE job_id=?", (created_at, job_id))
 
@@ -238,7 +241,11 @@ def make_local(downloads):
         made.append(album_id)
         job_id = f"job_{album_id}_{len(made)}"
         db.insert_job(job_id, album_id, title, selected)
-        db.update_job(job_id, status="completed", output_path=str(folder), completed_at=datetime.now().isoformat())
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+            output_path=str(folder),
+            completed_at=datetime.now().isoformat(),
+        )
         if baseline:
             update_store.note_download_started(album_id, _episodes(chapters), had_local_content=False)
         if favourite:
@@ -381,7 +388,10 @@ def test_not_readable_dropped_silently(client, make_local, downloads, case):
             folder.mkdir()
             (folder / "Album3001_3001.cbz").write_bytes(b"this is not a zip file")
             db.insert_job("job_x", "3001", "Album3001", [])
-            db.update_job("job_x", status="completed", output_path=str(folder))
+            db.transition_job_status(
+                "job_x", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+                output_path=str(folder),
+            )
         update_store.note_download_started("3001", _episodes(["71", "72", "73"]), had_local_content=False)
     confirm_new("3001", ["71", "72", "73", "74"])
     _forget_local()

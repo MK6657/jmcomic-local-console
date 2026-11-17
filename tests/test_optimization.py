@@ -101,7 +101,10 @@ def test_library_page_uses_one_connection_and_four_queries(client, monkeypatch, 
     (output / "ch1" / "001.jpg").write_bytes(b"page")
     for n in range(25):
         db.insert_job(f"job_{n}", str(n + 1), "test", [])
-        db.update_job(f"job_{n}", status="completed", output_path=str(output))
+        db.transition_job_status(
+            f"job_{n}", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+            output_path=str(output),
+        )
     original = db.get_db
     statements = []
     def connect():

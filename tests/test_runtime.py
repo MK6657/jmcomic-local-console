@@ -439,7 +439,9 @@ def test_create_app_never_recovers_running_or_paused_jobs(client, monkeypatch):
     from core import database as db
     for job_id, status in (("runtime-running", "running"), ("runtime-paused", "paused")):
         db.insert_job(job_id, "123", "fixture", [])
-        db.update_job(job_id, status=status)
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+        )
     monkeypatch.setattr(app.job_manager, "recover_interrupted", lambda: pytest.fail("factory recovered tasks"))
     monkeypatch.setattr(app.job_manager, "start", lambda: pytest.fail("factory started jobs"))
     monkeypatch.setattr(app.scheduler, "start", lambda: pytest.fail("factory started scheduler"))

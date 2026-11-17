@@ -76,7 +76,10 @@ def listing(folder):
 def _job(job_id, album_id, output_path, status="completed"):
     from core import database as db
     db.insert_job(job_id, album_id, "t", [])
-    db.update_job(job_id, status=status, output_path=str(output_path) if output_path else None)
+    db.transition_job_status(
+        job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+        output_path=str(output_path) if output_path else None,
+    )
 
 
 @pytest.fixture
@@ -736,7 +739,9 @@ def download(client, downloads, monkeypatch):
                 failed_pages.append("下载失败")
         monkeypatch.setattr(jm_service, "_download_chapter", chapter)
         db.insert_job(job_id, "3001", "Name", photo_ids)
-        db.update_job(job_id, status="running")
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "running",
+        )
         progress_manager.create_tracker(job_id)
         try:
             jm_service.download_album_job(job_id, "3001", photo_ids)

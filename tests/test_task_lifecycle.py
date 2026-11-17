@@ -11,7 +11,9 @@ def _job(job_id, album_id="123", status="queued"):
     from core import database as db
     db.insert_job(job_id, album_id, "Lifecycle", ["71"])
     if status != "queued":
-        db.update_job(job_id, status=status)
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+        )
 
 
 def test_recovery_preserves_pauses_terminal_states_and_owned_executors(client):

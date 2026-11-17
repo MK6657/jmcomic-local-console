@@ -56,8 +56,11 @@ def _daily(now: datetime) -> datetime:
 
 
 @contextmanager
-def _tx():
-    """一个 BEGIN IMMEDIATE 事务（写锁一开始就拿到，读到的就是提交时的状态）。"""
+def _tx(conn=None):
+    """借用调用方事务，或创建并管理一个 BEGIN IMMEDIATE 事务。"""
+    if conn is not None:
+        yield conn
+        return
     conn = db.get_db()
     conn.isolation_level = None
     try:
@@ -176,15 +179,16 @@ def note_download_started(album_id: str, episodes, had_local_content: bool,
         return "kept"
 
 
-def absorb_downloaded(album_id: str, photo_ids, now: datetime | None = None) -> int:
+def absorb_downloaded(album_id: str, photo_ids, now: datetime | None = None, *, conn=None) -> int:
     """下载任务完成（只有 completed）：这次真正下载的章节并入基线，从待下载的新章节里去掉。
-    没有这一行或还没有基线时什么都不做。返回从新章节里去掉的话数。"""
+    没有这一行或还没有基线时什么都不做。返回从新章节里去掉的话数。
+    conn 传入时借用调用方的事务，不提交、不回滚、不关闭连接。"""
     album_id = str(album_id)
     done = [str(p) for p in dict.fromkeys(photo_ids) if validate_numeric(str(p))]
     if not done:
         return 0
     stamp = _iso(now or datetime.now())
-    with _tx() as conn:
+    with _tx(conn) as conn:
         row = conn.execute(
             "SELECT baseline_ids, new_chapters, removed_ids, gone_ids FROM album_update_checks WHERE album_id=?",
             (album_id,),

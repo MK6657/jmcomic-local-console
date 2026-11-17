@@ -239,13 +239,17 @@ def download(client, downloads, monkeypatch):
             if outcome == "failed":
                 failed_pages.append("下载失败")
             elif outcome == "canceled":
-                db.update_job(job_id, status="canceled")
+                db.transition_job_status(
+                    job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "canceled",
+                )
         monkeypatch.setattr(jm_service, "_download_chapter", chapter)
         if insert:
             db.insert_job(job_id, "3001", "Name", photo_ids)
         else:
             assert db.get_job(job_id)["status"] == "queued"
-        db.update_job(job_id, status="running")
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "running",
+        )
         progress_manager.create_tracker(job_id)
         try:
             jm_service.download_album_job(job_id, "3001", photo_ids)
@@ -288,7 +292,11 @@ def local_album(downloads):
         made.append(album_id)
         job_id = f"job_{album_id}_{len(made)}"
         db.insert_job(job_id, album_id, title, selected)
-        db.update_job(job_id, status="completed", output_path=str(folder), completed_at=datetime.now().isoformat())
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+            output_path=str(folder),
+            completed_at=datetime.now().isoformat(),
+        )
         if baseline:
             update_store.note_download_started(album_id, _episodes(chapters), had_local_content=False)
         _forget_local()
@@ -525,16 +533,25 @@ def test_redownload_after_files_deleted_resets_baseline(client, download, downlo
     assert _state(client)["update"]["state"] == "never"
 
 
-def test_baseline_hook_failure_never_fails_download(client, download, monkeypatch):
+def test_initial_baseline_observation_failure_does_not_fail_download(client, download, monkeypatch):
     from core import update_store
 
     def boom(*args, **kwargs):
         raise RuntimeError("hook exploded")
     monkeypatch.setattr(update_store, "note_download_started", boom)
-    monkeypatch.setattr(update_store, "absorb_downloaded", boom)
     assert download("ja", ["71"]) == "completed"
     assert download("jb", ["72"], outcome="failed", written=1) == "failed"   # a failed job still fails normally
     assert _row() is None
+
+
+def test_final_baseline_failure_rolls_back_completion(client, download, monkeypatch):
+    from core import database as db, update_store
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("final baseline write failed")
+    monkeypatch.setattr(update_store, "absorb_downloaded", boom)
+    assert download("ja", ["71"]) == "failed"
+    assert not db.resource_records(["3001"])
 
 
 def test_download_observation_never_adds_new_ids(client, download):
@@ -813,7 +830,10 @@ def test_non_local_albums_skipped_without_request(client, local_album, downloads
             with zipfile.ZipFile(archive, "w") as zf:
                 zf.writestr("ComicInfo.xml", "<ComicInfo/>")
         db.insert_job("job_x", "3001", "Album3001", [])
-        db.update_job("job_x", status="completed", output_path=str(folder))
+        db.transition_job_status(
+            "job_x", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+            output_path=str(folder),
+        )
         update_store.note_download_started("3001", _episodes(["71", "72"]), had_local_content=False)
     _forget_local()
     upstream.set("3001", ["71", "72", "73", "74"])
@@ -1329,7 +1349,9 @@ def test_defers_while_download_running(client, local_album, upstream, checker):
     local_album()
     upstream.set("3001", ["71", "72", "73"])
     db.insert_job("job_running", "3999", "Other", [])
-    db.update_job("job_running", status="running")
+    db.transition_job_status(
+        "job_running", ["queued", "running", "paused", "completed", "failed", "canceled"], "running",
+    )
     _due("3001", clock=checker)
     assert update_checker.tick() == update_checker.DEFER_RUNNING
     assert update_checker.runtime_status()["phase"] == "deferred"
@@ -1913,7 +1935,11 @@ def test_a_partial_job_never_joins_the_root_itself(client, download, downloads):
     other.mkdir(parents=True)
     (other / "00001.webp").write_bytes(b"page")                           # the root has pages somewhere below
     db.insert_job("j0", "3001", "Name", ["71"])                          # a hand-edited or legacy row
-    db.update_job("j0", status="completed", output_path=str(downloads), completed_at=datetime.now().isoformat())
+    db.transition_job_status(
+        "j0", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        output_path=str(downloads),
+        completed_at=datetime.now().isoformat(),
+    )
     _forget_local()
     assert download("jb", ["72"]) == "completed"
     assert db.get_job("jb")["output_path"] == str(downloads / "Name_3001")

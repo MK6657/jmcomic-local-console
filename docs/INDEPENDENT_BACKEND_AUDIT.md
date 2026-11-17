@@ -1,6 +1,8 @@
 # JMComic 后端重构独立审查委托
 
-本文可直接交给另一位开发者或AI审查代理。请先独立审查并提交问题报告，默认不修改代码、不自动修复、不部署、不切换日常实例。当前开发已停在用户复检节点。
+本文可直接交给另一位开发者或AI审查代理。请先独立审查并提交问题报告，默认不修改代码、不自动修复、不部署、不切换日常实例。
+
+**2026-11-17更新：原审计后已获授权开始修复。** `7ae6ccb` 是历史产品快照，`e4a6057` 是原审计交付版；当前分支已继续加入产品修复。最新审查范围及已修/待修项以 [GitHub复检入口](GITHUB_REVIEW.md) 和 [审计修复记录](AUDIT_FIXES.md) 为准，记录当前HEAD，并使用 `c310e3f..HEAD` 与 `e4a6057..HEAD`。下文固定提交、原产物和原验证数量保留作为历史审计证据，不应被理解为最新版本承诺。
 
 ## 1. 审查哪一个项目
 
@@ -8,23 +10,24 @@
 |---|---|
 | 本机待审源码 | `C:\Users\ggy\.codex\worktrees\windows-backend-refactor\jmcomic-local-console` |
 | 开发分支 | `codex/refactor-windows` |
-| **待审产品代码提交** | `7ae6ccbaea7a91296df1e211e8920190235d0df7`，简称 `7ae6ccb` |
+| 原审计产品代码提交 | `7ae6ccbaea7a91296df1e211e8920190235d0df7`，简称 `7ae6ccb` |
+| 当前待审代码 | 克隆后记录 `git rev-parse HEAD`；首批修复范围见 `e4a6057..HEAD` |
 | 重构前基线 | `c310e3f584d077771324a02b8a611bddb1de404c`，简称 `c310e3f` |
 | 完整审查差异 | `c310e3f..7ae6ccb` |
 | 最后一批收尾差异 | `c64a1bc..7ae6ccb`；只看这一段会遗漏前面的重构 |
 | 原日常项目，**不是待审工作区** | `D:\jmcomic-local-console`，原 `main` 分支 |
 | GitHub公开分支 | `https://github.com/MK6657/jmcomic-local-console/tree/codex/refactor-windows` |
 
-本次通过公开仓库的独立分支交付，`main` 保持重构前版本。**必须显式克隆 `codex/refactor-windows`；只下载GitHub默认分支，或在本机原日常项目 `D:\jmcomic-local-console` 审查，会拿到旧代码。** 后续文档提交不改变产品代码审查目标 `7ae6ccb`。本机绝对路径仅用于原开发机定位，异机请使用自己的克隆目录，详见 [GitHub克隆与测试指南](GITHUB_REVIEW.md)。
+本次通过公开仓库的独立分支交付，`main` 保持重构前版本。**必须显式克隆 `codex/refactor-windows`；只下载GitHub默认分支，或在本机原日常项目 `D:\jmcomic-local-console` 审查，会拿到旧代码。** 需要复现原审计结论时使用 `7ae6ccb`；复核修复时使用当前HEAD。本机绝对路径仅用于原开发机定位，异机请使用自己的克隆目录，详见 [GitHub克隆与测试指南](GITHUB_REVIEW.md)。
 
 ```bash
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
 cd jmcomic-backend-review
-git show -s --format="%H %s" 7ae6ccb
-git diff --name-only 7ae6ccb..HEAD
+git show -s --format="%H %s" HEAD
+git diff --stat e4a6057..HEAD
 ```
 
-最后一条在本次交付快照中只应列出审查或使用文档；发现其他变化时，先明确实际审查范围。
+最后一条展示原审计交付之后的修复增量。不要再假定 `7ae6ccb..HEAD` 只有文档变更。
 
 本机先核实位置和版本，不切分支、不重置工作区：
 
@@ -226,6 +229,8 @@ b51a0d0354d261d296840f72e9d8b3d12450e40ba3ca5af4e9e8c4fc1c04098b
 
 没有发现缺陷时直说“在本次范围内未发现阻塞问题”，并列出覆盖范围和剩余不确定性；不要表述为程序绝对无缺陷或真实上游永久可用。
 
-## 10. 可直接转发给审查代理的简短任务
+## 10. 原审计快照的简短任务（历史）
+
+审核最新修复时，请使用 [GitHub复检指南](GITHUB_REVIEW.md) 第5节的任务文本；下面仅用于复现原审计范围。
 
 > 请从公开仓库 `https://github.com/MK6657/jmcomic-local-console` 显式克隆 `codex/refactor-windows` 分支，先阅读 `docs/GITHUB_REVIEW.md`、这份 `INDEPENDENT_BACKEND_AUDIT.md` 和项目 `AGENTS.md`，独立审查后端重构。产品代码目标固定为 `7ae6ccb`，完整差异为 `c310e3f..7ae6ccb`，后续仅为文档提交；不能只审GitHub main。默认只读审查；必要验证使用临时实例，保留pytest的socket/libcurl阻断，不操作日常实例、不自动真实下载、不修改/提交/部署。完整运行验收使用Windows，其他系统的验证边界须如实说明。重点寻找数据安全、队列卡死、设置丢失、后台调用与客户端所有权、停机竞态、迁移/备份恢复及测试有效性问题。输出按严重性排序的Markdown审查报告，附准确位置、触发条件、影响与证据，区分真实缺陷、建议和未验证范围。

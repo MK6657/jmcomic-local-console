@@ -17,7 +17,9 @@ def job(client, tmp_path, monkeypatch):
     monkeypatch.setattr(path_guard, "DOWNLOAD_ROOT", folder)
     monkeypatch.setattr(jm_service, "DOWNLOAD_ROOT", folder)
     db.insert_job("job_shutdown_test", "123", "Shutdown fixture", [])
-    db.update_job("job_shutdown_test", status="running")
+    db.transition_job_status(
+        "job_shutdown_test", ["queued", "running", "paused", "completed", "failed", "canceled"], "running",
+    )
     tracker = progress_manager.create_tracker("job_shutdown_test")
     yield folder, tracker
     progress_manager.remove_tracker("job_shutdown_test")
@@ -88,7 +90,9 @@ def test_stop_during_image_preserves_old_page_without_retry_or_failure(job, rais
 def test_shutdown_wakes_paused_wait_without_canceled_event(job):
     from core import database as db, jm_service
     _, tracker = job
-    db.update_job("job_shutdown_test", status="paused")
+    db.transition_job_status(
+        "job_shutdown_test", ["queued", "running", "paused", "completed", "failed", "canceled"], "paused",
+    )
     stop, resume, done = threading.Event(), threading.Event(), threading.Event()
     tracker.push = Mock()
     result = []

@@ -984,12 +984,15 @@ def test_forged_line_break_in_request_path_stays_one_viewer_entry(client):
 
 def test_request_log_skips_static_and_health(client):
     from core import logger as lm
+    before = len(lm.LOG_FILE.read_text(encoding="utf-8"))
     assert client.application.logger.propagate is False
     assert client.get("/static/css/style.css").status_code == 200
     assert client.get("/api/system/health").status_code == 200
     missing = f"/api/{_letters()}"
     assert client.get(missing).status_code == 404
-    text = lm.LOG_FILE.read_text(encoding="utf-8")
+    # Other tests intentionally exercise forbidden static requests, which must
+    # be logged. Inspect only the successful requests made by this test.
+    text = lm.LOG_FILE.read_text(encoding="utf-8")[before:]
     assert "HTTP GET /static/" not in text
     assert "HTTP GET /api/system/health" not in text
     assert f"[INFO] [{lm.APP_LOGGER_NAME}] HTTP GET {missing} → 404 NOT FOUND (" in text

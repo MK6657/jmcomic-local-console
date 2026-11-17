@@ -8,7 +8,8 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import copy
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from .storage import staged_file
 from . import image_download
 from .transfer import download_budget, DownloadInterrupted
 from .local_availability import forget as forget_local_state, has_local_pages, is_readable, readable_folder
+from .task_commands import finish_download
 
 
 # ── 全局复用客户端（搜索/详情用，避免每次新建 client + 连接池）──
@@ -232,7 +234,6 @@ def _should_stop(job_id: str, album_id: str, tracker, pause_ev, stop_event=None)
     job = db.get_job(job_id)
     if job is None:
         log.warning(f"下载中的任务已被删除 job_id={job_id}")
-        db.update_wishlist_download_status(album_id, "none")
         if tracker:
             tracker.push("progress", {
                 "job_id": job_id, "status": "canceled",
@@ -241,7 +242,6 @@ def _should_stop(job_id: str, album_id: str, tracker, pause_ev, stop_event=None)
         return True
     if job["status"] == "canceled":
         log.info(f"下载任务已取消 job_id={job_id}")
-        db.update_wishlist_download_status(album_id, "none")
         if tracker:
             tracker.push("progress", {
                 "job_id": job_id, "status": "canceled",
@@ -261,7 +261,6 @@ def _should_stop(job_id: str, album_id: str, tracker, pause_ev, stop_event=None)
         if stop_event is not None and stop_event.is_set():
             return True
         if job is None or job["status"] == "canceled":
-            db.update_wishlist_download_status(album_id, "none")
             if tracker:
                 tracker.push("progress", {
                     "job_id": job_id, "status": "canceled",
@@ -293,20 +292,19 @@ def _download_image_single_attempt(
 
     gif = image_is_gif(img)
     skip = get_settings().get("skip_existing", "true") == "true"
-    # refetch_gif：章节目录是旧版本下载的（GIF 页被切片/只剩第一帧），GIF 页不能按“已存在”跳过
-    if skip and pass_num == 1 and not (gif and refetch_gif) and _valid_image(img_path):
-        with lock:
-            done_pages[0] += 1
-        if tracker:
-            tracker.push("progress", {
-                "job_id": job_id, "status": "running",
-                "done_pages": done_pages[0] if done_pages else 0,
-                "total_pages": total_pages or 0,
-                "progress": round((done_pages[0] if done_pages else 0) / (total_pages or 1) * 100, 1),
-            })
-        return
-
     try:
+        # Existing files need the same error boundary as downloaded files. An
+        # invalid/bomb image must be replaced or recorded, never abort a chapter.
+        if skip and pass_num == 1 and not (gif and refetch_gif) and _valid_image(img_path):
+            with lock:
+                done_pages[0] += 1
+            if tracker:
+                tracker.push("progress", {
+                    "job_id": job_id, "status": "running",
+                    "done_pages": done_pages[0], "total_pages": total_pages or 0,
+                    "progress": round(done_pages[0] / (total_pages or 1) * 100, 1),
+                })
+            return
         # SDK/Pillow need the real suffix. Staging stays on this disk but outside
         # every reader/packer scan, including when the process is interrupted.
         with staged_file(img_path) as staged:
@@ -388,12 +386,12 @@ def _save_gif_as_webp(gif_path, webp_path) -> None:
 
 
 def _valid_image(path):
+    from PIL import Image
     try:
-        from PIL import Image
         with Image.open(path) as image:
             image.verify()
         return True
-    except (OSError, ValueError, SyntaxError):
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
         return False
 
 
@@ -487,7 +485,7 @@ def search_albums(keyword: str, page: int = 1, page_size: int = 20, sort: str = 
 def check_album_photos(client, album, timeout: float = 15, failed: list | None = None) -> list:
     """并行补全各章节的图片列表（page_arr），避免逐章串行 HTTP 请求。
 
-    check_photo 原地更新 photo；失败或超时的章节保留原样（page_arr 为空，页数按 0 计）。
+    SDK只更新工作副本；超时返回的对象不会被晚到的线程修改。
     传入 failed 列表时，把这些没取到的章节追加进去（调用方据此区分“网络失败”和“确实没有页面”）。
     详情页与在线阅读共用。
     """
@@ -497,29 +495,44 @@ def check_album_photos(client, album, timeout: float = 15, failed: list | None =
         if getattr(photo, 'from_album', None) is None:
             photo.from_album = album
     # 已有 page_arr 的章节直接跳过 check
-    pending = [photo for photo in photo_list if not getattr(photo, 'page_arr', None)]
+    pending = [(index, photo) for index, photo in enumerate(photo_list)
+               if not getattr(photo, 'page_arr', None)]
     if not pending:
         return photo_list
     # 独立线程池 + 手动 shutdown(wait=False)：
     # 不能用 with 语法 —— __exit__ 会 shutdown(wait=True)，
     # 阻塞等待挂起的 check_photo，让超时保护形同虚设。
     check_pool = ThreadPoolExecutor(max_workers=min(len(pending), 10))
-    fut_map = {_submit_client_call(check_pool, client, client.check_photo, photo): photo for photo in pending}
+    fut_map, completed = {}, set()
     try:
+        for index, photo in pending:
+            working = copy(photo)
+            if isinstance(getattr(working, "page_arr", None), list):
+                working.page_arr = list(working.page_arr)
+            future = _submit_client_call(check_pool, client, client.check_photo, working)
+            fut_map[future] = (index, working)
         for fut in as_completed(fut_map, timeout=timeout):
+            index, working = fut_map[fut]
             try:
                 fut.result()
             except Exception as e:
-                log.warning(f"获取 photo 详情失败 photo_id={fut_map[fut].photo_id} error={type(e).__name__}: {e}")
-    except TimeoutError:
+                log.warning(f"获取 photo 详情失败 photo_id={working.photo_id} error={type(e).__name__}: {e}")
+            else:
+                if getattr(working, "page_arr", None) is not None:
+                    photo_list[index] = working
+                    completed.add(index)
+                else:
+                    log.warning(f"获取 photo 详情未返回图片列表 photo_id={working.photo_id}")
+    except FuturesTimeout:
         unfinished = sum(1 for fut in fut_map if not fut.done())
         log.warning(f"check_photo 超时（{timeout}s），album_id={getattr(album, 'album_id', '?')}，"
                     f"已跳过 {unfinished} 个未完成章节")
     finally:
         check_pool.shutdown(wait=False, cancel_futures=True)
     if failed is not None:
-        failed.extend(photo for fut, photo in fut_map.items()
-                      if not fut.done() or fut.cancelled() or fut.exception() is not None)
+        # Use the outcome observed before the deadline, not a second Future.done
+        # check that could race a late completion and mislabel an empty result.
+        failed.extend(photo_list[index] for index, _ in pending if index not in completed)
     return photo_list
 
 
@@ -545,13 +558,17 @@ def get_album_detail(album_id: str) -> dict:
             client.get_album_detail, album_id,
         )
 
-        photos = []
-        for p in check_album_photos(client, album):
-            page_count = len(p) if hasattr(p, '__len__') and hasattr(p, 'page_arr') and p.page_arr else 0
+        photos, failed = [], []
+        checked = check_album_photos(client, album, failed=failed)
+        unknown = {id(photo) for photo in failed}
+        for p in checked:
+            known = id(p) not in unknown
+            page_count = len(p.page_arr or ()) if known else None
             photos.append({
                 "photo_id": str(p.photo_id),
                 "title": _safe_str(p.name) if hasattr(p, "name") and p.name else "-",
                 "page_count": page_count,
+                "page_count_known": known,
             })
 
         return {
@@ -567,6 +584,7 @@ def get_album_detail(album_id: str) -> dict:
             "cover": JmcomicText.get_album_cover_url(album_id),
             "photos": photos,
             "chapter_count": len(album),
+            "details_complete": not failed,
         }
     finally:
         close_client(client)
@@ -600,6 +618,23 @@ def forget_album_detail(album_id: str) -> None:
         db.delete_cached_album_detail(album_id)
 
 
+def _detail_is_complete(data) -> bool:
+    """Do not reuse unknown counts, including zeros cached by older releases."""
+    if not isinstance(data, dict) or data.get("details_complete") is False:
+        return False
+    photos = data.get("photos", [])
+    if not isinstance(photos, list):
+        return False
+    for photo in photos:
+        if not isinstance(photo, dict):
+            return False
+        count = photo.get("page_count")
+        if (isinstance(count, bool) or not isinstance(count, int) or count < 0
+                or (count == 0 and photo.get("page_count_known") is not True)):
+            return False
+    return True
+
+
 def get_album_detail_cached(album_id: str, ttl: int = 3600) -> dict:
     """Bounded two-tier cache with request coalescing and isolated return values."""
     from copy import deepcopy
@@ -611,10 +646,16 @@ def get_album_detail_cached(album_id: str, ttl: int = 3600) -> dict:
         with _detail_cache_lock:
             generation = _detail_cache_generation
             cached = _detail_cache.get(key)
-            if cached and ttl > 0 and now - cached["ts"] < min(300, ttl):
+            if (cached and _detail_is_complete(cached["data"]) and ttl > 0
+                    and now - cached["ts"] < min(300, ttl)):
                 _detail_cache.move_to_end(key)
                 return deepcopy(cached["data"])
         stored = db.get_cached_album_detail(album_id, ttl=ttl) if ttl > 0 else None
+        if stored and not _detail_is_complete(stored["detail"]):
+            with _detail_cache_lock:
+                _detail_cache.pop(key, None)
+                db.delete_cached_album_detail(album_id)
+            stored = None
         if stored:
             data = stored["detail"]
             if stored["cover_cdn_url"]:
@@ -624,7 +665,7 @@ def get_album_detail_cached(album_id: str, ttl: int = 3600) -> dict:
             data = get_album_detail(album_id)
             timestamp = time.time()
         with _detail_cache_lock:
-            if generation == _detail_cache_generation:
+            if generation == _detail_cache_generation and _detail_is_complete(data):
                 if stored is None:
                     db.set_cached_album_detail(album_id, json.dumps(data, ensure_ascii=False), data.get("cover", ""))
                 _detail_cache[key] = {"data": deepcopy(data), "ts": timestamp}
@@ -896,10 +937,12 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str], *, stop
     new content. In-flight SDK calls keep their transport until they actually end;
     the manager reports an undrained shutdown rather than closing it early.
     """
+    if stop_event is not None and stop_event.is_set():
+        return
     tracker = progress_manager.get_tracker(job_id)
     if not tracker:
         log.error(f"下载任务无法获取 tracker，标记为失败 job_id={job_id}")
-        db.update_job(job_id, status="failed", error_message="tracker 不可用，任务初始化失败")
+        finish_download(job_id, "failed", error_message="tracker 不可用，任务初始化失败")
         return
 
     failed_pages = []
@@ -1186,13 +1229,11 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str], *, stop
             if len(failed_pages) > 5:
                 err_all += f" ...（共 {len(failed_pages)} 页失败）"
             log.warning(f"下载任务部分失败 job_id={job_id} failed_pages={len(failed_pages)} total_pages={total_pages}")
-            ok = db.transition_job_status(job_id, ["running", "paused"], "failed",
-                                     done_pages=done_val,
-                                     error_message=err_all, completed_at=now)
+            ok = finish_download(job_id, "failed", done_pages=done_val,
+                                 error_message=err_all, completed_at=now)
             if not ok:
                 log.warning(f"transition_job_status 失败，状态可能已被更改 job_id={job_id}")
             if ok:
-                db.update_wishlist_download_status(album_id, "failed")
                 tracker.push("failed", {
                     "job_id": job_id, "status": "failed",
                     "error_message": err_all,
@@ -1200,17 +1241,9 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str], *, stop
                 })
         else:
             log.info(f"下载任务完成 job_id={job_id} total_pages={total_pages} output_path={output_path}")
-            ok = db.transition_job_status(job_id, ["running", "paused"], "completed",
-                                     done_pages=done_val, completed_at=now)
-            if ok:
-                db.update_wishlist_download_status(album_id, "completed")
-                # 这次真正下载完成的章节并入检查新章节的基线，不再算新章节（失败 / 取消的任务什么都不并入）。
-                # 记录失败只写日志，绝不影响下载
-                try:
-                    update_store.absorb_downloaded(album_id, [str(p.photo_id) for p in photos_to_download])
-                except Exception as e:
-                    log.warning(f"更新检查新章节的基线失败（不影响下载）album_id={album_id} error={e}")
-            else:
+            ok = finish_download(job_id, "completed", done_pages=done_val, completed_at=now,
+                                 photo_ids=[str(p.photo_id) for p in photos_to_download])
+            if not ok:
                 log.warning(f"transition_job_status 失败，状态可能已被取消 job_id={job_id}")
             if ok:
                 tracker.push("completed", {
@@ -1242,16 +1275,12 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str], *, stop
         if failed_pages:
             err_msg = "; ".join(failed_pages[:3]) + " | " + err_msg
         try:
-            changed = db.transition_job_status(job_id, ["running", "paused"], "failed", error_message=err_msg[:1000])
+            changed = finish_download(job_id, "failed", error_message=err_msg[:1000])
         except Exception as db_err:
             log.error(f"更新失败状态到数据库出错: {db_err}")
             changed = False
         if not changed:
             return
-        try:
-            db.update_wishlist_download_status(album_id, "failed")
-        except Exception as wl_err:
-            log.error(f"更新 wishlist 状态出错: {wl_err}")
         try:
             tracker_ref = progress_manager.get_tracker(job_id)
             if tracker_ref:
@@ -1263,9 +1292,14 @@ def download_album_job(job_id: str, album_id: str, photo_ids: list[str], *, stop
         except Exception as tr_err:
             log.error(f"推送失败事件到 tracker 出错: {tr_err}")
     finally:
-        close_client(client)
-        for folder in written_dirs:
-            forget_local_state(folder)
+        try:
+            close_client(client)
+        finally:
+            for folder in written_dirs:
+                forget_local_state(folder)
+            # If even failure persistence was unavailable, end the stream
+            # without inventing a terminal DB state. Recovery owns that row.
+            tracker.close()
 
 
 def _safe_str(val: Any) -> str:

@@ -21,8 +21,9 @@ git clone --branch codex/refactor-windows --single-branch https://github.com/MK6
 cd jmcomic-backend-review
 ```
 
-The frozen product code is commit `7ae6ccb`; subsequent review-documentation commits
-do not change the application. Use Windows for the complete runtime acceptance checks.
+The original audit snapshot is commit `7ae6ccb`; the branch now also contains the
+first [audit corrections](docs/AUDIT_FIXES.md). Record the cloned HEAD when reviewing
+the current version. Use Windows for the complete runtime acceptance checks.
 
 ## Requirements
 

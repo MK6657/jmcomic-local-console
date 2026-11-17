@@ -30,7 +30,10 @@ def _album(folder):
 def _job(job_id, album_id, status, output_path=None, created_at=None):
     from core import database as db
     db.insert_job(job_id, album_id, "t", [])
-    db.update_job(job_id, status=status, output_path=str(output_path) if output_path else None)
+    db.transition_job_status(
+        job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+        output_path=str(output_path) if output_path else None,
+    )
     if created_at:
         _sql("UPDATE jobs SET created_at=? WHERE job_id=?", (created_at, job_id))
 

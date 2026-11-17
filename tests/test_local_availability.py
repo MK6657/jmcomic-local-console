@@ -23,7 +23,10 @@ def downloads(client, tmp_path, monkeypatch):
 def _job(job_id, album_id, status, output_path):
     from core import database as db
     db.insert_job(job_id, album_id, "t", [])
-    db.update_job(job_id, status=status, output_path=str(output_path) if output_path else None)
+    db.transition_job_status(
+        job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+        output_path=str(output_path) if output_path else None,
+    )
 
 
 def _album(folder, *pages):
@@ -239,7 +242,10 @@ def test_retry_redownloads_a_completed_job_whose_folder_is_gone(client, download
     from core import database as db
     db.add_wishlist("901", "Title", "", "")
     db.insert_job("job_done", "901", "Title", ["11", "12"])
-    db.update_job("job_done", status="completed", output_path=str(downloads / "gone"))
+    db.transition_job_status(
+        "job_done", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        output_path=str(downloads / "gone"),
+    )
     assert client.post("/api/jobs/job_done/open-folder").status_code == 404
     response = client.post("/api/jobs/job_done/retry")
     assert response.status_code == 201 and response.get_json()["status"] == "ok"
@@ -334,7 +340,9 @@ def download(client, downloads, monkeypatch):
         monkeypatch.setattr(jm_service, "_download_chapter", chapter)
         if not db.get_job(job_id):
             db.insert_job(job_id, album_id, "Name", [])
-        db.update_job(job_id, status="running")
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "running",
+        )
         progress_manager.create_tracker(job_id)
         try:
             jm_service.download_album_job(job_id, album_id, [])

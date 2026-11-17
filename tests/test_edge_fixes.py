@@ -36,7 +36,9 @@ def test_concurrent_chapters_never_share_images(client, output_dir, monkeypatch,
     from core import jm_service as service, database as db
     photos = [Photo(names[0], "123"), Photo(names[1], "456")]
     db.insert_job("job_chapters", "999", "test", [])
-    db.update_job("job_chapters", status="running")
+    db.transition_job_status(
+        "job_chapters", ["queued", "running", "paused", "completed", "failed", "canceled"], "running",
+    )
     def image_download(*args):
         photo, destination = args[4], args[5]
         color = "red" if photo.photo_id == "123" else "blue"
@@ -83,10 +85,15 @@ def test_bulk_cleanup_recalculates_from_remaining_jobs(client, output_dir, remov
     db.update_wishlist_download_status("456", "queued")
     old_status = "failed" if removed == "finished" else removed
     db.insert_job("job_old", "123", "old", [])
-    db.update_job("job_old", status=old_status, output_path=str(output_dir))
+    db.transition_job_status(
+        "job_old", ["queued", "running", "paused", "completed", "failed", "canceled"], old_status,
+        output_path=str(output_dir),
+    )
     if remaining:
         db.insert_job("job_keep", "123", "current", [])
-        db.update_job("job_keep", status=remaining)
+        db.transition_job_status(
+            "job_keep", ["queued", "running", "paused", "completed", "failed", "canceled"], remaining,
+        )
     note = output_dir / "keep.txt"
     note.write_text("user file", encoding="utf-8")
     response = client.post("/api/jobs/clear/" + removed)
@@ -115,7 +122,9 @@ def test_cleanup_rolls_back_if_bookmark_update_fails(client, monkeypatch):
     db.add_wishlist("123", "test", "author", "")
     db.update_wishlist_download_status("123", "failed")
     db.insert_job("job_old", "123", "old", [])
-    db.update_job("job_old", status="failed")
+    db.transition_job_status(
+        "job_old", ["queued", "running", "paused", "completed", "failed", "canceled"], "failed",
+    )
     monkeypatch.setattr(db, "_refresh_wishlist_after_job_delete", Mock(side_effect=RuntimeError("rollback")))
     with pytest.raises(RuntimeError):
         db.clear_jobs_by_status("failed")
@@ -126,7 +135,10 @@ def test_cleanup_rolls_back_if_bookmark_update_fails(client, monkeypatch):
 def setup_export(output_dir):
     from core import database as db
     db.insert_job("job_pdf", "123", "pdf", [])
-    db.update_job("job_pdf", status="completed", output_path=str(output_dir))
+    db.transition_job_status(
+        "job_pdf", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        output_path=str(output_dir),
+    )
     Image.new("RGB", (8, 8), "white").save(output_dir / "good.png")
 
 

@@ -22,7 +22,10 @@ def source(client, tmp_path, monkeypatch):
     db.add_wishlist("123", "Fixture", "Author", "")
     db.add_album_tag("123", "keep-tag", source="user")
     db.insert_job("job_backup", "123", "Fixture", ["456"])
-    db.update_job("job_backup", status="completed", output_path=str(album))
+    db.transition_job_status(
+        "job_backup", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        output_path=str(album),
+    )
     db.set_setting("proxy", "http://private-user:private-password@proxy.invalid:9876")
     monkeypatch.setattr(path_utils, "get_download_root", lambda: folder)
     monkeypatch.setattr(path_utils, "get_backup_dir", lambda: tmp_path / "backups")

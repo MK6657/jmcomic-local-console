@@ -12,7 +12,7 @@ from .progress import progress_manager
 from .jm_service import download_album_job
 from .task_commands import (
     RETRYABLE_STATUSES, EnqueueResult, TaskCommandError, enqueue_download, retry_download,
-    recover_interrupted, requeue_interrupted, resume_download,
+    recover_interrupted, requeue_interrupted, resume_download, finish_download, cancel_download,
 )
 
 
@@ -160,14 +160,14 @@ class JobManager:
             except Exception:
                 # 写成 job_id=…：去重只保留 *_id= 形式的编号，不同任务的这条警告才不会被合并掉
                 log.warning(f"selected_photo_ids 解析失败，标记为 failed job_id={job_id} album_id={album_id}")
-                db.transition_job_status(job_id, ["running"], "failed")
+                finish_download(job_id, "failed")
                 return
             title = next_job.get("title", "")
 
             tracker = progress_manager.create_tracker(job_id)
             if not tracker:
                 # tracker 创建失败（极罕见），标记为 failed 避免无限重试
-                db.transition_job_status(job_id, ["running"], "failed")
+                finish_download(job_id, "failed")
                 return
 
             thread = threading.Thread(
@@ -192,7 +192,7 @@ class JobManager:
             except Exception:
                 self._running_jobs.pop(job_id, None)
                 self._running_albums.pop(job_id, None)
-                db.transition_job_status(job_id, ["running"], "failed", error_message="下载线程启动失败")
+                finish_download(job_id, "failed", error_message="下载线程启动失败")
                 progress_manager.remove_tracker(job_id)
                 raise
         log.info(f"开始执行任务 job_id={job_id} album_id={album_id} photo_count={len(photo_ids)}")
@@ -210,10 +210,7 @@ class JobManager:
             log.error(f"任务执行异常 job_id={job_id} error={e}")
             if self._stop_event.is_set():
                 return
-            changed = db.transition_job_status(job_id, ["running", "paused"], "failed", error_message=str(e)[:1000])
-            # 确保 wishlist 状态同步
-            if changed:
-                db.update_wishlist_download_status(album_id, "failed")
+            changed = finish_download(job_id, "failed", error_message=str(e)[:1000])
             tracker = progress_manager.get_tracker(job_id)
             if tracker and changed:
                 tracker.push("failed", {
@@ -249,39 +246,10 @@ class JobManager:
         - queued 立即取消
         - running/paused 标记取消，等待线程结束
         """
-        job = db.get_job(job_id)
-        if not job:
-            return False, "任务不存在"
-
-        status = job["status"]
-
-        if status == "completed":
-            return False, "任务已完成，不能取消"
-
-        if status == "failed":
-            return False, "任务已失败，无需取消"
-
-        if status == "canceled":
-            return True, "任务已取消"
-
-        # 原子状态转换：仅在 queued/running/paused 时才更新为 canceled
-        album_id = job.get("album_id")
-        ok = db.transition_job_status(job_id, ["queued", "running", "paused"], "canceled")
-        if not ok:
-            # 状态已被其他操作（如下载完成）修改，重新读取确认
-            job2 = db.get_job(job_id)
-            if job2 and job2["status"] == "completed":
-                return False, "任务已在取消前完成"
-            if job2 and job2["status"] == "failed":
-                return False, "任务已在取消前失败"
-            return False, "任务状态已变更，请刷新后重试"
-
-        # 同步更新收藏清单下载状态
-        if album_id:
-            db.update_wishlist_download_status(album_id, "none")
-        log.info(f"取消任务 job_id={job_id}")
-
-        return True, "已取消"
+        result = cancel_download(job_id)
+        if result == (True, "已取消"):
+            log.info(f"取消任务 job_id={job_id}")
+        return result
 
 
     def pause_job(self, job_id: str) -> tuple[bool, str]:

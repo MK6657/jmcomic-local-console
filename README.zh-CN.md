@@ -18,8 +18,8 @@ git clone --branch codex/refactor-windows --single-branch https://github.com/MK6
 cd jmcomic-backend-review
 ```
 
-产品代码固定为 `7ae6ccb`，后续审查文档提交不改变程序行为。完整运行验收使用 Windows；
-仅下载 GitHub 默认分支会拿到原版本。
+原审计快照为 `7ae6ccb`，此分支现已继续加入[首批审计修复](docs/AUDIT_FIXES.md)。
+复检当前版本时请记录克隆后的 HEAD。完整运行验收使用 Windows；仅下载 GitHub 默认分支会拿到原版本。
 
 ## 环境要求
 

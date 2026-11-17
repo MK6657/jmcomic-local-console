@@ -9,6 +9,7 @@ import json
 import os
 
 from . import database as db
+from . import update_store
 from .validation import validate_numeric
 
 
@@ -94,6 +95,45 @@ def enqueue_download(album_id: str, title: str, photo_ids: list[str]) -> Enqueue
         raise TaskCommandError("invalid_selection", str(error), 400) from error
     with db.transaction() as conn:
         return _enqueue(conn, album_id, str(title or album_id)[:500], selected)
+
+
+def finish_download(job_id: str, to_status: str, *, photo_ids=(), **extra) -> bool:
+    """Commit a running/paused result, bookmark facts and chapter baseline together."""
+    if to_status not in ("completed", "failed"):
+        raise ValueError("下载结果只能是 completed 或 failed")
+    with db.transaction() as conn:
+        row = conn.execute("SELECT album_id FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            return False
+        if not db.transition_job_status(job_id, ["running", "paused"], to_status, conn=conn, **extra):
+            return False
+        db._refresh_wishlist_after_job_delete(conn, [row["album_id"]])
+        if to_status == "completed":
+            update_store.absorb_downloaded(row["album_id"], photo_ids, conn=conn)
+        return True
+
+
+def cancel_download(job_id: str) -> tuple[bool, str]:
+    """Cancel and derive the bookmark in one transaction, preserving terminal jobs."""
+    with db.transaction() as conn:
+        job = conn.execute("SELECT album_id, status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if job is None:
+            return False, "任务不存在"
+        if job["status"] == "completed":
+            return False, "任务已完成，不能取消"
+        if job["status"] == "failed":
+            return False, "任务已失败，无需取消"
+        if job["status"] == "canceled":
+            return True, "任务已取消"
+        if not db.transition_job_status(job_id, ["queued", "running", "paused"], "canceled", conn=conn):
+            current = conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            if current and current["status"] == "completed":
+                return False, "任务已在取消前完成"
+            if current and current["status"] == "failed":
+                return False, "任务已在取消前失败"
+            return False, "任务状态已变更，请刷新后重试"
+        db._refresh_wishlist_after_job_delete(conn, [job["album_id"]])
+        return True, "已取消"
 
 
 def retry_download(job_id: str) -> EnqueueResult:

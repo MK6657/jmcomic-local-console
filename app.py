@@ -301,6 +301,20 @@ def create_app() -> Flask:
     app.register_blueprint(api_system_bp)
 
     # ── 全局错误处理器 ──────────────────────────────────
+    @app.errorhandler(400)
+    @app.errorhandler(413)
+    @app.errorhandler(415)
+    def _handle_request_error(e):
+        from flask import request, jsonify
+        if not request.path.startswith("/api/"):
+            return e
+        messages = {
+            400: "请求格式错误，请检查请求体",
+            413: "请求体超过允许大小",
+            415: "请使用 application/json 或文件上传",
+        }
+        return jsonify(status="error", message=messages[e.code]), e.code
+
     @app.errorhandler(403)
     def _handle_403(e):
         from flask import request, jsonify, render_template
@@ -327,6 +341,14 @@ def create_app() -> Flask:
     # ── 请求日志中间件 ──────────────────────────────────
     # 成功（2xx / 304）的静态资源与 launcher 的健康检查不写访问日志，否则每次打开页面都会刷出几十行；
     # 其余请求照常记录，4xx/5xx 一律记录（5xx 为 WARNING，同时进入 error.log）。
+    @app.after_request
+    def _security_headers(response):
+        # Separate from logging so quiet paths and early error responses are covered.
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
     _quiet_paths = frozenset({"/favicon.ico", "/api/system/health"})
 
     @app.after_request

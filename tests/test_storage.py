@@ -251,7 +251,10 @@ def test_scanners_and_exports_ignore_staging_and_old_page_temps(client, tmp_path
     assert api_export._collect_images(album) == expected
     assert CbzPacker.packable_images(album) == expected
     db.insert_job("storage-job", "123", "fixture", [])
-    db.update_job("storage-job", status="completed", output_path=str(album))
+    db.transition_job_status(
+        "storage-job", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        output_path=str(album),
+    )
     response = client.post("/api/export/storage-job/zip")
     try:
         assert response.status_code == 200

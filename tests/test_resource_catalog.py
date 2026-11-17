@@ -28,11 +28,14 @@ def _page(folder, name="00001.png"):
 def _completed(folder, job_id="job_resource_old", album_id="3001", created_at=None):
     from core import database as db
     db.insert_job(job_id, album_id, "Catalog title", ["71"])
-    values = {"status": "completed", "output_path": str(folder)}
+    values = {"output_path": str(folder)}
     if created_at is not None:
         with db.transaction() as connection:
             connection.execute("UPDATE jobs SET created_at=? WHERE job_id=?", (created_at, job_id))
-    db.update_job(job_id, **values)
+    db.transition_job_status(
+        job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        **values,
+    )
     db.upsert_album_meta(album_id, title="Catalog title", author="Catalog author")
 
 
@@ -123,14 +126,21 @@ def test_failed_replacement_invalidates_resource_even_after_history_is_gone(clie
     db.delete_job("job_resource_old")
     original.unlink()
     db.insert_job("job_resource_new", "3001", "Replacement", [])
-    db.update_job("job_resource_new", status="running", output_path=str(folder))
+    db.transition_job_status(
+        "job_resource_new", ["queued", "running", "paused", "completed", "failed", "canceled"], "running",
+        output_path=str(folder),
+    )
     assert db.mark_completed_jobs_superseded("3001", str(folder), "job_resource_new") == 1
     _page(folder, "00002.png")  # residual page of an unsuccessful replacement
-    db.update_job("job_resource_new", status="failed")
+    db.transition_job_status(
+        "job_resource_new", ["queued", "running", "paused", "completed", "failed", "canceled"], "failed",
+    )
     assert db.get_completed_job_by_album_id("3001")["superseded_at"]
     assert not local_availability.is_readable("3001")
     assert client.get("/api/preview/3001").status_code == 404
-    db.update_job("job_resource_new", status="completed")
+    db.transition_job_status(
+        "job_resource_new", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+    )
     assert local_availability.is_readable("3001")
     assert db.get_completed_job_by_album_id("3001")["job_id"] == "job_resource_new"
 
@@ -153,7 +163,10 @@ def test_failed_update_of_intact_resource_does_not_hide_existing_pages(client, d
     _completed(folder)
     db.clear_jobs_by_status("completed")
     db.insert_job("job_failed_update", "3001", "update", ["72"])
-    db.update_job("job_failed_update", status="failed", output_path=str(folder))
+    db.transition_job_status(
+        "job_failed_update", ["queued", "running", "paused", "completed", "failed", "canceled"], "failed",
+        output_path=str(folder),
+    )
     assert local_availability.is_readable("3001")
     assert len(db.resource_records(["3001"])) == 1
 
@@ -182,11 +195,15 @@ def test_revoking_completion_removes_its_evidence_but_deleting_history_does_not(
     folder = downloads / "Catalog_3001"
     image = _page(folder)
     _completed(folder)
-    db.update_job("job_resource_old", status="failed")
+    db.transition_job_status(
+        "job_resource_old", ["queued", "running", "paused", "completed", "failed", "canceled"], "failed",
+    )
     assert db.resource_records(["3001"]) == []
     assert not local_availability.is_readable("3001")
     assert image.is_file()
-    db.update_job("job_resource_old", status="completed")
+    db.transition_job_status(
+        "job_resource_old", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+    )
     db.delete_job("job_resource_old")
     assert local_availability.is_readable("3001")
 

@@ -48,7 +48,10 @@ def directories(client, tmp_path, monkeypatch):
 def _job(folder, status):
     from core import database as db
     db.insert_job("job_desktop", "123", "Desktop fixture", [])
-    db.update_job("job_desktop", status=status, output_path=str(folder))
+    db.transition_job_status(
+        "job_desktop", ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+        output_path=str(folder),
+    )
 
 
 @pytest.mark.parametrize("status", ["queued", "running", "paused", "completed", "failed", "canceled"])

@@ -26,7 +26,10 @@ def add_reader_samples(downloads, db, Image, ImageDraw):
         draw.text((240, 350), f"TEST PAGE {number}", fill="#2B2A27")
         img.save(output / f"{number:03d}.png")
     db.insert_job("job_ui", "900001", "Reader sample", [])
-    db.update_job("job_ui", status="completed", output_path=str(output))
+    db.transition_job_status(
+        "job_ui", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        output_path=str(output),
+    )
     # Same album, two distinct completed folders. Preview must use the newest one;
     # exporting each job must still use that job's own folder.
     for job_id, folder_name, colour in (
@@ -39,12 +42,21 @@ def add_reader_samples(downloads, db, Image, ImageDraw):
         ImageDraw.Draw(page).text((35, 190), job_id, fill=colour)
         page.save(folder / f"{job_id}.png")
         db.insert_job(job_id, "900500", folder_name, [])
-        db.update_job(job_id, status="completed", output_path=str(folder))
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+            output_path=str(folder),
+        )
     db.insert_job("job_ui_failed", "900600", "Failed download sample", [])
-    db.update_job("job_ui_failed", status="failed", error_message="Synthetic offline failure")
+    db.transition_job_status(
+        "job_ui_failed", ["queued", "running", "paused", "completed", "failed", "canceled"], "failed",
+        error_message="Synthetic offline failure",
+    )
     db.add_wishlist("900700", "Deleted files sample")
     db.insert_job("job_ui_missing", "900700", "Deleted files sample", [])
-    db.update_job("job_ui_missing", status="completed", output_path=str(downloads / "gone"))
+    db.transition_job_status(
+        "job_ui_missing", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        output_path=str(downloads / "gone"),
+    )
     db.add_wishlist("900701", "Never downloaded sample")
 
 
@@ -74,7 +86,10 @@ def add_archive_samples(downloads, db, Image, ImageDraw):
     def completed(job_id, album_id, title, folder):
         db.add_wishlist(album_id, title)
         db.insert_job(job_id, album_id, title, [])
-        db.update_job(job_id, status="completed", output_path=str(folder))
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+            output_path=str(folder),
+        )
 
     for album_id, title, suffix, counts, colour in (
         ("900002", "CBZ only sample", ".cbz", (6, 7, 5), "#2B6CB0"),
@@ -137,7 +152,10 @@ def add_partial_sample(downloads, db, Image, ImageDraw):
         img.save(chapter / f"{page:05d}.webp")
     db.add_wishlist("900010", "Partial chapters sample")
     db.insert_job("job_ui_900010", "900010", "Partial chapters sample", ["91001"])
-    db.update_job("job_ui_900010", status="completed", output_path=str(folder))
+    db.transition_job_status(
+        "job_ui_900010", ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+        output_path=str(folder),
+    )
     return {"album_id": "900010", "title": "Partial chapters sample", "author": "UI fixture",
             "cover": "/static/images/no-cover.svg", "tags": [], "chapter_count": 3,
             "photos": [{"photo_id": "91001", "title": "第1话", "page_count": 3},
@@ -192,7 +210,10 @@ def add_update_samples(downloads, db, Image, ImageDraw):
 
     def completed(job_id, album_id, title, folder, photo_ids=()):
         db.insert_job(job_id, album_id, title, list(photo_ids))
-        db.update_job(job_id, status="completed", output_path=str(folder))
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], "completed",
+            output_path=str(folder),
+        )
 
     def downloaded(album_id, episodes, at):
         update_store.note_download_started(album_id, episodes, had_local_content=False, now=at,
@@ -336,7 +357,10 @@ def add_batch_samples(downloads, db, Image, ImageDraw):
         db.insert_job(job_id, album_id, title, list(photo_ids))
         if folder is not None:
             fields["output_path"] = str(folder)
-        db.update_job(job_id, status=status, **fields)
+        db.transition_job_status(
+            job_id, ["queued", "running", "paused", "completed", "failed", "canceled"], status,
+            **fields,
+        )
 
     def downloaded(album_id, photo_ids, at):
         update_store.note_download_started(album_id, _episodes(*photo_ids), had_local_content=False, now=at,
