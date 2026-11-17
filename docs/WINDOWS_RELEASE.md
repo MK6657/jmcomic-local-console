@@ -10,6 +10,8 @@
 
 默认数据位于EXE同级的 `runtime/` 与 `downloads/`，不要放在Program Files等普通用户不可写的目录。`JMCONSOLE_HOME`、`JMCONSOLE_DOWNLOAD_DIR`、`JMCONSOLE_CACHE_DIR`、`JMCONSOLE_BACKUP_DIR` 沿用源码版的配置方式，启动前设置，运行中不能切换。环境变量只改变位置，不搬迁数据。
 
+Windows 10 1903 及以上和 Windows 11 可将程序解压至含中文或其他 Unicode 字符的目录。EXE 自己使用 UTF-8 读写提供给网络库的证书路径，无需更改系统区域设置。更早的 Windows 10 版本未验证。
+
 服务只监听127.0.0.1。源码版与便携版仍共用Windows单实例锁，不能同时启动两个正常服务。解压此包不会替换正在使用的版本，也不会自动导入个人数据。
 
 **先看位置，再决定用哪个实例。** 双击默认使用当前环境指定的实例。下面的 `--home` 只对这一次启动有效，`instance` 会列出实际数据库、下载、缓存、备份和日志目录；单独设置过的 `JMCONSOLE_*_DIR` 仍然有效。

@@ -26,5 +26,5 @@ a = Analysis(
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="JMComic",
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
-          console=True, contents_directory="_internal")
+          console=True, contents_directory="_internal", manifest=str(ROOT / "tools" / "windows-portable.manifest"))
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="JMComic")

@@ -18,6 +18,7 @@ if __name__ == "__main__" and not __package__:
     sys.path.insert(0, str(ROOT))
 SOURCE_PATTERNS = ("app.py", "desktop.py", "launcher.py", "jmcomic_cli.py", "core/*.py", "routes/*.py",
                    "templates/**/*.html", "static/**/*", "requirements*.txt", "build.spec", "tools/*.py",
+                   "tools/windows-portable.manifest",
                    "docs/WINDOWS_RELEASE.md", "docs/BACKEND_REVIEW.md", "docs/DATA_MAINTENANCE.md",
                    "docs/AUDIT_FIXES.md",
                    "LICENSE", "THIRD_PARTY_NOTICES.md")

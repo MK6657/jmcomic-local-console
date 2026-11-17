@@ -60,6 +60,18 @@ def portable_cli(executable, cwd, home, *args, download_root=None, expected_exit
     return run
 
 
+def checked_report(process, command):
+    try:
+        report = json.loads(process.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        raise AssertionError(f"extracted EXE {command}: no JSON report; exit={process.returncode}") from None
+    if process.returncode or report.get('status') != 'ok' or report.get('exit_code') != 0:
+        passed = [name for name, ok in report.get('checks', {}).items() if ok]
+        raise AssertionError(f"extracted EXE {command}: exit={process.returncode}, "
+                             f"error={report.get('error')}, passed={passed}")
+    return report
+
+
 def check(release, check_launcher=False, check_restore=False):
     archive = release / "JMComic-windows-x64.zip"
     expected, filename = (release / "SHA256SUMS.txt").read_text(encoding="ascii").strip().split()
@@ -68,7 +80,8 @@ def check(release, check_launcher=False, check_restore=False):
         assert hashlib.file_digest(handle, "sha256").hexdigest() == expected
     with tempfile.TemporaryDirectory(prefix="jmcomic-portable-zip-") as temporary:
         root = Path(temporary)
-        extracted = root / "中文 解压验证"
+        # The book character is outside both legacy Chinese and Western Windows code pages.
+        extracted = root / "中文 📚 解压验证"
         unrelated = root / "unrelated-working-directory"
         unrelated.mkdir()
         with zipfile.ZipFile(archive) as package:
@@ -85,15 +98,13 @@ def check(release, check_launcher=False, check_restore=False):
         process = subprocess.run([str(executable), "self-check"], cwd=unrelated, env=environment(untouched),
                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
                                  encoding="utf-8", errors="replace", timeout=60)
-        assert process.returncode == 0, "extracted executable self-check failed"
-        report = json.loads(process.stdout.strip().splitlines()[-1])
-        assert report["status"] == "ok" and report["exit_code"] == 0 and report["checks"]["cleanup"]
+        report = checked_report(process, 'self-check')
+        assert report["checks"]["cleanup"]
         lifecycle = subprocess.run([str(executable), "lifecycle-check"], cwd=unrelated, env=environment(untouched),
                                    stdin=subprocess.DEVNULL, capture_output=True, text=True,
                                    encoding="utf-8", errors="replace", timeout=150)
-        assert lifecycle.returncode == 0, "extracted executable lifecycle check failed"
-        restart = json.loads(lifecycle.stdout.strip().splitlines()[-1])
-        assert restart["status"] == "ok" and restart["checks"]["restart_persistence_and_task_recovery"]
+        restart = checked_report(lifecycle, 'lifecycle-check')
+        assert restart["checks"]["restart_persistence_and_task_recovery"]
         assert restart["checks"]["temporary_cleanup"]
         assert not untouched.exists() and not (executable.parent / "runtime").exists()
         cli_home = root / "cli-instance"
