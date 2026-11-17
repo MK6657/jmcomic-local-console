@@ -13,6 +13,8 @@
 本次 Windows 后端重构发布在 **`codex/refactor-windows`** 分支，`main` 保留原版本。
 请审核者先阅读[克隆与测试指南](docs/GITHUB_REVIEW.md)和[独立审查委托](docs/INDEPENDENT_BACKEND_AUDIT.md)。
 
+接手开发或复检请从[项目详细交接说明](docs/PROJECT_HANDOFF.md)开始，内含当前架构、固定产品提交、剩余问题、验证证据及可直接转交其他模型的任务文本。
+
 ```bash
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
 cd jmcomic-backend-review

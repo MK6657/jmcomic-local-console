@@ -16,6 +16,9 @@ The Windows backend refactor is published on **`codex/refactor-windows`**; `main
 keeps the previous version. Reviewers should follow the [clone and test guide](docs/GITHUB_REVIEW.md)
 and [independent audit instructions](docs/INDEPENDENT_BACKEND_AUDIT.md).
 
+Start with the [project handoff](docs/PROJECT_HANDOFF.md) for the current architecture,
+verified product commit, remaining audit items, acceptance evidence, and a review prompt.
+
 ```bash
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
 cd jmcomic-backend-review

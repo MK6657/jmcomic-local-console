@@ -3,6 +3,8 @@
 公开仓库：[MK6657/jmcomic-local-console](https://github.com/MK6657/jmcomic-local-console)。
 本次代码位于 [`codex/refactor-windows`](https://github.com/MK6657/jmcomic-local-console/tree/codex/refactor-windows)，`main` 保留原版本。
 
+完整项目背景、代码地图、剩余16个审计编号的状态及接手任务文本，先读[项目交接说明](PROJECT_HANDOFF.md)。产品验收基线为`72783a2`；后续文档提交与产品代码变化应分别记录。
+
 ## 1. 获取正确的分支
 
 ```bash
