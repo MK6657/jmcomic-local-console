@@ -69,10 +69,10 @@ For foreground operation without automatically opening a browser:
 Open [http://127.0.0.1:5000](http://127.0.0.1:5000). If occupied, the server tries
 5001–5003; use the URL printed in the terminal. Other programs are never killed
 to free a port. The launcher verifies application identity and PID before opening
-an existing service. Running start.bat again reuses a running server, unless `app.py`, `core/`, `routes/` or
-`templates/` differ from the files it started with (compared by content, so an update copied over the old
-folder counts too): then it stops only that verified server and starts the updated one
-(interrupted downloads are re-queued at startup). Static CSS/JS changes need no restart.
+an existing service. Running start.bat again can reuse the current instance. Changes to server code,
+templates, `requirements.txt` or installed runtime dependency versions trigger an upgrade check.
+The launcher defers automatic replacement when jobs are active or idleness cannot be confirmed.
+It cooperatively restarts a verified idle service; static CSS/JS changes need no restart.
 
 After installing dependencies, `launcher.pyw` offers a windowless launch.
 `launcher.py` without `--wait` also leaves the server in the background; to stop it,
@@ -80,6 +80,8 @@ verify and terminate only the app's PID recorded in `runtime/data/flask.json`.
 
 ## Features and settings
 
+- Pausing a book gives its slot to another queued book after in-flight work drains. Resuming uses the original task. The image concurrency setting is shared across background downloads; reading uses separate slots.
+- Readable library items can export local pages to ZIP or PDF even after task history is cleared. The wishlist imports larger JSON files in batches and reports additions, duplicates and failures.
 - Search cards now have a **Read** button opening a continuous scrolling local reader.
   It loads images in batches, supports page jumps/retry and remembers the page within the browser session.
   It never starts a download; for an album that isn't downloaded, **Read** opens online reading instead (see below).
@@ -218,8 +220,7 @@ see the [build guide](docs/WINDOWS_RELEASE.md).
 
 - Startup failure: inspect `runtime/logs/launcher.log`, or run `app.py` directly.
 - Missing dependency: install the complete requirements with the same interpreter.
-- Failed search: check connectivity, proxy settings and app logs. Upstream domains
-  in `core/settings.py` may change over time.
+- Failed search: correlate the request ID with the original error in app logs. The official SDK selects default domains separately for API and HTML clients; a working website homepage does not verify an API request.
 - Offline tests do not prove upstream availability, real downloads or EXE packaging.
 - Windows-specific folder opening and the single-instance mutex are not portable.
 

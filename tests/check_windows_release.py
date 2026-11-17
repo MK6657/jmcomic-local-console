@@ -88,10 +88,33 @@ def check(release, check_launcher=False, check_restore=False):
         assert process.returncode == 0, "extracted executable self-check failed"
         report = json.loads(process.stdout.strip().splitlines()[-1])
         assert report["status"] == "ok" and report["exit_code"] == 0 and report["checks"]["cleanup"]
+        lifecycle = subprocess.run([str(executable), "lifecycle-check"], cwd=unrelated, env=environment(untouched),
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=150)
+        assert lifecycle.returncode == 0, "extracted executable lifecycle check failed"
+        restart = json.loads(lifecycle.stdout.strip().splitlines()[-1])
+        assert restart["status"] == "ok" and restart["checks"]["restart_persistence_and_task_recovery"]
+        assert restart["checks"]["temporary_cleanup"]
         assert not untouched.exists() and not (executable.parent / "runtime").exists()
         cli_home = root / "cli-instance"
         os.environ.update({key: value for key, value in environment(cli_home).items() if key in PATH_KEYS})
         image = seed_legacy_instance(cli_home)
+        # Preview and cancel an explicit selection before it opens/migrates the database.
+        clean_env = {key: val for key, val in environment(untouched).items() if key not in PATH_KEYS}
+        db_path = cli_home / "runtime/data/app.db"
+        before = hashlib.sha256(db_path.read_bytes()).digest()
+        def choose(command, instance, answer=""):
+            return subprocess.run([str(executable), command, "--home", str(instance)], cwd=unrelated,
+                                  env=clean_env, input=answer, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=20)
+        info = choose("instance", cli_home)
+        assert info.returncode == 0 and str(cli_home / "downloads") in info.stdout
+        canceled = choose("launch", cli_home, "\n")
+        assert canceled.returncode == 0 and "已取消" in canceled.stdout
+        assert not (cli_home / "runtime/data/flask.json").exists() and before == hashlib.sha256(db_path.read_bytes()).digest()
+        missing = root / "尚不存在的选定实例"
+        assert choose("instance", missing).returncode == 0 and not missing.exists()
+        assert choose("launch", missing, "y\n").returncode != 0 and not missing.exists()
         backup = root / "fixture.zip"
         if check_restore:
             portable_cli(executable, unrelated, cli_home, "backup", "--include-downloads", "--output", backup)
@@ -137,9 +160,9 @@ def check(release, check_launcher=False, check_restore=False):
             finally:
                 if lease is not None:
                     lease.close()
-    return {"zip_sha256_verified": True, "extracted_self_check": True, "unicode_path": True,
+    return {"zip_sha256_verified": True, "extracted_self_check": True, "extracted_lifecycle_check": True, "unicode_path": True,
             "system_python_removed_from_path": True, "inherited_instance_untouched": True,
-            "portable_backup_info": True, "portable_v2_full_restore": check_restore,
+            "instance_selection_preview_and_cancel": True, "portable_backup_info": True, "portable_v2_full_restore": check_restore,
             "unmapped_backup_preserved_old_zip": check_restore,
             "busy_launcher_rejected": launcher_checked, "upstream_requests": 0}
 

@@ -14,6 +14,8 @@ import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
+if __name__ == "__main__" and not __package__:
+    sys.path.insert(0, str(ROOT))
 SOURCE_PATTERNS = ("app.py", "desktop.py", "launcher.py", "jmcomic_cli.py", "core/*.py", "routes/*.py",
                    "templates/**/*.html", "static/**/*", "requirements*.txt", "build.spec", "tools/*.py",
                    "docs/WINDOWS_RELEASE.md", "docs/BACKEND_REVIEW.md", "docs/DATA_MAINTENANCE.md",
@@ -71,12 +73,49 @@ def release_target(output, source_id):
     return target
 
 
+def verified_packages():
+    """Publish the pinned runtime/build closure; refuse drift in a reused build venv."""
+    from core.runtime_dependencies import installed_versions
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    pins = {}
+    for line in (ROOT / "requirements-windows-build-constraints.txt").read_text(encoding="utf-8").splitlines():
+        line = line.partition("#")[0].strip()
+        if not line:
+            continue
+        name, expected = line.split("==")
+        pins[canonicalize_name(name)] = expected
+
+    # A new top-level or transitive dependency must not silently fall outside
+    # the release constraints. Requirements here have no editable installs.
+    roots = []
+    for file in ("requirements.txt", "requirements-build.txt"):
+        for line in (ROOT / file).read_text(encoding="utf-8").splitlines():
+            line = line.partition("#")[0].strip()
+            if line and not line.startswith(("-r ", "-c ")):
+                roots.append(line)
+    try:
+        packages = dict(installed_versions("\n".join(roots)))
+    except importlib.metadata.PackageNotFoundError as error:
+        raise RuntimeError(f"缺少发行依赖 {error.name}，请安装 requirements-build.txt") from error
+    for name in sorted(packages.keys() | pins.keys()):
+        if name not in pins:
+            raise RuntimeError(f"{name} 缺少 Windows 发行约束，请先锁定并验证该依赖")
+        if name not in packages or packages[name] != pins[name]:
+            raise RuntimeError(f"{name}: 发行约束为 {pins[name]}，当前依赖为 {packages.get(name)}；请核对 requirements-build.txt")
+    for requirement in map(Requirement, roots):
+        if not requirement.marker or requirement.marker.evaluate():
+            actual = packages[canonicalize_name(requirement.name)]
+            if not requirement.specifier.contains(actual, prereleases=True):
+                raise RuntimeError(f"发行版本 {actual} 不符合 {requirement}")
+    return packages
+
+
 def build(output=None):
     if sys.platform != "win32" or platform.machine().upper() not in {"AMD64", "X86_64"}:
         raise RuntimeError("请在64位Windows上构建Windows发行包")
-    version = importlib.metadata.version("pyinstaller")
-    if version != "6.22.3":
-        raise RuntimeError("请在独立构建环境安装requirements-build.txt")
+    packages = verified_packages()
     source_id = source_fingerprint()
     target = release_target(output, source_id)
     work = ROOT / "build" / ("windows-" + uuid.uuid4().hex)
@@ -85,8 +124,7 @@ def build(output=None):
         "format": 1, "application": "jmcomic-local-console", "platform": "windows-x64",
         "source_sha256": source_id, "python": platform.python_version(),
         "built_at": datetime.now(timezone.utc).isoformat(),
-        "packages": dict(sorted((dist.metadata["Name"], dist.version)
-                                for dist in importlib.metadata.distributions())),
+        "packages": packages,
     }
     metadata = work / "release.json"
     metadata.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

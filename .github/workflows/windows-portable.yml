@@ -1,0 +1,56 @@
+name: Windows portable package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/refactor-windows]
+    tags: ['windows-v*']
+    paths:
+      - '.github/workflows/windows-portable.yml'
+      - 'build.spec'
+      - 'tools/build_windows.py'
+      - 'requirements*.txt'
+      - 'core/release_check.py'
+      - 'core/release_lifecycle.py'
+      - 'tests/check_windows_release.py'
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.15'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: 'requirements*.txt'
+      - name: Install the release environment
+        run: python -m pip install -r requirements-build.txt -r requirements-dev.txt
+      - run: python -m pip check
+      - run: python -m pytest -q -rs
+      - run: python tests/check_download_queue.py --two-stalls
+      - run: python tests/check_download_queue.py --pause
+      - run: python tests/check_download_queue.py --quick-resume
+      - name: Package and run EXE self-check and restart checks
+        run: python tools/build_windows.py --output releases/ci-windows-x64
+      - name: Verify extracted ZIP, busy launcher and v2 backup/restore
+        run: python tests/check_windows_release.py releases/ci-windows-x64 --check-launcher --check-restore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JMComic-windows-x64
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            releases/ci-windows-x64/JMComic-windows-x64.zip
+            releases/ci-windows-x64/SHA256SUMS.txt
+            releases/ci-windows-x64/release.json
