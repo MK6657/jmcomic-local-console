@@ -1,4 +1,5 @@
 """Preserve an old database before the first initialization write, not after DDL."""
+from contextlib import closing
 import sqlite3
 import zipfile
 
@@ -70,6 +71,32 @@ def test_backup_failure_aborts_all_initialization_writes(legacy, monkeypatch):
     with sqlite3.connect(database) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='resource_catalog'").fetchone() is None
+
+
+def test_automatic_snapshot_preserves_unmappable_paths_for_diagnosis(legacy, tmp_path, monkeypatch):
+    from core import backup, database as db
+    from core.restore import RestoreError, restore_backup
+    database, backups = legacy
+    old_path = str(tmp_path / "old-downloads" / "Old title")
+    new_root = tmp_path / "new-downloads"
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("UPDATE jobs SET output_path=? WHERE job_id='old_job'", (old_path,))
+    monkeypatch.setattr(db, "get_download_root", lambda: new_root)
+    monkeypatch.setattr(backup, "_inventory", lambda *args: pytest.fail("migration scanned resources"))
+    db.init_db()
+    archive, = backups.glob("pre-migration-v2-to-v4-*.zip")
+    info = backup.inspect_backup(archive)
+    assert info.schema_version == 2 and info.manifest["resources"]["mode"] == "database"
+    assert info.manifest["resources"]["source_root"] == str(new_root) and not new_root.exists()
+    saved = tmp_path / "diagnostic.db"
+    with zipfile.ZipFile(archive) as package:
+        saved.write_bytes(package.read("app.db"))
+    with closing(sqlite3.connect(saved)) as connection:
+        assert connection.execute("SELECT output_path FROM jobs WHERE job_id='old_job'").fetchone() == (old_path,)
+    target = tmp_path / "not-restorable"
+    with pytest.raises(RestoreError) as failure:
+        restore_backup(archive, target)
+    assert failure.value.reason == "unmapped_path" and not target.exists()
 
 
 def test_future_schema_is_rejected_without_modifying_database(legacy):

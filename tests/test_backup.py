@@ -1,32 +1,34 @@
 """Backups use only disposable SQLite databases and resource directories."""
 import hashlib
-import io
 import json
 import os
 import sqlite3
 import stat
 import time
 import zipfile
+from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 
-def database(path, *, version=3, status="completed"):
+def database(path, download_root):
+    from core.database_schema import BASE_SCHEMA_SQL
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
-        connection.executescript("CREATE TABLE jobs (job_id TEXT, status TEXT, output_path TEXT); "
-                                 "CREATE TABLE settings (key TEXT, value TEXT);")
-        connection.execute("INSERT INTO jobs VALUES ('fixture', ?, 'old/download/path')", (status,))
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(BASE_SCHEMA_SQL)
+        connection.execute("INSERT INTO jobs(job_id, album_id, status, output_path) "
+                           "VALUES ('fixture', '123', 'completed', ?)", (str(download_root / "Sample #1"),))
         connection.execute("INSERT INTO settings VALUES ('private-fixture', 'secret-fixture-value')")
-        connection.execute(f"PRAGMA user_version={version}")
+        connection.execute("PRAGMA user_version=2")
     return path
 
 
 @pytest.fixture
 def source(tmp_path):
-    db = database(tmp_path / "source" / "runtime" / "data" / "app.db")
     downloads = tmp_path / "source" / "downloads"
+    db = database(tmp_path / "source" / "runtime" / "data" / "app.db", downloads)
     chapter = downloads / "Sample #1" / "chapter__123"
     chapter.mkdir(parents=True)
     (chapter / "00001.webp").write_bytes(b"fixture complete image")
@@ -41,7 +43,7 @@ def test_default_is_database_plus_hash_inventory_not_resource_contents(source):
     before = db.read_bytes()
     result = create_backup(db, downloads, destination)
     assert result.path == destination
-    assert result.schema_version == 3 and result.database_member == "app.db"
+    assert result.schema_version == 2 and result.database_member == "app.db"
     assert result.includes_downloads is False
     resources = result.manifest["resources"]
     assert resources["mode"] == "inventory" and resources["consistency"] == "inventory-only"
@@ -66,7 +68,7 @@ def test_database_only_migration_snapshot_never_scans_downloads(source, monkeypa
     result = backup.create_backup(db, None, destination)
     assert result.manifest["resources"] == {"mode": "none", "included": False,
                                             "consistency": "database-only", "source_root": "", "files": []}
-    assert backup.inspect_backup(destination).schema_version == 3
+    assert backup.inspect_backup(destination).schema_version == 2
 
 
 def test_database_snapshot_records_remapping_origin_without_scanning_or_requiring_it(source, monkeypatch):
@@ -91,6 +93,119 @@ def test_source_origin_only_applies_to_database_snapshots_and_must_be_absolute(s
     with pytest.raises(BackupError):
         create_backup(db, None, destination, source_download_root="relative-downloads")
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("schema_change", ["PRAGMA user_version=999", "PRAGMA user_version=3",
+                                           "ALTER TABLE jobs ADD COLUMN unknown_field TEXT"],
+                         ids=["future-version", "v3-without-catalog", "altered-v2"])
+def test_ordinary_backup_requires_restore_schema_but_db_only_preserves_it(source, schema_change, monkeypatch):
+    from core import backup
+    db, downloads, destination = source
+    backup.create_backup(db, downloads, destination)
+    original_hash = hashlib.sha256(destination.read_bytes()).digest()
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute(schema_change)
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+    monkeypatch.setattr(backup, "_inventory", lambda *args: pytest.fail("unexpected resource scan"))
+    with pytest.raises(backup.BackupError, match="数据库结构.*版本"):
+        backup.create_backup(db, downloads, destination)
+    assert hashlib.sha256(destination.read_bytes()).digest() == original_hash
+    for mode, origin in (("none", None), ("database", downloads)):
+        diagnostic = destination.with_name(mode + ".zip")
+        backup.create_backup(db, None, diagnostic, source_download_root=origin)
+        info = backup.inspect_backup(diagnostic)
+        assert info.schema_version == version and info.manifest["resources"]["mode"] == mode
+
+
+@pytest.mark.parametrize("output", ["relative/path", "{root}-old/private-title", "{root}/./private-title",
+                                    "{root}/../private-title", "{root}/NUL/private-title", b"private-title"])
+def test_ordinary_backup_refuses_unportable_job_paths_before_inventory(source, output, monkeypatch):
+    from core import backup
+    db, downloads, destination = source
+    value = output.format(root=downloads) if isinstance(output, str) else output
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute("UPDATE jobs SET output_path=?", (value,))
+    monkeypatch.setattr(backup, "_inventory", lambda *args: pytest.fail("unexpected resource scan"))
+    with pytest.raises(backup.BackupError, match=r"jobs\.output_path.*JMCONSOLE_DOWNLOAD_DIR") as failure:
+        backup.create_backup(db, downloads, destination)
+    assert "private-title" not in str(failure.value) and str(downloads) not in str(failure.value)
+    assert list(destination.parent.iterdir()) == []
+
+
+def test_unreadable_path_text_reports_the_column_without_publishing(source):
+    from core.backup import BackupError, create_backup
+    db, downloads, destination = source
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute("UPDATE jobs SET output_path=CAST(x'ff' AS TEXT)")
+    with pytest.raises(BackupError, match=r"jobs\.output_path.*文本编码"):
+        create_backup(db, downloads, destination)
+    assert not destination.exists()
+
+
+def test_inventory_rejects_names_restore_cannot_create(source, monkeypatch):
+    from core import backup
+    db, downloads, destination = source
+    nonportable = downloads / "private?.webp"
+    if os.name == "nt":
+        monkeypatch.setattr(backup, "_resource_paths", lambda *args: [nonportable])
+    else:
+        nonportable.write_bytes(b"fixture")
+    with pytest.raises(backup.BackupError, match="资源清单.*路径名称") as failure:
+        backup.create_backup(db, downloads, destination)
+    assert nonportable.name not in str(failure.value) and not destination.exists()
+
+
+def test_snapshot_path_scan_uses_readonly_copy_and_shared_deadline(source, monkeypatch):
+    from core import backup
+    db, downloads, destination = source
+    backup.create_backup(db, downloads, destination)
+    original_hash = hashlib.sha256(destination.read_bytes()).digest()
+    open_readonly = backup._readonly_database
+    clock = 0.0
+    scans = []
+
+    def observe_connection(path, budget):
+        connection = open_readonly(path, budget)
+        query_only = connection.execute("PRAGMA query_only").fetchone()[0]
+
+        def expire_on_path_read(action, table, column, schema, trigger):
+            nonlocal clock
+            if (action, table, column) == (sqlite3.SQLITE_READ, "jobs", "output_path"):
+                scans.append((path, query_only))
+                clock = budget.deadline
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(expire_on_path_read)
+        return connection
+
+    monkeypatch.setattr(backup, "time", SimpleNamespace(monotonic=lambda: clock))
+    monkeypatch.setattr(backup, "_readonly_database", observe_connection)
+    monkeypatch.setattr(backup, "_inventory", lambda *args: pytest.fail("scanned resources after timeout"))
+    with pytest.raises(backup.BackupTimeout):
+        backup.create_backup(db, downloads, destination, timeout=1)
+    assert scans and all(destination.parent in path.parents and readonly == 1 for path, readonly in scans)
+    assert hashlib.sha256(destination.read_bytes()).digest() == original_hash
+    assert list(destination.parent.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("version", [0, 1, 2])
+def test_ordinary_legacy_backup_restores_empty_and_root_paths_without_catalog(source, tmp_path, version):
+    from core.backup import create_backup
+    from core.restore import restore_backup
+    db, downloads, destination = source
+    with closing(sqlite3.connect(db)) as connection, connection:
+        if version < 2:
+            connection.execute("DROP TABLE album_detail_cache")
+            connection.execute("ALTER TABLE jobs DROP COLUMN superseded_at")
+        connection.execute(f"PRAGMA user_version={version}")
+        connection.executemany("INSERT INTO jobs(job_id,album_id,output_path) VALUES (?,'123',?)",
+                               (("null", None), ("empty", ""), ("root", str(downloads))))
+    assert create_backup(db, downloads, destination).schema_version == version
+    result = restore_backup(destination, tmp_path / "restored")
+    assert (result.remapped_jobs, result.remapped_resources) == (2, 0)
+    with closing(sqlite3.connect(result.database)) as connection:
+        assert dict(connection.execute("SELECT job_id,output_path FROM jobs")) == {
+            "fixture": str(result.downloads / "Sample #1"), "null": None, "empty": "", "root": str(result.downloads)}
 
 
 def test_database_snapshot_manifest_cannot_claim_a_resource_inventory(source):

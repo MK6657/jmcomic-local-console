@@ -101,6 +101,39 @@ def test_full_restore_maps_paths_and_preserves_non_path_data(source, tmp_path):
     assert not list(tmp_path.glob(".jmcomic-restore-*"))
 
 
+@pytest.mark.parametrize("included", [False, True], ids=["inventory", "full"])
+@pytest.mark.parametrize("stale_table", ["jobs", "resource_catalog"])
+def test_changed_download_root_preserves_restorable_backup(source, tmp_path, stale_table, included):
+    from core.backup import BackupError, create_backup
+    from core.restore import restore_backup
+    database, old_root = source
+    destination = _backup(source, tmp_path / "backups" / "ordinary.zip", included=True)
+    original_hash = hashlib.sha256(destination.read_bytes()).hexdigest()
+    new_root = tmp_path / "new-downloads"
+    new_root.mkdir()
+    with closing(sqlite3.connect(database)) as connection, connection:
+        if stale_table == "jobs":
+            connection.execute("UPDATE resource_catalog SET output_path=?", (str(new_root / "Title_123"),))
+        else:
+            connection.execute("DELETE FROM jobs")
+            connection.execute("UPDATE resource_catalog SET job_id=NULL")
+
+    try:
+        with pytest.raises(BackupError) as failure:
+            create_backup(database, new_root, destination, include_downloads=included, service_stopped=True)
+    finally:
+        assert hashlib.sha256(destination.read_bytes()).hexdigest() == original_hash
+    assert f"{stale_table}.output_path" in str(failure.value)
+    assert "下载根目录" in str(failure.value) and str(old_root) not in str(failure.value)
+    assert list(destination.parent.iterdir()) == [destination]
+    result = restore_backup(destination, tmp_path / "recovered-old-backup")
+    assert (result.downloads / "Title_123/Chapter/00001.webp").read_bytes() == b"published image bytes"
+    with _db(result.database) as connection:
+        for table in ("jobs", "resource_catalog"):
+            assert connection.execute(f"SELECT output_path FROM {table}").fetchone()[0] == str(
+                result.downloads / "Title_123")
+
+
 def test_inventory_restore_reports_missing_resources_and_preserves_pauses(source, tmp_path):
     from core import database as db
     from core.restore import restore_backup

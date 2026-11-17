@@ -6,7 +6,7 @@ instance. All ZIP and SQLite work happens in a private sibling directory first.
 from dataclasses import dataclass
 import hashlib
 import os
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath
 import shutil
 import sqlite3
 import stat
@@ -14,6 +14,8 @@ import sys
 import tempfile
 import time
 import zipfile
+
+from .backup_paths import BackupPathError, output_parts, output_path_tables, parse_source_root, safe_parts
 
 
 class RestoreError(ValueError):
@@ -41,10 +43,6 @@ class RestoreResult:
 
 
 _REPARSE_POINT = 0x400
-_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
-                     *(f"lpt{i}" for i in range(1, 10)), *(f"com{i}" for i in "¹²³"),
-                     *(f"lpt{i}" for i in "¹²³")}
-
 
 
 def _check_deadline(deadline: float) -> None:
@@ -68,48 +66,7 @@ def _check_chain(chain: dict[Path, tuple]) -> None:
         raise RestoreError("unsafe_target", "恢复期间目标父目录发生变化，目标实例未发布")
 
 
-def _safe_parts(parts) -> tuple[str, ...]:
-    # Keep restored data portable to Windows, including backups made on Linux.
-    result = tuple(parts)
-    for part in result:
-        if (not part or part in (".", "..") or part.endswith((".", " "))
-                or any(ord(char) < 32 or char in '<>:"/\\|?*' for char in part)
-                or part.split(".", 1)[0].casefold() in _WINDOWS_RESERVED):
-            raise RestoreError("unsafe_path", "备份包含无法安全迁移的路径，目标实例未发布")
-    return result
-
-
-def _path_parser(source_root: str):
-    if not isinstance(source_root, str) or not source_root or "\x00" in source_root:
-        raise RestoreError("missing_source_root", "备份未记录源下载根目录，不能自动恢复到新实例")
-    windows = PureWindowsPath(source_root)
-    parser = PureWindowsPath if windows.is_absolute() else PurePosixPath
-    root = parser(source_root)
-    if not root.is_absolute() or any(part in (".", "..") for part in source_root.replace("\\", "/").split("/")):
-        raise RestoreError("unsafe_path", "备份的源下载根目录无效，目标实例未发布")
-    _safe_parts(root.parts[1:])
-    return parser, root
-
-
-def _map_output(value, parser, source_root, destination: Path):
-    if value is None or value == "":
-        return value
-    if not isinstance(value, str) or "\x00" in value:
-        raise RestoreError("unmapped_path", "备份存在不能映射的下载路径，目标实例未发布")
-    # PurePath normalizes dot components, so reject them in the original spelling.
-    if any(part in (".", "..") for part in value.replace("\\", "/").split("/")):
-        raise RestoreError("unmapped_path", "备份存在不能映射的下载路径，目标实例未发布")
-    path = parser(value)
-    try:
-        if not path.is_absolute():
-            raise ValueError()
-        relative = path.relative_to(source_root)
-    except ValueError:
-        raise RestoreError("unmapped_path", "备份包含源下载根目录之外的路径，目标实例未发布") from None
-    return str(destination.joinpath(*_safe_parts(relative.parts)))
-
-
-def _validate_schema(conn, manifest_version: int) -> dict[str, str]:
+def _validate_schema(conn, manifest_version: int, deadline: float) -> dict[str, str]:
     from .database_schema import validate_schema, SchemaError
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version != manifest_version:
@@ -117,42 +74,38 @@ def _validate_schema(conn, manifest_version: int) -> dict[str, str]:
     try:
         return validate_schema(conn, version)
     except (SchemaError, sqlite3.Error):
+        _check_deadline(deadline)
         raise RestoreError("unsupported_schema", "备份数据库结构不受当前程序支持，目标实例未发布") from None
 
 
-def _rewrite_database(path: Path, manifest: dict, final_downloads: Path, deadline: float) -> tuple[int, int, int]:
-    parser, source = _path_parser(manifest["resources"]["source_root"])
+def _rewrite_database(path: Path, version: int, source_root: PurePath, final_downloads: Path,
+                      deadline: float) -> tuple[int, int, int]:
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-        triggers = _validate_schema(connection, manifest["schema_version"])
+        triggers = _validate_schema(connection, version, deadline)
         connection.execute("BEGIN IMMEDIATE")
         # Never let UPDATE triggers re-copy catalog metadata from task history.
         # Their exact known definitions were checked above and are reinstalled.
         for name in triggers:
             connection.execute(f'DROP TRIGGER "{name}"')
-        counts = []
-        for table in ("jobs", "resource_catalog"):
-            if table == "resource_catalog" and manifest["schema_version"] < 3:
-                counts.append(0)
-                continue
-            count = 0
+        counts = {"jobs": 0, "resource_catalog": 0}
+        for table in output_path_tables(version):
             for row_id, output in connection.execute(f"SELECT rowid, output_path FROM {table}").fetchall():
                 _check_deadline(deadline)
-                mapped = _map_output(output, parser, source, final_downloads)
-                if output not in (None, ""):
+                parts = output_parts(table, output, source_root)
+                if parts is not None:
                     # SQLite permits NULL in TEXT PRIMARY KEY columns. Use the
                     # validated ordinary table's row identity, including those rows.
                     changed = connection.execute(f"UPDATE {table} SET output_path=? WHERE rowid=?",
-                                                 (mapped, row_id)).rowcount
+                                                 (str(final_downloads.joinpath(*parts)), row_id)).rowcount
                     if changed != 1:
                         raise RestoreError("invalid_database", "恢复路径映射失败，目标实例未发布")
-                    count += 1
-            counts.append(count)
+                    counts[table] += 1
         connection.execute("INSERT INTO settings(key, value) VALUES ('download_root', ?) "
                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(final_downloads),))
-        if manifest["schema_version"] >= 4:
+        if version >= 4:
             from .task_commands import queue_tail_time
             interrupted = connection.execute(
                 "SELECT job_id FROM jobs WHERE status='running' ORDER BY created_at, id",
@@ -169,7 +122,7 @@ def _rewrite_database(path: Path, manifest: dict, final_downloads: Path, deadlin
         connection.commit()
         if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
             raise RestoreError("invalid_database", "恢复后的数据库校验失败，目标实例未发布")
-        return counts[0], counts[1], requeued
+        return counts["jobs"], counts["resource_catalog"], requeued
     finally:
         connection.close()
 
@@ -254,15 +207,16 @@ def restore_backup(archive_path, target_dir, *, timeout: float = 120) -> Restore
     chain = None
     deadline = time.monotonic() + max(0.0, timeout)
     try:
-        _safe_parts((target.name,))
+        safe_parts((target.name,))
         chain = _directory_chain(target.parent)
         _check_deadline(deadline)
         with Path(archive_path).open("rb") as handle:
             info = inspect_backup(handle, timeout=max(0.0, deadline - time.monotonic()))
             manifest = info.manifest
-            _path_parser(manifest["resources"]["source_root"])
+            source_root = parse_source_root(manifest["resources"]["source_root"])
             for entry in manifest["resources"]["files"]:
-                _safe_parts(entry["path"].split("/"))
+                _check_deadline(deadline)
+                safe_parts(entry["path"].split("/"))
             _check_chain(chain)
             stage = Path(tempfile.mkdtemp(prefix=".jmcomic-restore-", dir=target.parent))
             stage_identity = _plain_directory(stage)
@@ -275,11 +229,12 @@ def restore_backup(archive_path, target_dir, *, timeout: float = 120) -> Restore
             with zipfile.ZipFile(handle) as archive:
                 _copy_member(archive, "app.db", database, manifest["database"], deadline)
                 # Validate schema and all output paths before extracting resources.
-                jobs, resources, requeued = _rewrite_database(database, manifest, target / "downloads", deadline)
+                jobs, resources, requeued = _rewrite_database(database, manifest["schema_version"], source_root,
+                                                              target / "downloads", deadline)
                 restored = 0
                 if manifest["resources"]["included"]:
                     for entry in manifest["resources"]["files"]:
-                        parts = _safe_parts(entry["path"].split("/"))
+                        parts = safe_parts(entry["path"].split("/"))
                         output = downloads.joinpath(*parts)
                         _check_chain(chain)
                         _private_parent(output.parent, stage, private_directories)
@@ -300,6 +255,8 @@ def restore_backup(archive_path, target_dir, *, timeout: float = 120) -> Restore
                                  included, restored, jobs, resources, requeued, warnings)
     except RestoreError:
         raise
+    except BackupPathError as error:
+        raise RestoreError(error.reason, f"{error}，目标实例未发布") from None
     except BackupError as error:
         if isinstance(error, TimeoutError):
             raise RestoreTimeout() from None

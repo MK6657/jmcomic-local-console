@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from .backup_paths import BackupPathError, output_parts, output_path_tables, parse_source_root, safe_parts
+from .database_schema import SchemaError, validate_schema
 from .file_tree import is_link
 from .storage import STAGING_DIRECTORY, is_temporary_path, staged_file
 
@@ -180,7 +182,9 @@ def _hash_file(path, budget, output=None):
 def _inventory(root, budget):
     result, names, total = [], set(), 0
     for path in _resource_paths(root, budget):
-        name = path.relative_to(root).as_posix()
+        relative = path.relative_to(root)
+        safe_parts(relative.parts, context="资源清单")
+        name = relative.as_posix()
         if name.casefold() in names:
             raise BackupError("资源文件名大小写冲突，无法跨平台恢复")
         names.add(name.casefold())
@@ -228,11 +232,27 @@ def _snapshot(source, destination, budget):
 
 
 def _has_running_jobs(connection):
-    exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()
-    if not exists:
-        return False
-    columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
-    return "status" in columns and connection.execute("SELECT 1 FROM jobs WHERE status='running' LIMIT 1").fetchone() is not None
+    return connection.execute("SELECT 1 FROM jobs WHERE status='running' LIMIT 1").fetchone() is not None
+
+
+def _check_restorable_snapshot(connection, version, root, budget):
+    budget.check()
+    try:
+        validate_schema(connection, version)
+    except (SchemaError, sqlite3.Error):
+        budget.check()
+        raise BackupError("数据库结构不受当前恢复程序支持，未发布新备份；请核对数据库来源并使用匹配的程序版本重试") from None
+    source = parse_source_root(str(root))
+    for table in output_path_tables(version):
+        budget.check()
+        try:
+            for (output,) in connection.execute(f"SELECT output_path FROM {table}"):
+                budget.check()
+                output_parts(table, output, source)
+        except sqlite3.Error:
+            budget.check()
+            raise BackupError(f"无法读取 {table}.output_path，未发布新备份；请检查路径记录的文本编码和数据库完整性后重试") from None
+    budget.check()
 
 
 def create_backup(database_path, download_root, destination, *, include_downloads=False,
@@ -242,8 +262,9 @@ def create_backup(database_path, download_root, destination, *, include_download
     ``download_root=None`` creates a database-only migration snapshot without any
     resource scan. ``source_download_root`` can record an absolute remapping origin
     for that snapshot without inspecting or requiring the directory to exist.
-    A normal root creates a hash inventory; file bytes are included
-    only with ``include_downloads=True`` and the caller-held stopped-service contract.
+    A normal backup requires a restorable schema and portable paths. It records
+    a hash inventory; including file bytes requires ``include_downloads=True``
+    and the caller-held stopped-service contract.
     """
     budget = _Budget(timeout)
     database_path, destination = _absolute(database_path), _absolute(destination)
@@ -274,9 +295,11 @@ def create_backup(database_path, download_root, destination, *, include_download
             with closing(_readonly_database(database_path, budget)) as source:
                 data_version = source.execute("PRAGMA data_version").fetchone()[0]
                 schema = _snapshot(source, snapshot, budget)
-                with closing(_readonly_database(snapshot, budget)) as saved:
-                    if include_downloads and _has_running_jobs(saved):
-                        raise BackupError("数据库仍有运行中的下载任务，不能确认资源备份已停机")
+                if root is not None:
+                    with closing(_readonly_database(snapshot, budget)) as saved:
+                        _check_restorable_snapshot(saved, schema, root, budget)
+                        if include_downloads and _has_running_jobs(saved):
+                            raise BackupError("数据库仍有运行中的下载任务，不能确认资源备份已停机")
                 inventory = [] if root is None else _inventory(root, budget)
                 db_size, db_hash = _hash_file(snapshot, budget)
                 mode = (("none" if source_root is None else "database") if root is None
@@ -313,6 +336,10 @@ def create_backup(database_path, download_root, destination, *, include_download
         return BackupInfo(destination, manifest)
     except BackupError:
         raise
+    except BackupPathError as error:
+        budget.check()
+        raise BackupError(f"{error}，未发布新备份；请核对 JMCONSOLE_DOWNLOAD_DIR 是否指向原下载根目录，"
+                          "或先迁移资源并校正记录路径和文件名后重试") from None
     except (OSError, sqlite3.Error, zipfile.BadZipFile, zlib.error, RuntimeError, ValueError) as exc:
         if time.monotonic() >= budget.deadline:
             raise BackupTimeout("备份或校验超过时间预算，未发布新备份") from None

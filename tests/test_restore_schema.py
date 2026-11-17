@@ -164,31 +164,29 @@ def test_quoted_primary_keyword_does_not_hide_a_missing_constraint(source, tmp_p
 
 def test_null_resource_primary_key_still_gets_its_path_remapped(source, tmp_path):
     from core.restore import restore_backup
-    backup = _backup(source, tmp_path / "null-resource-key.zip")
     original_path = str(source[1] / "Title_123")
-    _rewrite_archive(backup, database_change=lambda conn: conn.execute(
-        "INSERT INTO resource_catalog(job_id,job_order,album_id,output_path) VALUES(NULL,99,'123',?)",
-        (original_path,)))
+    with closing(sqlite3.connect(source[0])) as connection, connection:
+        connection.executemany("INSERT INTO resource_catalog(job_id,job_order,album_id,output_path) "
+                               "VALUES(NULL,?,'123',?)", ((99, original_path), (100, None), (101, "")))
+    backup = _backup(source, tmp_path / "null-resource-key.zip")
     _assert_valid_payload(backup, tmp_path)
     result = restore_backup(backup, tmp_path / "null-key-restored")
     assert result.remapped_resources == 2
     with closing(sqlite3.connect(result.database)) as connection:
-        assert connection.execute("SELECT output_path FROM resource_catalog WHERE job_id IS NULL").fetchone() == (
-            str(result.downloads / "Title_123"),)
+        assert dict(connection.execute("SELECT job_order,output_path FROM resource_catalog WHERE job_id IS NULL")) == {
+            99: str(result.downloads / "Title_123"), 100: None, 101: ""}
 
 
 def test_v3_restored_catalog_survives_first_startup_queue_backfill(source, tmp_path, monkeypatch):
     from core import database as db
     from core.restore import restore_backup
-    backup = _backup(source, tmp_path / "v3-independent-catalog.zip")
-
-    def mutate(conn):
+    with closing(sqlite3.connect(source[0])) as conn, conn:
         conn.execute("UPDATE jobs SET queued_at=NULL")
         conn.execute("UPDATE resource_catalog SET title='Independent title',superseded_at='2026-01-02',"
                      "output_path=? WHERE job_id='job_done'", (str(source[1] / "Independent_123"),))
         conn.execute("PRAGMA user_version=3")
 
-    _rewrite_archive(backup, database_change=mutate)
+    backup = _backup(source, tmp_path / "v3-independent-catalog.zip")
     _assert_valid_payload(backup, tmp_path, version=3)
     result = restore_backup(backup, tmp_path / "v3-first-startup")
     monkeypatch.setattr(db, "DB_DIR", result.database.parent)
