@@ -30,10 +30,21 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.11.15'
+          python-version: '3.12'
           architecture: x64
           cache: pip
           cache-dependency-path: 'requirements*.txt'
+      # setup-python's Windows catalog ends before this 3.11 security patch.
+      # Use the same managed CPython distribution used for the local release.
+      - name: Bootstrap the exact Windows release interpreter
+        run: |
+          python -m pip install uv==0.12.7
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m uv venv --managed-python --python 3.11.15 .venv-build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .\.venv-build\Scripts\python.exe -m ensurepip
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Resolve-Path '.venv-build/Scripts').Path
       - name: Install the release environment
         run: python -m pip install -r requirements-build.txt -r requirements-dev.txt
       - run: python -m pip check
