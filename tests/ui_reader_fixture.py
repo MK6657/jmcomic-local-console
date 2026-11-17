@@ -288,7 +288,7 @@ def install_update_stub(update_checker):
     metrics = {"calls": [], "in_flight": 0, "max_in_flight": 0}
     lock = threading.Lock()
 
-    def fake_fetch(album_id):
+    def fake_fetch(album_id, *, stop_event=None):
         album_id = str(album_id)
         with lock:
             metrics["calls"].append(album_id)

@@ -13,6 +13,10 @@ class BackgroundCallsStopped(RuntimeError):
     pass
 
 
+class BackgroundCallsBusy(RuntimeError):
+    pass
+
+
 @dataclass(eq=False)
 class _Call:
     release: object
@@ -25,7 +29,10 @@ class _Call:
 
 
 class BackgroundCalls:
-    def __init__(self):
+    def __init__(self, max_pending=16):
+        if isinstance(max_pending, bool) or not isinstance(max_pending, int) or max_pending < 1:
+            raise ValueError("后台调用容量必须为正整数")
+        self.max_pending = max_pending
         self._condition = threading.Condition()
         self._accepting = True
         self._calls = set()
@@ -35,6 +42,7 @@ class BackgroundCalls:
         self._shutdown_cleanup = None
         self._cleanup_requested = False
         self._cleanup_call = None
+        self._stop_event = threading.Event()
 
     def start(self):
         with self._condition:
@@ -44,12 +52,25 @@ class BackgroundCalls:
                     or (self._worker is not None and self._worker.is_alive())):
                 raise RuntimeError("后台调用仍在退出，不能重新接收请求")
             self._worker = None
+            self._stop_event = threading.Event()
             self._accepting = True
+
+    def stop_event(self):
+        with self._condition:
+            return self._stop_event
 
     def require_accepting(self):
         with self._condition:
             if not self._accepting:
                 raise BackgroundCallsStopped("后台调用正在停止，请稍后重试")
+
+    def wait_for_capacity(self, timeout):
+        """Bounded batch producers wait without submitting extra queued calls."""
+        with self._condition:
+            if not self._accepting:
+                raise BackgroundCallsStopped("后台调用正在停止，请稍后重试")
+            if sum(call is not self._cleanup_call for call in self._calls) >= self.max_pending:
+                self._condition.wait(max(0, timeout))
 
     def set_shutdown_cleanup(self, callback):
         """Bind the single client-cache cleanup hook, without importing the SDK."""
@@ -86,6 +107,8 @@ class BackgroundCalls:
         with self._condition:
             if not self._accepting:
                 raise BackgroundCallsStopped("后台调用正在停止，请稍后重试")
+            if sum(call is not self._cleanup_call for call in self._calls) >= self.max_pending:
+                raise BackgroundCallsBusy("元数据请求过多，请稍后重试")
             self._ensure_worker()
             self._calls.add(call)
         try:
@@ -117,6 +140,7 @@ class BackgroundCalls:
             if self._accepting and self._shutdown_cleanup is not None:
                 self._cleanup_requested = True
             self._accepting = False
+            self._stop_event.set()
             self._condition.notify_all()
 
     def stop(self, timeout=5) -> bool:
@@ -125,6 +149,7 @@ class BackgroundCalls:
             if self._accepting and self._shutdown_cleanup is not None:
                 self._cleanup_requested = True
             self._accepting = False
+            self._stop_event.set()
             self._cleanup_round += 1  # A later stop retries failed lease release.
             if self._calls or self._cleanup_requested:
                 self._ensure_worker()
@@ -155,6 +180,7 @@ class BackgroundCalls:
             if self._worker_error is not None:
                 errors.append(type(self._worker_error).__name__)
             return {"accepting": self._accepting,
+                    "max_pending": self.max_pending,
                     "pending": len(self._calls) + int(self._cleanup_requested and self._cleanup_call is None),
                     "cleanup_running": self._worker is not None and self._worker.is_alive(),
                     "errors": tuple(errors)}
@@ -226,3 +252,5 @@ runtime_status = _service.runtime_status
 require_accepting = _service.require_accepting
 set_shutdown_cleanup = _service.set_shutdown_cleanup
 request_cleanup = _service.request_cleanup
+stop_event = _service.stop_event
+wait_for_capacity = _service.wait_for_capacity

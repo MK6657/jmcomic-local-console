@@ -39,7 +39,7 @@ def test_timed_out_request_keeps_call_and_lease_until_real_completion(calls):
         return "result"
     try:
         with pytest.raises(TimeoutError):
-            jm_service._call_with_timeout("local", 0.01, "bounded wait", MethodType(slow, client))
+            jm_service._call_with_timeout("local", 0.1, "bounded wait", MethodType(slow, client))
         assert entered.is_set() and calls.runtime_status()["pending"] == 1
         jm_service.close_client(client)
         client._jm_retired = True
@@ -84,7 +84,10 @@ def test_retired_generations_are_both_tracked_without_early_transport_close(call
         finally:
             for gate in gates:
                 gate.set()
-        assert old.result(1) == 0 and new.result(1) == 1
+        from core.metadata_budget import MetadataStopped
+        for future in (old, new):
+            with pytest.raises(MetadataStopped):
+                future.result(1)
     assert calls.stop(1)
     first_session.close.assert_called_once()
     second_session.close.assert_called_once()

@@ -19,6 +19,7 @@ class ApplicationRuntime:
         self.shutdown_timeout = shutdown_timeout
         self.additional_services = tuple(additional_services)
         self._services = []
+        self._updates_registered = False  # owns pre-start manual checks too
         self._lock = threading.RLock()
         self._stop_requested = threading.Event()
         self._state = "new"
@@ -44,6 +45,8 @@ class ApplicationRuntime:
                     # A start() that raises may already own a thread; include it
                     # in rollback before invoking it, not only on success.
                     self._services.append((name, service))
+                    if name == "updates":
+                        self._updates_registered = True
                     service.start()
                     self._check_start_allowed()
                 self._state = "running"
@@ -58,7 +61,8 @@ class ApplicationRuntime:
     def _close_admission(self, errors):
         # Producers can be waiting on shared request work. Close every admission
         # gate before draining any service, without holding a service's lock.
-        for name, service in (*reversed(self.additional_services), ("jobs", self.job_manager)):
+        for name, service in (("updates", self.update_checker),
+                              *reversed(self.additional_services), ("jobs", self.job_manager)):
             try:
                 service.request_stop()
             except Exception as exc:
@@ -75,19 +79,20 @@ class ApplicationRuntime:
         deadline = time.monotonic() + budget
         self._stop_requested.set()
         errors = []
-        requested = False
-        if self._state in ("running", "stopping"):
+        if self._state != "stopped":
             # Running executors must stop admission immediately, even if another
-            # lifecycle call currently owns the lock. During startup the separate
-            # event instead prevents start() from reviving admission afterwards.
-            requested = True
+            # lifecycle call currently owns the lock. This includes manual update
+            # checks during recovery and before the background loop has started.
             self._close_admission(errors)
         if not self._lock.acquire(timeout=max(0, deadline - time.monotonic())):
             self.stop_errors = tuple(errors + ["runtime: lifecycle lock timeout"])
             return False
         try:
-            if self._services and not requested:
-                self._close_admission(errors)
+            # Manual update requests are admitted even before updates.start().
+            # Recovery/partial-start rollback must therefore drain this owner too.
+            if self._state != "stopped" and not self._updates_registered:
+                self._services.append(("updates", self.update_checker))
+                self._updates_registered = True
             remaining = []
             for name, service in reversed(self._services):
                 try:

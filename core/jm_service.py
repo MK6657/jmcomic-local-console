@@ -9,7 +9,7 @@ import threading
 import time
 from collections import OrderedDict
 from copy import copy
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed, wait, FIRST_COMPLETED
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,8 @@ from . import archive_pages
 from . import update_store
 from . import sdk_adapter
 from . import background_calls
+from .background_calls import BackgroundCallsBusy, BackgroundCallsStopped
+from . import metadata_budget
 from .upstream import classify_failure
 from .storage import staged_file
 from . import image_download
@@ -99,7 +101,13 @@ def get_client(shared=True):
         option = _get_or_create_option()
         if shared:
             if _global_client is None:
-                _global_client = sdk_adapter.new_client(option)
+                candidate = sdk_adapter.new_client(option)
+                try:
+                    metadata_budget.install(candidate)
+                except BaseException:
+                    _dispose_client(candidate)
+                    raise
+                _global_client = candidate
                 setattr(_global_client, _JM_SHARED_ATTR, True)
                 _global_client._jm_users = 0
                 _global_client._jm_retired = False
@@ -395,29 +403,41 @@ def _valid_image(path):
         return False
 
 
-def _submit_client_call(pool, client, fn, *args, **kwargs):
+def _submit_client_call(pool, client, fn, *args, _call_deadline=None, _call_stop=None, **kwargs):
     """Keep a shared transport leased until the future actually finishes/cancels.
     The worker thread inherits the caller's request_id, so jmcomic's retry/failure records join its trace."""
     shared = client is not None and getattr(client, _JM_SHARED_ATTR, False)
     def acquire():
         with _option_lock:
             client._jm_users += 1
-    return background_calls.submit(pool, bind_request_id(fn), *args,
+    deadline = (_call_deadline if _call_deadline is not None else
+                metadata_budget.deadline_after(20))
+    stopped = background_calls.stop_event()
+    def invoke():
+        with metadata_budget.call_scope(deadline, stopped, _call_stop):
+            return fn(*args, **kwargs)
+    return background_calls.submit(pool, bind_request_id(invoke),
         acquire=acquire if shared else None,
-        release=(lambda: close_client(client)) if shared else None, **kwargs)
+        release=(lambda: close_client(client)) if shared else None)
 
 
-def _call_with_timeout(label: str, timeout: float, timeout_msg: str, fn, *args, **kwargs):
+def _call_with_timeout(label: str, timeout: float, timeout_msg: str, fn, *args,
+                       _call_deadline=None, _call_stop=None, _call_client=None, **kwargs):
     """在独立线程中执行 jmcomic 远程调用，带超时保护。
 
     统一取代散落各处的 `ThreadPoolExecutor(1) + fut.result(timeout=...)` 样板：
     只有真正的等待/传输超时归为 timeout，其余失败保留结构化种类。
     请求返回后，仍在执行的调用继续持有客户端租约，直到实际结束。
     """
+    deadline = metadata_budget.deadline_after(min(timeout, 120))
+    if _call_deadline is not None:
+        deadline = min(deadline, _call_deadline)
     pool = ThreadPoolExecutor(max_workers=1)
     try:
-        fut = _submit_client_call(pool, getattr(fn, "__self__", None), fn, *args, **kwargs)
-        result = fut.result(timeout=timeout)
+        owner = _call_client if _call_client is not None else getattr(fn, "__self__", None)
+        fut = _submit_client_call(pool, owner, fn, *args,
+                                  _call_deadline=deadline, _call_stop=_call_stop, **kwargs)
+        result = fut.result(timeout=metadata_budget.remaining(deadline, _call_stop))
     except Exception as e:
         pool.shutdown(wait=False)  # 不阻塞请求线程；挂起的工作线程由其自身超时终结
         failure = classify_failure(e, timeout_message=timeout_msg)
@@ -443,8 +463,9 @@ def search_albums(keyword: str, page: int = 1, page_size: int = 20, sort: str = 
 
     try:
         search_page = _call_with_timeout(
-            f"搜索 keyword={keyword}", 25, "搜索超时，请稍后重试",
+            f"搜索 keyword={keyword}", _operation_timeout(25), "搜索超时，请稍后重试",
             client.search,
+            _call_client=client,
             search_query=keyword,
             page=page,
             main_tag=0,
@@ -482,7 +503,8 @@ def search_albums(keyword: str, page: int = 1, page_size: int = 20, sort: str = 
     }
 
 
-def check_album_photos(client, album, timeout: float = 15, failed: list | None = None) -> list:
+def check_album_photos(client, album, timeout: float = 15, failed: list | None = None,
+                       *, deadline=None, stop_event=None) -> list:
     """并行补全各章节的图片列表（page_arr），避免逐章串行 HTTP 请求。
 
     SDK只更新工作副本；超时返回的对象不会被晚到的线程修改。
@@ -502,29 +524,45 @@ def check_album_photos(client, album, timeout: float = 15, failed: list | None =
     # 独立线程池 + 手动 shutdown(wait=False)：
     # 不能用 with 语法 —— __exit__ 会 shutdown(wait=True)，
     # 阻塞等待挂起的 check_photo，让超时保护形同虚设。
-    check_pool = ThreadPoolExecutor(max_workers=min(len(pending), 10))
-    fut_map, completed = {}, set()
+    deadline = min(deadline if deadline is not None else float("inf"),
+                   metadata_budget._clock() + min(timeout, _operation_timeout(timeout)))
+    stopped = background_calls.stop_event()
+    check_pool = ThreadPoolExecutor(max_workers=min(len(pending), 4))
+    fut_map, completed, next_index = {}, set(), 0
     try:
-        for index, photo in pending:
-            working = copy(photo)
-            if isinstance(getattr(working, "page_arr", None), list):
-                working.page_arr = list(working.page_arr)
-            future = _submit_client_call(check_pool, client, client.check_photo, working)
-            fut_map[future] = (index, working)
-        for fut in as_completed(fut_map, timeout=timeout):
-            index, working = fut_map[fut]
-            try:
-                fut.result()
-            except Exception as e:
-                log.warning(f"获取 photo 详情失败 photo_id={working.photo_id} error={type(e).__name__}: {e}")
-            else:
-                if getattr(working, "page_arr", None) is not None:
-                    photo_list[index] = working
-                    completed.add(index)
+        while next_index < len(pending) or fut_map:
+            left = metadata_budget.remaining(deadline, stopped, stop_event)
+            while next_index < len(pending) and len(fut_map) < 4:
+                index, photo = pending[next_index]
+                working = copy(photo)
+                if isinstance(getattr(working, "page_arr", None), list):
+                    working.page_arr = list(working.page_arr)
+                try:
+                    future = _submit_client_call(check_pool, client, client.check_photo, working,
+                                                  _call_deadline=deadline, _call_stop=stop_event)
+                except BackgroundCallsBusy:
+                    break
+                fut_map[future] = (index, working)
+                next_index += 1
+            if not fut_map:
+                background_calls.wait_for_capacity(min(left, 0.05))
+                continue
+            ready, _ = wait(fut_map, timeout=min(left, 0.05), return_when=FIRST_COMPLETED)
+            metadata_budget.remaining(deadline, stopped, stop_event)
+            for fut in ready:
+                index, working = fut_map.pop(fut)
+                try:
+                    fut.result()
+                except Exception as e:
+                    log.warning(f"获取 photo 详情失败 photo_id={working.photo_id} error={type(e).__name__}: {e}")
                 else:
-                    log.warning(f"获取 photo 详情未返回图片列表 photo_id={working.photo_id}")
-    except FuturesTimeout:
-        unfinished = sum(1 for fut in fut_map if not fut.done())
+                    if getattr(working, "page_arr", None) is not None:
+                        photo_list[index] = working
+                        completed.add(index)
+                    else:
+                        log.warning(f"获取 photo 详情未返回图片列表 photo_id={working.photo_id}")
+    except (FuturesTimeout, BackgroundCallsStopped, metadata_budget.MetadataStopped):
+        unfinished = len(pending) - len(completed)
         log.warning(f"check_photo 超时（{timeout}s），album_id={getattr(album, 'album_id', '?')}，"
                     f"已跳过 {unfinished} 个未完成章节")
     finally:
@@ -550,16 +588,17 @@ def image_is_gif(image) -> bool:
 def get_album_detail(album_id: str) -> dict:
     """获取漫画详情，带 20 秒超时防止阻塞 Waitress 线程"""
     log.info(f"获取专辑详情 album_id={album_id}")
+    deadline = metadata_budget.deadline_after(_operation_timeout(20))
     client, _ = get_client()
     try:
         # 包装远程调用，设 20 秒超时防止永久挂起占用 Waitress 线程
         album = _call_with_timeout(
             f"获取专辑详情 album_id={album_id}", 20, "获取专辑详情超时，请稍后重试",
-            client.get_album_detail, album_id,
+            client.get_album_detail, album_id, _call_deadline=deadline, _call_client=client,
         )
 
         photos, failed = [], []
-        checked = check_album_photos(client, album, failed=failed)
+        checked = check_album_photos(client, album, failed=failed, deadline=deadline)
         unknown = {id(photo) for photo in failed}
         for p in checked:
             known = id(p) not in unknown
@@ -637,42 +676,59 @@ def _detail_is_complete(data) -> bool:
 
 def get_album_detail_cached(album_id: str, ttl: int = 3600) -> dict:
     """Bounded two-tier cache with request coalescing and isolated return values."""
+    deadline = metadata_budget.deadline_after(_operation_timeout(20))
+    stopped = background_calls.stop_event()
+    key = (str(db.DB_PATH), album_id)
+    lock = _detail_fetch_locks[hash(key) % len(_detail_fetch_locks)]
+    while not lock.acquire(timeout=min(0.05, metadata_budget.remaining(deadline, stopped))):
+        pass
+    try:
+        with metadata_budget.call_scope(deadline, stopped):
+            return _get_album_detail_cached_locked(album_id, ttl)
+    finally:
+        lock.release()
+
+
+def _get_album_detail_cached_locked(album_id: str, ttl: int) -> dict:
     from copy import deepcopy
     import json
     key = (str(db.DB_PATH), album_id)
     ttl = max(0, ttl)
-    with _detail_fetch_locks[hash(key) % len(_detail_fetch_locks)]:
-        now = time.time()
-        with _detail_cache_lock:
-            generation = _detail_cache_generation
-            cached = _detail_cache.get(key)
-            if (cached and _detail_is_complete(cached["data"]) and ttl > 0
-                    and now - cached["ts"] < min(300, ttl)):
-                _detail_cache.move_to_end(key)
-                return deepcopy(cached["data"])
-        stored = db.get_cached_album_detail(album_id, ttl=ttl) if ttl > 0 else None
-        if stored and not _detail_is_complete(stored["detail"]):
-            with _detail_cache_lock:
-                _detail_cache.pop(key, None)
-                db.delete_cached_album_detail(album_id)
-            stored = None
-        if stored:
-            data = stored["detail"]
-            if stored["cover_cdn_url"]:
-                data["cover"] = stored["cover_cdn_url"]
-            timestamp = stored["cached_at"]
-        else:
-            data = get_album_detail(album_id)
-            timestamp = time.time()
-        with _detail_cache_lock:
-            if generation == _detail_cache_generation and _detail_is_complete(data):
-                if stored is None:
-                    db.set_cached_album_detail(album_id, json.dumps(data, ensure_ascii=False), data.get("cover", ""))
-                _detail_cache[key] = {"data": deepcopy(data), "ts": timestamp}
-                _detail_cache.move_to_end(key)
-                while len(_detail_cache) > 500:
-                    _detail_cache.popitem(last=False)
-        return deepcopy(data)
+    now = time.time()
+    with metadata_budget.lock_scope(_detail_cache_lock):
+        generation = _detail_cache_generation
+        cached = _detail_cache.get(key)
+        if (cached and _detail_is_complete(cached["data"]) and ttl > 0
+                and now - cached["ts"] < min(300, ttl)):
+            _detail_cache.move_to_end(key)
+            return deepcopy(cached["data"])
+    stored = db.get_cached_album_detail(album_id, ttl=ttl) if ttl > 0 else None
+    if stored and not _detail_is_complete(stored["detail"]):
+        with metadata_budget.lock_scope(_detail_cache_lock):
+            _detail_cache.pop(key, None)
+            db.delete_cached_album_detail(album_id)
+        stored = None
+    if stored:
+        data = stored["detail"]
+        if stored["cover_cdn_url"]:
+            data["cover"] = stored["cover_cdn_url"]
+        timestamp = stored["cached_at"]
+    else:
+        data = get_album_detail(album_id)
+        timestamp = time.time()
+    with metadata_budget.lock_scope(_detail_cache_lock):
+        # This check is the publication permit. A stop observed while waiting
+        # for the lock must discard the result before either cache is changed.
+        # Once admitted, the existing DB transaction is allowed to finish.
+        metadata_budget.check_current()
+        if generation == _detail_cache_generation and _detail_is_complete(data):
+            if stored is None:
+                db.set_cached_album_detail(album_id, json.dumps(data, ensure_ascii=False), data.get("cover", ""))
+            _detail_cache[key] = {"data": deepcopy(data), "ts": timestamp}
+            _detail_cache.move_to_end(key)
+            while len(_detail_cache) > 500:
+                _detail_cache.popitem(last=False)
+    return deepcopy(data)
 
 
 def _same_dir(a, b) -> bool:

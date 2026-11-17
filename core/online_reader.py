@@ -297,6 +297,10 @@ def _get_photo(photo_id: str, deadline: float):
             log.warning(f"在线阅读 获取章节 photo_id={photo_id} 超时，仍在后台获取")
         raise TimeoutError(_FAILED)
     if lookup.error is not None:
+        from .background_calls import BackgroundCallsBusy, BackgroundCallsStopped
+        from .metadata_budget import MetadataStopped
+        if isinstance(lookup.error, (BackgroundCallsBusy, BackgroundCallsStopped, MetadataStopped)):
+            raise jm_service.classify_failure(lookup.error)
         raise TimeoutError(_FAILED)
     return lookup.photo
 
@@ -317,7 +321,9 @@ def _start_lookup(photo_id: str, lookup: _Lookup) -> None:
         try:
             pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="online-photo")
             try:
-                future = jm_service._submit_client_call(pool, client, client.get_photo_detail, photo_id, False)
+                future = jm_service._submit_client_call(pool, client, client.get_photo_detail, photo_id, False,
+                    _call_deadline=jm_service.metadata_budget._clock() + jm_service._operation_timeout(20),
+                    _call_stop=_stop_event)
             finally:
                 pool.shutdown(wait=False)
         finally:
@@ -368,15 +374,17 @@ def _finish_lookup(photo_id: str, lookup: _Lookup, photo, error) -> None:
 def album_pages(album_id: str) -> dict:
     """整本漫画的在线页列表，结构与本地 /api/preview/<id> 一致，另附 photo_id 便于按章节定位。"""
     log.info(f"在线阅读 获取页面列表 album_id={album_id}")
+    deadline = jm_service.metadata_budget._clock() + jm_service._operation_timeout(20)
     client, _ = jm_service.get_client()
     try:
         album = jm_service._call_with_timeout(
             f"在线阅读 获取专辑 album_id={album_id}", 20, _FAILED,
-            client.get_album_detail, album_id,
+            client.get_album_detail, album_id, _call_deadline=deadline, _call_stop=_stop_event,
+            _call_client=client,
         )
         _require_running()
         failed = []
-        photos = jm_service.check_album_photos(client, album, failed=failed)
+        photos = jm_service.check_album_photos(client, album, failed=failed, deadline=deadline, stop_event=_stop_event)
     finally:
         jm_service.close_client(client)
 

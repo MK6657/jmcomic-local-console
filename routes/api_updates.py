@@ -70,6 +70,8 @@ def check_now(album_id: str):
                         "message": "本地还没有已下载的内容，不检查新章节"}), 409
     except update_checker.Busy:
         return jsonify({"status": "error", "reason": "busy", "message": "正在检查别的漫画，请稍后再试"}), 409
+    except update_checker.CheckStopped:
+        return jsonify({"status": "error", "reason": "stopped", "message": "服务正在停止，检查新章节已中断"}), 503
     except Exception as e:
         log.error(f"检查新章节失败 album_id={album_id} error={e}")
         return jsonify({"status": "error", "message": "检查新章节失败"}), 500

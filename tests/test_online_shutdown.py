@@ -44,6 +44,7 @@ def reader(tmp_path, monkeypatch):
     monkeypatch.setattr(online_reader, "_PREFETCH_AHEAD", 0)
     monkeypatch.setattr(online_reader, "_clock", time.monotonic)
     monkeypatch.setattr(online_reader, "_page_budget", lambda: 2)
+    monkeypatch.setattr(online_reader.jm_service, "get_settings", lambda: {"timeout": "30"})
     online_reader.clear_cache()
     yield online_reader
     assert online_reader.stop(2)
@@ -107,7 +108,7 @@ def test_active_foreground_transport_is_not_closed_or_published_during_stop(read
 def test_album_listing_remains_owned_until_its_real_foreground_call_exits(reader, monkeypatch):
     entered, release, checked, closed = threading.Event(), threading.Event(), [], []
     client = SimpleNamespace(get_album_detail=lambda *args: None)
-    def call(*args):
+    def call(*args, **kwargs):
         entered.set()
         assert release.wait(2)
         return object()
@@ -208,7 +209,7 @@ def test_stopped_lookup_waiter_returns_before_sdk_and_late_callback_cannot_publi
     client = SimpleNamespace(get_photo_detail=lambda *args: None)
     monkeypatch.setattr(reader.jm_service, "get_client", lambda: (client, None))
     monkeypatch.setattr(reader.jm_service, "close_client", lambda value: None)
-    monkeypatch.setattr(reader.jm_service, "_submit_client_call", lambda *args: future)
+    monkeypatch.setattr(reader.jm_service, "_submit_client_call", lambda *args, **kwargs: future)
     thread, result = launch(lambda: reader._get_photo(Photo.photo_id, time.monotonic() + 5))
     try:
         assert wait_until(lambda: reader._lookup_callbacks == 1)
@@ -232,7 +233,7 @@ def test_stop_waits_for_lookup_callback_itself_even_after_future_is_done(reader,
     client = SimpleNamespace(get_photo_detail=lambda *args: None)
     monkeypatch.setattr(reader.jm_service, "get_client", lambda: (client, None))
     monkeypatch.setattr(reader.jm_service, "close_client", lambda value: None)
-    monkeypatch.setattr(reader.jm_service, "_submit_client_call", lambda *args: future)
+    monkeypatch.setattr(reader.jm_service, "_submit_client_call", lambda *args, **kwargs: future)
     original = reader._finish_lookup
     def finish(*args):
         callback_entered.set()

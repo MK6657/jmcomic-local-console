@@ -25,7 +25,7 @@ def test_shared_requests_start_before_consumers_and_all_gates_close_before_drain
     runtime.start()
     assert events == ["start:requests", "start:reader", "start:jobs", "start:scheduler", "start:updates"]
     assert runtime.stop()
-    assert events[5:] == ["gate:reader", "gate:requests", "gate:jobs", "stop:updates", "stop:scheduler",
+    assert events[5:] == ["gate:updates", "gate:reader", "gate:requests", "gate:jobs", "stop:updates", "stop:scheduler",
                           "stop:jobs", "stop:reader", "stop:requests"]
 
 

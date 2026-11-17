@@ -36,7 +36,7 @@ Get-ChildItem -LiteralPath '.\static\js' -Filter '*.js' -File | ForEach-Object {
 }
 ```
 
-每条命令均需成功退出。第二批本机完整套件1830 passed、2 skipped，随后新增4项最终PDF保存故障用例单独通过；当前全部收集应包含这4项。请记录自己的结果及跳过原因，详见 [修复证据](AUDIT_FIXES.md)。若环境为 Linux/macOS 或缺少 Windows 执行器，可以进行静态审查并运行适用的离线检查，但需明确哪些原生 Windows 路径、命名互斥锁、停机事件及 EXE 行为没有验证。不要把其他系统的结果写成 Windows 发行验收。
+每条命令均需成功退出。第三批本机完整套件1914 passed、2 skipped（200.16秒），跳过为文件符号链接权限。请记录自己的结果及跳过原因，详见 [修复证据](AUDIT_FIXES.md)。若环境为 Linux/macOS 或缺少 Windows 执行器，可以进行静态审查并运行适用的离线检查，但需明确哪些原生 Windows 路径、命名互斥锁、停机事件及 EXE 行为没有验证。不要把其他系统的结果写成 Windows 发行验收。
 
 不要逐个直接运行被默认收集排除的历史 `test_smoke.py`、`test_endpoints.py`、`test_e2e_integration.py` 等脚本，它们可能访问网络或修改数据。详见 [独立审查委托](INDEPENDENT_BACKEND_AUDIT.md)。
 
@@ -47,9 +47,11 @@ Get-ChildItem -LiteralPath '.\static\js' -Filter '*.js' -File | ForEach-Object {
 ```powershell
 .\.venv\Scripts\python.exe tests/check_capacity_boundaries.py
 .\.venv\Scripts\python.exe tests/check_pdf_memory.py
+.\.venv\Scripts\python.exe tests/check_metadata_budget.py
+.\.venv\Scripts\python.exe tests/check_backend_shutdown.py
 ```
 
-下面两项使用临时实例和本机模拟请求，不访问真实上游，可在上述源码虚拟环境中执行：
+后两项是第三批的共享元数据重试总预算及后台停止验证，仍仅访问本机。下面两项使用临时实例和本机模拟请求，不访问真实上游，可在上述源码虚拟环境中执行：
 
 ```powershell
 .\.venv\Scripts\python.exe desktop.py self-check

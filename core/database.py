@@ -536,8 +536,9 @@ def claim_next_queued_job(excluded_album_ids=()) -> dict | None:
     将第一个 queued 任务的状态更新为 'running'，并返回任务记录。
     如果已被其他调度器抢先，返回 None。
     """
-    conn = get_db()
-    try:
+    # Take the write lock before selecting: concurrent claims must select from
+    # the committed queue, rather than all waiting to update the same first row.
+    with transaction() as conn:
         excluded_album_ids = tuple(excluded_album_ids)
         exclusion = (" AND album_id NOT IN (" + ",".join("?" for _ in excluded_album_ids) + ")"
                      if excluded_album_ids else "")
@@ -554,13 +555,10 @@ def claim_next_queued_job(excluded_album_ids=()) -> dict | None:
             "UPDATE jobs SET status='running', updated_at=? WHERE job_id=? AND status='queued'",
             (now, job["job_id"]),
         )
-        conn.commit()
         if cur.rowcount == 0:
             return None  # 已被其他调度器抢走
         job["status"] = "running"
         return job
-    finally:
-        conn.close()
 
 
 def transition_job_status(job_id: str, from_statuses: list[str], to_status: str, *, conn=None, **extra) -> bool:

@@ -21,6 +21,7 @@ def services(events, *, fail_start=None, fail_stop=None, pending=None):
         return SimpleNamespace(start=start, stop=stop)
     jobs, schedule, updates = (component(name) for name in ("jobs", "scheduler", "updates"))
     jobs.request_stop = lambda: events.append("request_stop")
+    updates.request_stop = lambda: events.append("request_stop:updates")
     jobs.recover_interrupted = lambda: events.append("recover") or 2
     return jobs, schedule, updates
 
@@ -33,7 +34,7 @@ def test_runtime_starts_once_and_stops_in_reverse_order():
     runtime.start()
     assert events == ["recover", "start:jobs", "start:scheduler", "start:updates"]
     assert runtime.stop() is True
-    assert events[-4:] == ["request_stop", "stop:updates", "stop:scheduler", "stop:jobs"]
+    assert events[-5:] == ["request_stop:updates", "request_stop", "stop:updates", "stop:scheduler", "stop:jobs"]
     snapshot = list(events)
     assert runtime.stop() is True
     assert events == snapshot
@@ -42,8 +43,8 @@ def test_runtime_starts_once_and_stops_in_reverse_order():
 
 
 @pytest.mark.parametrize("failure,cleanup", [
-    ("jobs", ["stop:jobs"]),
-    ("scheduler", ["stop:scheduler", "stop:jobs"]),
+    ("jobs", ["stop:updates", "stop:jobs"]),
+    ("scheduler", ["stop:updates", "stop:scheduler", "stop:jobs"]),
     ("updates", ["stop:updates", "stop:scheduler", "stop:jobs"]),
 ])
 def test_partial_start_failure_rolls_back_including_the_failing_service(failure, cleanup):
@@ -53,7 +54,12 @@ def test_partial_start_failure_rolls_back_including_the_failing_service(failure,
     with pytest.raises(RuntimeError, match="synthetic start failure"):
         runtime.start()
     assert [event for event in events if event.startswith("stop:")] == cleanup
+    gates = [events.index(name) for name in ("request_stop:updates", "request_stop")]
+    assert max(gates) < min(events.index(name) for name in cleanup)
+    assert events.count("stop:updates") == 1  # manual ownership predates updates.start()
+    snapshot = list(events)
     assert runtime.stop() is True
+    assert events == snapshot
 
 
 def test_recovery_failure_starts_no_services():
@@ -66,8 +72,11 @@ def test_recovery_failure_starts_no_services():
     runtime = ApplicationRuntime(jobs, scheduler, updates)
     with pytest.raises(RuntimeError, match="recovery failure"):
         runtime.start()
-    assert events == []
+    assert events == ["request_stop:updates", "request_stop", "stop:updates"]
+    assert runtime._services == [] and runtime._state == "stopped"
+    snapshot = list(events)
     assert runtime.stop() is True
+    assert events == snapshot
 
 
 @pytest.mark.parametrize("kind", ["failure", "pending"])
@@ -78,14 +87,14 @@ def test_stop_failure_is_reported_but_other_services_are_still_stopped(kind):
     runtime = ApplicationRuntime(*services(events, **kwargs))
     runtime.start()
     assert runtime.stop() is False
-    assert events[-4:] == ["request_stop", "stop:updates", "stop:scheduler", "stop:jobs"]
+    assert events[-5:] == ["request_stop:updates", "request_stop", "stop:updates", "stop:scheduler", "stop:jobs"]
     assert len(runtime.stop_errors) == 1 and runtime.stop_errors[0].startswith("updates:")
     with pytest.raises(RuntimeError):
         runtime.start()
     # A later stop retries only the component whose ownership was retained.
     events.clear()
     assert runtime.stop(timeout=0) is False
-    assert events == ["request_stop", "stop:updates"]
+    assert events == ["request_stop:updates", "request_stop", "stop:updates"]
 
 
 def test_stop_uses_one_total_budget_not_one_budget_per_service(monkeypatch):
@@ -105,6 +114,20 @@ def test_stop_uses_one_total_budget_not_one_budget_per_service(monkeypatch):
     runtime.start()
     assert runtime.stop(timeout=5) is False
     assert budgets == [("updates", 5), ("scheduler", 2), ("jobs", 0)]
+
+
+@pytest.mark.parametrize("pending", ["jobs", "scheduler"])
+def test_retry_drain_does_not_reacquire_an_already_drained_update_owner(pending):
+    from core.runtime import ApplicationRuntime
+    events = []
+    runtime = ApplicationRuntime(*services(events, pending=pending))
+    runtime.start()
+    assert runtime.stop(timeout=0) is False
+    assert [name for name, _ in runtime._services] == [pending]
+    assert events.count("stop:updates") == 1
+    events.clear()
+    assert runtime.stop(timeout=0) is False
+    assert events == ["request_stop:updates", "request_stop", "stop:" + pending]
 
 
 def test_stop_during_recovery_prevents_later_service_start():
@@ -131,13 +154,17 @@ def test_stop_during_recovery_prevents_later_service_start():
         begin = time.monotonic()
         assert runtime.stop(timeout=0.02) is False
         assert time.monotonic() - begin < 0.5
+        assert events == ["request_stop:updates", "request_stop"]
     finally:
         finish.set()
         thread.join(2)
     assert not thread.is_alive()
     assert errors and "停机请求" in errors[0]
-    assert events == []
+    assert events == ["request_stop:updates", "request_stop", "request_stop:updates", "request_stop", "stop:updates"]
+    assert not any(event.startswith("start:") for event in events)
+    snapshot = list(events)
     assert runtime.stop() is True
+    assert events == snapshot
 
 
 def test_stop_reentrantly_requested_by_start_does_not_start_remaining_components():
@@ -150,6 +177,8 @@ def test_stop_reentrantly_requested_by_start_does_not_start_remaining_components
         runtime.start()
     assert "start:scheduler" not in events and "start:updates" not in events
     assert events.count("stop:jobs") == 1
+    assert events.count("stop:updates") == 1
+    assert events.index("request_stop:updates") < events.index("stop:updates") < events.index("stop:jobs")
 
 
 def test_running_jobs_receive_stop_intent_before_contended_lifecycle_lock():
@@ -167,7 +196,8 @@ def test_running_jobs_receive_stop_intent_before_contended_lifecycle_lock():
     assert entered.wait(1)
     try:
         assert runtime.stop(timeout=0.01) is False
-        assert events[-1] == "request_stop"
+        assert events[-2:] == ["request_stop:updates", "request_stop"]
+        assert not any(event.startswith("stop:") for event in events)
     finally:
         release.set()
         holder.join(2)
@@ -221,6 +251,12 @@ def test_component_stop_lock_contention_is_bounded(monkeypatch, module_name, loc
         assert component.stop(timeout=0.01) is False
         assert time.monotonic() - begin < 0.5
     assert event.is_set()
+    # A failed stop intentionally latches draining. Complete the lifecycle before
+    # monkeypatch restores its event/lock, instead of leaking a stopped generation
+    # into the following thread-creation test.
+    assert component.stop(timeout=0.1) is True
+    if module_name == "update_checker":
+        assert component._draining is False and component._armed is False
 
 
 @pytest.mark.parametrize("module_name,thread_attr,lock_attr", [
@@ -237,6 +273,7 @@ def test_component_stop_can_roll_back_an_unstarted_thread(monkeypatch, module_na
         monkeypatch.setattr(component.db, "get_setting", lambda *args: "true")
     else:
         monkeypatch.setattr(component, "_armed", False)
+        assert component._draining is False
     def fail():
         raise RuntimeError("synthetic thread creation failure")
     def broken_thread(*args, **kwargs):
@@ -306,7 +343,7 @@ def test_entry_binds_before_recovery_and_cleans_all_owned_resources(entry):
     assert entry.app.main() == 0
     events = entry.events
     assert events.index("bind") < events.index("recover") < events.index("start:jobs") < events.index("serve")
-    assert events[-7:] == ["request_stop", "stop:updates", "stop:scheduler", "stop:jobs",
+    assert events[-8:] == ["request_stop:updates", "request_stop", "stop:updates", "stop:scheduler", "stop:jobs",
                            "socket.close", "release", "shutdown_logging"]
     assert not entry.marker.exists()
     assert entry.handlers == {signal.SIGINT: "original-int", signal.SIGTERM: "original-term"}
@@ -319,7 +356,8 @@ def test_binding_failure_does_not_recover_tasks_or_start_services(entry, monkeyp
     monkeypatch.setattr(entry.app, "_bind_preemptive", fail_bind)
     with pytest.raises(OSError, match="port exhaustion"):
         entry.app.main()
-    assert entry.events == ["lock", "create_app", "bind", "release"]
+    assert entry.events == ["lock", "create_app", "bind", "request_stop:updates", "request_stop", "stop:updates", "release"]
+    assert not any(event in entry.events for event in ("recover", "start:jobs", "start:scheduler", "start:updates"))
     assert not entry.marker.exists()
 
 

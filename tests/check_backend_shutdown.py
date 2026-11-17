@@ -118,7 +118,13 @@ def check():
             release.set()
             reader_thread.join(6)
             assert not reader_thread.is_alive() and reader_errors == ["TimeoutError"]
-            future.result(timeout=6)
+            from core.metadata_budget import MetadataStopped
+            try:
+                future.result(timeout=6)
+            except MetadataStopped:
+                pass  # Late transport result is deliberately not published.
+            else:
+                raise AssertionError("stopped metadata result was published")
             assert runtime.stop(timeout=3) is True
             assert reader.stop(timeout=0) is True
             assert background_calls.stop(timeout=1) is True

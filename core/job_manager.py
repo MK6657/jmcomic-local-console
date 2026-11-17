@@ -4,6 +4,8 @@
 import json
 import threading
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Optional
 
 from . import database as db
@@ -16,16 +18,66 @@ from .task_commands import (
 )
 
 
+@dataclass
+class _JobControl:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    users: int = 0
+
+
 class JobManager:
     """下载任务管理器"""
 
     def __init__(self):
         self._lock = threading.RLock()
+        self._changed = threading.Condition(self._lock)
+        # Admission/recovery may wait for SQLite, never while holding _lock.
+        # One admission owns the available slot and album snapshot until it has
+        # either registered a worker or finished undoing its claim.
+        # Lock order: admission -> job control -> _lock. Commands release job
+        # control before scheduling; retirement never acquires admission.
+        self._admission_lock = threading.Lock()
+        self._pending_operations = 0
+        self._stop_waiters = 0
+        self._job_controls: dict[str, _JobControl] = {}
         self._running_jobs: dict[str, threading.Thread] = {}
         self._running_albums: dict[str, str] = {}
         self._pause_events: dict[str, threading.Event] = {}  # job_id → Event
         self._stop_event = threading.Event()
         self._scheduler_thread: Optional[threading.Thread] = None
+
+    @contextmanager
+    def _operation(self):
+        """Keep synchronous, in-flight DB work visible to stop(), including claims."""
+        with self._lock:
+            accepted = not self._stop_event.is_set()
+            if accepted:
+                self._pending_operations += 1
+        try:
+            yield accepted
+        finally:
+            if accepted:
+                with self._changed:
+                    self._pending_operations -= 1
+                    self._changed.notify_all()
+
+    @contextmanager
+    def _job_control(self, job_id):
+        """Order commands, notifications and executor retirement for one job.
+
+        References include waiters, so removing an idle lock cannot split two
+        commands for the same job across different locks. No wait owns _lock.
+        """
+        with self._lock:
+            control = self._job_controls.setdefault(job_id, _JobControl())
+            control.users += 1
+        try:
+            with control.lock:
+                yield
+        finally:
+            with self._lock:
+                control.users -= 1
+                if not control.users:
+                    del self._job_controls[job_id]
 
     def get_pause_event(self, job_id: str) -> threading.Event:
         """获取/创建暂停恢复通知事件"""
@@ -43,11 +95,13 @@ class JobManager:
     def start(self):
         """Idempotently start one scheduler; never revive an undrained generation."""
         with self._lock:
+            if self._stop_waiters:
+                raise RuntimeError("下载执行器仍在停止中，请等待退出后再启动")
             if self._scheduler_thread is not None and self._scheduler_thread.is_alive():
                 if self._stop_event.is_set():
                     raise RuntimeError("下载执行器仍在停止中，请等待退出后再启动")
                 return
-            if self._stop_event.is_set() and self._running_jobs:
+            if self._stop_event.is_set() and (self._running_jobs or self._pending_operations):
                 raise RuntimeError("下载执行器仍在停止中，请等待退出后再启动")
             self._stop_event.clear()
             thread = threading.Thread(target=self._scheduler_loop, daemon=True, name="download-queue")
@@ -75,30 +129,44 @@ class JobManager:
             # A concurrent start may have completed between the nonblocking
             # request and acquiring this lock; stop that generation as well.
             self._stop_event.set()
+            self._stop_waiters += 1
             scheduler = self._scheduler_thread
             workers = tuple(self._running_jobs.values())
             for event in self._pause_events.values():
                 event.set()
         finally:
             self._lock.release()
-        current = threading.current_thread()
-        for thread in ((scheduler,) if scheduler is not None else ()) + workers:
-            if thread is not current and thread.is_alive():
-                thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-            return False
         try:
-            scheduler_done = scheduler is None or not scheduler.is_alive()
-            if scheduler_done and self._scheduler_thread is scheduler:
-                self._scheduler_thread = None
-            return scheduler_done and not self._running_jobs
+            current = threading.current_thread()
+            for thread in ((scheduler,) if scheduler is not None else ()) + workers:
+                if thread is not current and thread.is_alive():
+                    thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            with self._changed:
+                while self._pending_operations or self._running_jobs:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self._changed.wait(remaining)
+                scheduler_done = scheduler is None or not scheduler.is_alive()
+                if scheduler_done and self._scheduler_thread is scheduler:
+                    self._scheduler_thread = None
+                return scheduler_done
         finally:
-            self._lock.release()
+            with self._changed:
+                self._stop_waiters -= 1
+                self._changed.notify_all()
 
     def recover_interrupted(self) -> int:
         """Recover stranded running rows while preserving every owned executor."""
-        with self._lock:
-            return recover_interrupted(self._running_jobs)
+        with self._operation() as accepted:
+            if not accepted:
+                return 0
+            with self._admission_lock:
+                # No new claim can commit between this snapshot and recovery.
+                # Exits only shrink ownership; excluding them remains safe.
+                with self._lock:
+                    owned = tuple(self._running_jobs)
+                return recover_interrupted(owned)
 
     def create_job(self, album_id: str, title: str, photo_ids: list[str]) -> str:
         """创建或复用相同章节的活跃任务；保留调用方使用的 job_id 返回契约。"""
@@ -125,76 +193,80 @@ class JobManager:
         # 局部导入避免与 scheduler 模块的循环导入
         from .scheduler import can_auto_schedule
 
-        if self._stop_event.is_set() or not can_auto_schedule():
-            return
+        with self._operation() as accepted:
+            if not accepted:
+                return
+            with self._admission_lock:
+                if self._stop_event.is_set():
+                    return
+                if not can_auto_schedule():
+                    return
+                max_running = int(db.get_setting("max_running_jobs", "1") or 1)
+                with self._lock:
+                    if self._stop_event.is_set() or len(self._running_jobs) >= max_running:
+                        return
+                    excluded_albums = tuple(self._running_albums.values())
 
-        max_running = int(db.get_setting("max_running_jobs", "1") or 1)
+                next_job = db.claim_next_queued_job(excluded_albums)
+                if not next_job:
+                    return
+                with self._job_control(next_job["job_id"]):
+                    self._start_claimed_job(next_job)
 
-        # 整个 critical section 保持在 self._lock 下，防止 schedule_next 并发导致
-        # running_count 读、job claim、_running_jobs 写入三者之间出现 TOCTOU 窗口
-        # （参见 THREAD_SAFETY_REVIEW.md P0-1）
-        with self._lock:
+    def _start_claimed_job(self, next_job):
+        """Called with the tracked admission and per-job gates, never _lock."""
+        job_id = next_job["job_id"]
+        album_id = next_job["album_id"]
+        started = False
+        try:
             if self._stop_event.is_set():
                 return
-            running_count = len(self._running_jobs)
-
-            if running_count >= max_running:
-                return
-
-            # 原子地获取并锁定下一个 queued 任务（防止双重调度）
-            next_job = db.claim_next_queued_job(self._running_albums.values())
-            if not next_job:
-                return
-
-            job_id = next_job["job_id"]
-            album_id = next_job["album_id"]
-            if self._stop_event.is_set():
-                requeue_interrupted(job_id)
-                return
-            # Canceled workers can still be finishing an HTTP request.
-            if album_id in self._running_albums.values():
-                db.transition_job_status(job_id, ["running"], "queued")
+            # A command can commit after claim, before its job ID is known to
+            # this gate. Never start a claim that was canceled or requeued.
+            current = db.get_job(job_id)
+            if current is None or current["status"] not in ("running", "paused"):
                 return
             try:
                 photo_ids = json.loads(next_job["selected_photo_ids"] or "[]")
             except Exception:
-                # 写成 job_id=…：去重只保留 *_id= 形式的编号，不同任务的这条警告才不会被合并掉
                 log.warning(f"selected_photo_ids 解析失败，标记为 failed job_id={job_id} album_id={album_id}")
                 finish_download(job_id, "failed")
                 return
-            title = next_job.get("title", "")
-
             tracker = progress_manager.create_tracker(job_id)
             if not tracker:
-                # tracker 创建失败（极罕见），标记为 failed 避免无限重试
                 finish_download(job_id, "failed")
                 return
-
             thread = threading.Thread(
                 target=self._run_job_wrapper,
                 args=(job_id, album_id, photo_ids),
                 daemon=True,
                 name=f"dl-{job_id[:8]}",
             )
-
-            self._running_jobs[job_id] = thread
-            self._running_albums[job_id] = album_id
-            # Registration and start are one admission critical section. The
-            # target checks stop again before touching the download executor.
-            try:
+            # This section contains no storage calls. The admission gate keeps
+            # another claim from consuming this slot or album during DB waits.
+            with self._lock:
                 if self._stop_event.is_set():
+                    return
+                self._running_jobs[job_id] = thread
+                self._running_albums[job_id] = album_id
+                try:
+                    thread.start()
+                    started = True
+                except BaseException:
                     self._running_jobs.pop(job_id, None)
                     self._running_albums.pop(job_id, None)
-                    progress_manager.remove_tracker(job_id)
+                    raise
+        except BaseException:
+            finish_download(job_id, "failed", error_message="下载线程启动失败")
+            raise
+        finally:
+            if not started:
+                # Still part of the tracked admission: stop cannot report
+                # drained while claim rollback waits for SQLite.
+                try:
                     requeue_interrupted(job_id)
-                    return
-                thread.start()
-            except Exception:
-                self._running_jobs.pop(job_id, None)
-                self._running_albums.pop(job_id, None)
-                finish_download(job_id, "failed", error_message="下载线程启动失败")
-                progress_manager.remove_tracker(job_id)
-                raise
+                finally:
+                    progress_manager.remove_tracker(job_id)
         log.info(f"开始执行任务 job_id={job_id} album_id={album_id} photo_count={len(photo_ids)}")
 
     def _run_job_wrapper(self, job_id: str, album_id: str, photo_ids: list[str]):
@@ -219,24 +291,25 @@ class JobManager:
                 })
                 tracker.close()
         finally:
-            if self._stop_event.is_set():
+            with self._job_control(job_id):
                 try:
+                    # Resume may have committed while this executor was already
+                    # returning. Retire under the same per-job gate and release
+                    # any unfinished running row; pause/cancel/results survive.
                     requeue_interrupted(job_id)
                 except Exception as error:
                     # Leave a running row recoverable on next startup if storage
                     # failed; executor ownership must still be released below.
                     log.error(f"保存中断任务状态失败 job_id={job_id} error={error}")
-            # 清理暂停事件，防止内存泄漏
-            self.clear_pause_event(job_id)
-            # 加固：确保 tracker 被清理
-            tracker = progress_manager.get_tracker(job_id)
-            if tracker:
-                tracker.close()
-                progress_manager.remove_tracker(job_id)
-            clear_request_id()
-            with self._lock:
-                self._running_jobs.pop(job_id, None)
-                self._running_albums.pop(job_id, None)
+                try:
+                    progress_manager.remove_tracker(job_id)
+                finally:
+                    clear_request_id()
+                    with self._changed:
+                        self._pause_events.pop(job_id, None)
+                        self._running_jobs.pop(job_id, None)
+                        self._running_albums.pop(job_id, None)
+                        self._changed.notify_all()
 
     def cancel_job(self, job_id: str) -> tuple[bool, str]:
         """
@@ -258,17 +331,24 @@ class JobManager:
         只有 running 状态的任务可以暂停。
         返回 (是否成功, 消息)
         """
-        with self._lock:
-            ok = db.transition_job_status(job_id, ["running"], "paused")
-            if not ok:
-                job = db.get_job(job_id)
-                status = job["status"] if job else "不存在"
-                return False, f"当前状态为「{status}」，无法暂停"
-            # Serialize the DB transition and wakeup state with resume_job; an
-            # older pause must never clear a newer resume notification.
-            ev = self._pause_events.get(job_id)
-            if ev:
-                ev.set() if self._stop_event.is_set() else ev.clear()
+        with self._operation() as accepted:
+            if not accepted:
+                return False, "下载执行器正在停止，无法暂停"
+            with self._job_control(job_id):
+                ok = db.transition_job_status(job_id, ["running"], "paused")
+                if not ok:
+                    job = db.get_job(job_id)
+                    status = job["status"] if job else "不存在"
+                    return False, f"当前状态为「{status}」，无法暂停"
+                # Serialize commit and notification with resume/retirement.
+                with self._lock:
+                    ev = self._pause_events.get(job_id)
+                    if ev:
+                        ev.clear()
+                        # Check *after* clear: request_stop() does not acquire
+                        # _lock, and its wakeup must never be erased.
+                        if self._stop_event.is_set():
+                            ev.set()
         log.info(f"暂停任务 job_id={job_id}")
         return True, "已暂停"
 
@@ -278,22 +358,27 @@ class JobManager:
         只有 paused 状态的任务可以恢复。
         返回 (是否成功, 消息)
         """
-        with self._lock:
-            thread = self._running_jobs.get(job_id)
-            has_executor = bool(thread is not None and thread.is_alive() and not self._stop_event.is_set())
-            ok, message = resume_download(job_id, has_executor=has_executor)
-            if not ok:
-                return ok, message
-            ev = self._pause_events.get(job_id)
-            if ev:
-                ev.set()
-        if not has_executor:
-            try:
-                self.schedule_next()
-            except Exception as error:
-                # The resume command committed; transient admission failures do
-                # not turn that successful command into a misleading HTTP error.
-                log.warning(f"恢复后调度未启动 job_id={job_id} error={error}")
+        with self._operation() as accepted:
+            if not accepted:
+                return False, "下载执行器正在停止，无法恢复"
+            with self._job_control(job_id):
+                with self._lock:
+                    thread = self._running_jobs.get(job_id)
+                    has_executor = bool(thread is not None and thread.is_alive() and not self._stop_event.is_set())
+                ok, message = resume_download(job_id, has_executor=has_executor)
+                if not ok:
+                    return ok, message
+                with self._lock:
+                    ev = self._pause_events.get(job_id)
+                    if ev:
+                        ev.set()
+            if not has_executor:
+                try:
+                    self.schedule_next()
+                except Exception as error:
+                    # The resume command committed; transient admission failures
+                    # do not turn success into a misleading HTTP error.
+                    log.warning(f"恢复后调度未启动 job_id={job_id} error={error}")
         log.info(f"恢复任务 job_id={job_id}")
         return True, "已恢复"
 

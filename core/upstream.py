@@ -64,6 +64,11 @@ def classify_failure(error: Exception, *, timeout_message: str | None = None,
     """
     if isinstance(error, UpstreamFailure):
         return error
+    from .background_calls import BackgroundCallsBusy, BackgroundCallsStopped
+    from .metadata_budget import MetadataStopped
+    if isinstance(error, (BackgroundCallsBusy, BackgroundCallsStopped, MetadataStopped)):
+        kind = "busy" if isinstance(error, BackgroundCallsBusy) else "stopping"
+        return UpstreamFailure(kind, str(error), http_status=503)
     if id(error) in _seen or len(_seen) >= 8:
         return UpstreamFailure("upstream_error", "上游请求失败，请稍后重试")
     seen = _seen | {id(error)}
@@ -96,7 +101,10 @@ def classify_failure(error: Exception, *, timeout_message: str | None = None,
 
 def known_failure(error: Exception) -> UpstreamFailure | None:
     """HTTP entry points must not disguise local programming/DB errors as upstream."""
-    if isinstance(error, (UpstreamFailure, JmcomicException, TimeoutError, FuturesTimeout,
+    from .background_calls import BackgroundCallsBusy, BackgroundCallsStopped
+    from .metadata_budget import MetadataStopped
+    if isinstance(error, (UpstreamFailure, BackgroundCallsBusy, BackgroundCallsStopped, MetadataStopped,
+                          JmcomicException, TimeoutError, FuturesTimeout,
                           Timeout, ConnectionError, RequestsConnectionError, HTTPError, ssl.SSLError)):
         return classify_failure(error)
     # curl_cffi does not derive from requests.exceptions.RequestException.

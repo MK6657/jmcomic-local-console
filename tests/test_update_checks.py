@@ -80,6 +80,8 @@ class _MirrorClient:
     """A strict check client: answers per mirror; anything but the five allowed members fails the test."""
 
     def __init__(self, answers):
+        from fake_transport import owned_client
+        owned_client(self)
         self.answers = dict(answers)
         self.calls = []
         self.current = None
@@ -130,7 +132,7 @@ class FakeUpstream:
     def set(self, album_id, value):
         self.albums[str(album_id)] = value
 
-    def __call__(self, album_id):
+    def __call__(self, album_id, *, stop_event=None):
         from core.update_checker import CheckFailed
         with self._lock:
             self.calls.append(album_id)
@@ -213,7 +215,7 @@ def download(client, downloads, monkeypatch):
     changes the album's upstream title."""
     from core import database as db, jm_service
     from core.progress import progress_manager
-    monkeypatch.setattr(jm_service, "close_client", lambda _client: None)
+    monkeypatch.setattr(jm_service, "close_client", lambda _client: True)
     served = {"chapters": list(CHAPTERS), "name": _Album.name}
 
     def get_client(shared=True):
@@ -312,6 +314,8 @@ def checker(client, monkeypatch):
     clock = Clock()
     monkeypatch.setattr(update_checker, "_now", clock.now)
     monkeypatch.setattr(update_checker, "_mono", clock.monotonic)
+    from core import transfer
+    monkeypatch.setattr(transfer, "_clock", clock.monotonic)
     monkeypatch.setattr(update_checker, "_uniform", lambda low, high: low)
     yield clock
     update_checker._reset_for_tests()
@@ -717,7 +721,7 @@ def test_invalid_upstream_shapes_are_failures(client, local_album, checker, monk
     album = _UpstreamAlbum("350234" if shape == "placeholder" else "3001", episodes)   # 禁漫娘 has another id
     fake = _MirrorClient({"https://d1": album, "https://d2": album})
     monkeypatch.setattr(jm_service, "new_check_client", lambda timeout: fake)
-    monkeypatch.setattr(jm_service, "close_client", lambda _client: None)
+    monkeypatch.setattr(jm_service, "close_client", lambda _client: True)
     assert _check() == "failed"
     row = _row()
     assert row["error_kind"] == "upstream_error" and row["new_count"] == 0 and row["result"] is None
@@ -729,7 +733,7 @@ def test_error_classification_and_mirror_walk(client, checker, monkeypatch):
     from core import jm_service, update_checker
     from core.update_checker import CheckFailed
     album = _UpstreamAlbum("3001", [("71", "1", "a")])
-    monkeypatch.setattr(jm_service, "close_client", lambda _client: None)
+    monkeypatch.setattr(jm_service, "close_client", lambda _client: True)
 
     def fetch(answers):
         fake = _MirrorClient(answers)
@@ -748,9 +752,9 @@ def test_error_classification_and_mirror_walk(client, checker, monkeypatch):
     failure, fake = fetch({"d1": RuntimeError("Operation timed out after 20000 ms"),
                            "d2": TimeoutError("Operation timed out")})
     assert fake.calls[0] == ("set_domain_list", ["d2"])                   # starts at the mirror that answered
-    assert (failure.kind, failure.requests) == ("timeout", 2)
+    assert (failure.kind, failure.requests) == ("timeout", 1)  # a timed out mirror ends this check
     failure, _ = fetch({"d1": RuntimeError("boom"), "d2": RuntimeError("Operation timed out")})
-    assert failure.kind == "network"
+    assert failure.kind == "timeout"
     failure, _ = fetch({"d1": JsonResolveFailException("bad", {}), "d2": ConnectionError("refused")})
     assert failure.kind == "upstream_error"
     assert "boom" not in failure.detail and len(failure.detail) <= 120      # only an exception class name
@@ -1015,7 +1019,7 @@ def test_fetch_calls_only_album_detail_one_per_mirror(client, checker, monkeypat
     from core import jm_service, update_checker
     from core.update_checker import CheckFailed
     closed = []
-    monkeypatch.setattr(jm_service, "close_client", closed.append)
+    monkeypatch.setattr(jm_service, "close_client", lambda value: closed.append(value) or True)
     album = _UpstreamAlbum("3001", [("71", "1", "第1话"), ("72", "2", "第2话")])
     strict = _MirrorClient({"https://d1": ConnectionError("refused"), "https://d2": album})
     monkeypatch.setattr(jm_service, "new_check_client", lambda timeout: strict)
@@ -1093,7 +1097,7 @@ def test_check_ignores_detail_cache_and_request_body(client, local_album, checke
     monkeypatch.setattr(jm_service, "get_client", forbidden)
     album = _UpstreamAlbum("3001", [("71", "1", "a"), ("72", "2", "b"), ("73", "3", "c")])
     monkeypatch.setattr(jm_service, "new_check_client", lambda timeout: _MirrorClient({"https://d1": album}))
-    monkeypatch.setattr(jm_service, "close_client", lambda _client: None)
+    monkeypatch.setattr(jm_service, "close_client", lambda _client: True)
     response = client.post("/api/updates/3001/check",
                            json={"photos": [{"photo_id": str(p)} for p in range(71, 80)], "album_ids": ["1"]})
     assert response.status_code == 200
@@ -1337,7 +1341,7 @@ def test_startup_delay_before_first_tick(client, checker, upstream, monkeypatch)
     assert len(stopped.waits) == 1 and 300 <= stopped.waits[0] <= 420
     assert update_checker.runtime_status()["phase"] == "starting"
     ticks = []
-    monkeypatch.setattr(update_checker, "tick", lambda: ticks.append(1) or 42)
+    monkeypatch.setattr(update_checker, "tick", lambda **kwargs: ticks.append(1) or 42)
     running = FakeEvent([False, True])
     update_checker._loop(running)
     assert 300 <= running.waits[0] <= 420 and running.waits[1] == 42 and ticks == [1]
@@ -1739,11 +1743,11 @@ def test_no_new_mirror_after_the_check_budget(client, checker, monkeypatch):
             return super().get_album_detail(album_id)
     fake = Slow({f"d{n}": ConnectionError("refused") for n in range(1, 6)})
     monkeypatch.setattr(jm_service, "new_check_client", lambda timeout: fake)
-    monkeypatch.setattr(jm_service, "close_client", lambda _client: None)
+    monkeypatch.setattr(jm_service, "close_client", lambda _client: True)
     with pytest.raises(CheckFailed) as failure:
         update_checker.fetch_upstream_episodes("3001")
-    assert failure.value.requests == 2              # 60 s spent: no third mirror after the 45 s budget
-    assert [c for c in fake.calls if c[0] == "get_album_detail"] == [("get_album_detail", "3001")] * 2
+    assert failure.value.requests == 1              # first mirror exceeded its 20 s cap; no next request
+    assert [c for c in fake.calls if c[0] == "get_album_detail"] == [("get_album_detail", "3001")]
 
 
 def test_manual_success_schedules_the_next_check_a_day_later(client, local_album, upstream, checker):
