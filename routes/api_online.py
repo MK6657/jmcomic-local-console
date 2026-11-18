@@ -2,6 +2,7 @@
 from flask import Blueprint, jsonify, send_file
 
 from core import online_reader
+from core.image_download import local_write_error
 from core.logger import log
 from core.validation import validate_numeric
 from core.upstream import known_failure
@@ -16,14 +17,12 @@ def online_album(album_id: str):
         return jsonify({"status": "error", "message": "album_id 必须是纯数字"}), 400
     try:
         data = online_reader.album_pages(album_id)
-    except TimeoutError as e:
-        return jsonify({"status": "error", "message": str(e)}), 504
     except Exception as e:
         log.error(f"在线阅读 获取页面列表失败 album_id={album_id} error={type(e).__name__}: {e}")
         failure = known_failure(e)
         if failure is not None:
             return jsonify(failure.payload()), failure.http_status
-        return jsonify({"status": "error", "message": "在线加载失败，请稍后重试"}), 502
+        return jsonify({"status": "error", "message": "在线加载失败，请稍后重试"}), 500
     if not data["pages"]:
         return jsonify({"status": "error", "message": "没有可在线阅读的页面"}), 404
     return jsonify({
@@ -45,13 +44,15 @@ def online_image(photo_id: str, index: int):
         path = online_reader.image_file(photo_id, index)
     except IndexError:
         return jsonify({"status": "error", "message": "页码超出范围"}), 404
-    except TimeoutError as e:
-        return jsonify({"status": "error", "message": str(e)}), 504
     except Exception as e:
         log.error(f"在线阅读 取图失败 photo_id={photo_id} index={index} error={type(e).__name__}: {e}")
         failure = known_failure(e)
         if failure is not None:
             return jsonify(failure.payload()), failure.http_status
-        return jsonify({"status": "error", "message": "图片加载失败"}), 502
-    # 同一 photo/页码的解码结果不会变化，允许浏览器缓存一天，来回滚动不再请求
-    return send_file(path, mimetype=online_reader.image_mime(path), max_age=86400)
+        if local_write_error(e):
+            return jsonify(status='error', error_kind='local_file', message='无法写入本地图片缓存，请检查空间和权限'), 500
+        return jsonify({"status": "error", "message": "图片加载失败"}), 500
+    try:
+        return send_file(path, mimetype=online_reader.image_mime(path), max_age=86400)
+    except FileNotFoundError:
+        return jsonify(status="error", error_kind="cache_changed", message="图片缓存已刷新，请重试"), 503

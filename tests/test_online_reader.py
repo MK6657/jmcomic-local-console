@@ -48,10 +48,12 @@ class FakePostman:
         self.answer = answer
         self.requests = []
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, *, content_callback):
         self.requests.append(url)
         result = self.answer(url)
-        return result if isinstance(result, FakeResponse) else FakeResponse(result)
+        response = result if isinstance(result, FakeResponse) else FakeResponse(result)
+        content_callback(response.content)
+        return response
 
 
 def _png(size=(12, 16)):
@@ -86,7 +88,7 @@ class FakeClient:
 
     def _image(self, url):
         if self.fail_download:
-            raise OSError("upstream refused")
+            raise ConnectionError("upstream refused")
         return _png()
 
 
@@ -180,13 +182,13 @@ def test_album_pages_lists_every_readable_chapter(client, online):
 
 def test_single_chapter_album_whose_page_list_fails_is_retryable(client, online):
     """Most albums have one chapter whose page list comes from check_photo. A network failure there is a
-    retryable load failure (504), not a permanent "nothing to read online" (404), and the log says why."""
+    retryable load failure, not a permanent "nothing to read online" (404), and the log says why."""
     from core import logger as lm
     _, fake = online
     fake.album = FakeAlbum([FakePhoto("500", 0, "第1话")])  # FakeClient.check_photo raises OSError
     response = client.get("/api/online/500")
-    assert response.status_code == 504
-    assert response.get_json()["message"] == "在线加载失败或超时，请稍后重试"
+    assert response.status_code == 502
+    assert response.json["error_kind"] == "upstream_error"
     assert "获取 photo 详情失败 photo_id=500 error=OSError: chapter unavailable" in lm.ERROR_LOG_FILE.read_text(
         encoding="utf-8")
 
@@ -426,10 +428,11 @@ def test_redownload_refetches_gif_pages_saved_by_older_versions(download_job):
     job = run("300000", fake)
     assert job["status"] == "completed", job["error_message"]
     assert [url.split("?")[0].rsplit("/", 1)[1] for url in fake.fetched] == ["00001.gif"]
-    with Image.open(chapter / "00001.webp") as page:
-        assert page.n_frames == 3
-    assert (chapter / "00002.webp").read_bytes() == kept
-    assert json.loads((chapter / ".jm-chapter.json").read_text(encoding="utf-8")) == {
+    published = Path(job["output_path"]) / chapter.name
+    with Image.open(published / "00001.webp") as page:
+        assert page.format == "WEBP" and page.n_frames == 3
+    assert (published / "00002.webp").read_bytes() == kept
+    assert json.loads((published / ".jm-chapter.json").read_text(encoding="utf-8")) == {
         "photo_id": "300000", "format": jm_service._CHAPTER_FORMAT}
     again = jm_download_client(album, {"gif": _animated_gif(), "webp": _encoded("WEBP")})
     assert run("300000", again)["status"] == "completed"
@@ -453,11 +456,31 @@ def test_failed_redownload_keeps_the_old_chapter_marker(download_job):
     assert sorted(p.name for p in chapter.iterdir()) == [".jm-chapter.json", "00001.webp"]  # no temp files
 
 
+def test_empty_cache_entry_is_replaced_and_local_write_failure_is_reported(client, online, monkeypatch):
+    import errno
+    reader, _ = online
+    target = reader._page_path('123', 0)
+    target.parent.mkdir(exist_ok=True, parents=True)
+    target.touch()
+    response = client.get('/api/online-img/123/0')
+    try:
+        assert response.status_code == 200 and target.stat().st_size > 0
+    finally:
+        response.close()
+    def disk_full(*args):
+        raise OSError(errno.ENOSPC, 'fixture disk full')
+    monkeypatch.setattr(reader, '_store', disk_full)
+    failed = client.get('/api/online-img/123/1')
+    assert failed.status_code == 500 and failed.json['error_kind'] == 'local_file'
+
+
 def test_locked_temp_file_does_not_turn_a_timeout_into_502(client, online, monkeypatch):
     """A fetch that timed out may still be writing its temp file (Windows refuses to delete it). The cleanup
     must not replace the TimeoutError: the reader should get 504 "try again", not 502."""
     online_reader, fake = online
-    fake.fail_download = True
+    def timeout(url):
+        raise TimeoutError("private transport details")
+    fake.postman.answer = timeout
     real_unlink = Path.unlink
 
     def locked(self, *args, **kwargs):
@@ -468,18 +491,20 @@ def test_locked_temp_file_does_not_turn_a_timeout_into_502(client, online, monke
     client.get("/api/online/123")
     response = client.get("/api/online-img/123/0")
     assert response.status_code == 504
-    assert response.get_json()["message"] == "在线加载失败或超时，请稍后重试"
+    assert response.json["error_kind"] == "timeout"
+    assert "private" not in response.json["message"]
 
 
 def test_invalid_download_is_rejected_without_leftovers(client, online, monkeypatch):
     """A host answering 200 with an HTML page is a failed host: the other image hosts are tried (each once,
-    plus the one quick retry), nothing is written, and the reader gets a retryable 504."""
+    plus the one quick retry), nothing is written, and the reader gets an invalid-response error."""
     from urllib.parse import urlsplit
     from jmcomic import JmModuleConfig
     online_reader, _ = online
     fake = payload_client(RealUrlPhoto("300000", 2, None), b"<html>blocked</html>")
     use_client(monkeypatch, fake)
-    assert client.get("/api/online-img/300000/0").status_code == 504
+    response = client.get("/api/online-img/300000/0")
+    assert (response.status_code, response.json["error_kind"]) == (502, "invalid_response")
     folder = online_reader.CACHE_ROOT / "300000"
     assert not folder.exists() or list(folder.iterdir()) == []
     hosts = [urlsplit(url).netloc for url in fake.downloads]
@@ -492,11 +517,80 @@ def test_image_out_of_range_is_404(client, online):
     assert client.get("/api/online-img/123/3").status_code == 404
 
 
+def test_online_image_limits_each_streamed_chunk_before_caching(client, online, monkeypatch):
+    from types import SimpleNamespace
+    from curl_cffi.curl import CURL_WRITEFUNC_ERROR
+    reader, fake = online
+    payload = _png()
+    monkeypatch.setattr(reader, "PAGE_MAX_BYTES", len(payload))
+    attempts = []
+
+    def stream(url, *, timeout, headers, content_callback):
+        attempts.append(url)
+        for chunk in (payload[:5], payload[5:]):
+            assert content_callback(chunk) == len(chunk)
+        if len(attempts) == 2:
+            assert content_callback(b"x") == CURL_WRITEFUNC_ERROR
+            raise OSError("write callback stopped")
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(fake.postman, "get", stream)
+    with client.get("/api/online-img/999/0") as response:
+        assert response.status_code == 200 and response.data == payload
+    response = client.get("/api/online-img/999/1")
+    assert (response.status_code, response.json["error_kind"]) == (502, "image_too_large")
+    assert len(attempts) == 2 and not reader._host_failed_at
+    assert not reader._page_path("999", 1).exists()
+
+
+@pytest.mark.parametrize("scramble", [None, "220980"])
+@pytest.mark.parametrize("fmt", ["PNG", "WEBP"])
+def test_online_image_checks_pixels_before_loading_or_unscrambling(client, online, monkeypatch, scramble, fmt):
+    reader, _ = online
+    body = _encoded(fmt, (24, 48))
+    use_client(monkeypatch, payload_client(RealUrlPhoto("300000", 1, scramble), body))
+    monkeypatch.setattr(reader, "PAGE_MAX_PIXELS", 24 * 48 - 1)
+    def unexpected(*args, **kwargs):
+        pytest.fail("over-budget pixels reached the decoder")
+    monkeypatch.setattr(reader, "_unscramble", unexpected)
+    if fmt == "WEBP":
+        monkeypatch.setattr(Image, "open", unexpected)
+    else:
+        monkeypatch.setattr(Image.Image, "load", unexpected)
+    response = client.get("/api/online-img/300000/0")
+    assert (response.status_code, response.json["error_kind"]) == (502, "image_too_large")
+    assert not reader._page_path("300000", 0).exists()
+
+
+def test_online_image_cache_cleared_before_send_returns_retryable_error(client, online, monkeypatch):
+    reader, _ = online
+    mime = reader.image_mime
+    def clear_after_sniff(path):
+        result = mime(path)
+        reader.clear_cache()
+        return result
+    monkeypatch.setattr(reader, "image_mime", clear_after_sniff)
+    response = client.get("/api/online-img/999/0")
+    assert (response.status_code, response.json["error_kind"]) == (503, "cache_changed")
+
+
+def test_clear_during_foreground_fetch_does_not_repopulate_cache(client, online):
+    reader, fake = online
+    def clear_then_finish(url):
+        reader.clear_cache()
+        return _png()
+    fake.postman.answer = clear_then_finish
+    response = client.get("/api/online-img/999/0")
+    assert (response.status_code, response.json["error_kind"]) == (503, "cache_changed")
+    assert not reader._page_path("999", 0).exists()
+
+
 def test_failed_download_leaves_no_partial_file(client, online):
     online_reader, fake = online
     fake.fail_download = True
     client.get("/api/online/123")
-    assert client.get("/api/online-img/123/0").status_code == 504
+    response = client.get("/api/online-img/123/0")
+    assert (response.status_code, response.json["error_kind"]) == (502, "connection")
     leftovers = list(online_reader.CACHE_ROOT.rglob("*.*")) if online_reader.CACHE_ROOT.exists() else []
     assert leftovers == []
 

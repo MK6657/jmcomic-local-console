@@ -291,6 +291,9 @@ _ALLOWED_JOB_COLUMNS = frozenset({
 def update_job(job_id: str, **kwargs):
     """更新任务字段（自动设置 updated_at），列名白名单校验防 SQL 注入"""
     kwargs["updated_at"] = datetime.now().isoformat()
+    if kwargs.get('error_message') is not None:
+        from .logger import sanitize
+        kwargs['error_message'] = sanitize(str(kwargs['error_message']))
     # 白名单校验
     for k in kwargs:
         if k not in _ALLOWED_JOB_COLUMNS:

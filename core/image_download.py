@@ -5,6 +5,7 @@ Only independently owned clients enter this scope; shared sessions are not edite
 """
 from __future__ import annotations
 
+import errno
 import threading
 import time
 from urllib.parse import urlsplit, urlunsplit
@@ -16,6 +17,29 @@ _host_lock = threading.Lock()
 _failed_hosts = {}
 _good_host = None
 _COOLDOWN = 60.0
+
+
+def local_write_error(error):
+    """Only concrete filesystem failures, never a network OSError/timeout."""
+    return isinstance(error, OSError) and (
+        error.errno in (errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.EACCES, errno.EPERM,
+                        errno.ENAMETOOLONG, errno.ENOTDIR, errno.EISDIR, errno.EFBIG)
+        or getattr(error, 'winerror', None) in (5, 32, 33, 39, 112, 206))
+
+
+def failure_detail(error):
+    from PIL import UnidentifiedImageError
+    from .logger import sanitize
+    from .upstream import known_failure
+
+    if local_write_error(error):
+        kind = 'local_file'
+    elif isinstance(error, UnidentifiedImageError):
+        kind = 'invalid_response'
+    else:
+        failure = known_failure(error)
+        kind = failure.kind if failure else 'page_error'
+    return f'[{kind}] {sanitize(str(error))}'
 
 
 def _hosts(url):
@@ -76,6 +100,8 @@ def download_image(client, *, img_url, img_save_path, scramble_id, decode_image,
                 except DownloadInterrupted:
                     raise
                 except Exception as error:
+                    if local_write_error(error):
+                        raise  # Changing CDN cannot free disk space or release a Windows lock.
                     last_error = error
                     _result(host, False)
                     continue

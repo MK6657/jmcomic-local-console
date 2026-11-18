@@ -545,23 +545,22 @@ def test_tag_sync_upstream_failure_joins_the_request_trace(client, monkeypatch):
 
 @pytest.mark.parametrize("route", ["wishlist", "sync-all"])
 def test_background_tag_sync_threads_keep_the_starting_request_id(client, monkeypatch, route):
-    from types import SimpleNamespace
-    from unittest.mock import Mock
-    from core import logger as lm
+    from core import logger as lm, tag_sync
     from routes import api_library, api_wishlist
     started, seen = [], []
 
-    def thread(target, args=(), **kwargs):  # only these two routes' threads; logging's own stay real
-        started.append((target, args, lm.current_request_id()))
-        return Mock()
-    for module in (api_library, api_wishlist):
-        monkeypatch.setattr(module, "threading", SimpleNamespace(Thread=thread))
+    submit = tag_sync.tag_jobs.submit
+    def capture(*args, **kwargs):
+        future = submit(*args, **kwargs)
+        started.append((future, lm.current_request_id()))
+        return future
+    monkeypatch.setattr(tag_sync.tag_jobs, "submit", capture)
 
     def detail(album_id):
         seen.append(lm.current_request_id())
         return {"tags": []}
     monkeypatch.setattr(api_wishlist, "get_album_detail_cached", detail)
-    monkeypatch.setattr(api_library, "get_album_detail_cached", detail)
+    monkeypatch.setattr(tag_sync, "get_album_detail_cached", detail)
     album = str(random.randint(10**8, 10**9))
     if route == "wishlist":
         response = client.post("/api/wishlist", json={"album_id": album, "title": "t", "author": "a"})
@@ -571,8 +570,8 @@ def test_background_tag_sync_threads_keep_the_starting_request_id(client, monkey
         response = client.post("/api/library/tags/sync-all")
         query = "API批量同步标签已接受"
     assert len(started) == 1
-    target, args, rid = started[0]
-    target(*args)  # the thread body, run after the request has ended (also releases the bulk-sync lock)
+    future, rid = started[0]
+    future.result(timeout=3)
     assert response.status_code in (201, 202)
     assert rid.startswith("req_") and seen == [rid]
     assert lm.current_request_id() is None  # the id does not leak into the thread that ran it

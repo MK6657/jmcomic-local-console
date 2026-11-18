@@ -6,7 +6,7 @@ from core import local_availability
 from core.database import get_all_jobs, get_job
 from core.logger import log
 from core.settings import get_settings
-from core.validation import validate_numeric
+from core.validation import validate_numeric, validate_job_id
 
 page_bp = Blueprint("page", __name__)
 
@@ -52,6 +52,8 @@ def search():
 @page_bp.get("/album/<album_id>")
 def album_detail(album_id: str):
     """漫画详情页"""
+    if not validate_numeric(album_id):
+        abort(400)
     log.info(f"页面访问 详情页 album_id={album_id}")
     return render_template("detail.html", title="漫画详情", album_id=album_id)
 
@@ -104,6 +106,8 @@ def online_reader_page(album_id: str):
 @page_bp.get("/preview/job/<job_id>")
 def preview_by_job(job_id: str):
     """从 job_id 跳转到预览页"""
+    if not validate_job_id(job_id):
+        abort(400)
     job = get_job(job_id)
     if not job:
         log.warning(f"预览页: 不存在的 job_id={job_id}")

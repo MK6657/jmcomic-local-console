@@ -72,49 +72,69 @@ SENSITIVE_KEYS = {
     "cookie", "token", "password", "secret", "authorization",
     "proxy_password", "apikey", "api_key", "private_key",
     "access_key", "refresh_token", "credential",
-    "session", "jwt", "bearer",
+    "session", "jwt", "bearer", "set-cookie", "proxy-authorization", "access_token",
+    "x-api-key",
 }
 _UPPERCASE_PLACEHOLDER_KEYS = {
     "cookie", "token", "authorization", "apikey", "api_key", "refresh_token",
 }
-_sanitize_cache = None  # (keys snapshot, compiled rules)
+_AUTHORITY = re.compile(r"\b((?:https?|socks5h?)://)([^/\s?#]+)", re.I)
+_CREDENTIAL = re.compile(r"\b(Bearer|Basic)[ \t]+[^\s,'\";}]+", re.I)
+_PRIVATE_HEADER = re.compile(r"(\b(?:(?:(?:set-)?cookie|(?:proxy-)?authorization)[ \t]*:"
+                             r"|(?:set-)?cookie[ \t]*=(?=[ \t]*[\w.-]+=))[ \t]*)"
+                             r"[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*", re.I)
+_KEY_VALUE = re.compile(
+    r'''(?P<prefix>(?<!\w)['"]?(?P<key>''' + '|'.join(map(re.escape, sorted(SENSITIVE_KEYS))) +
+    r''')['"]?[ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\\r\n])*(?:"|$)|'(?:\\.|[^'\\\r\n])*(?:'|$)|[^\s,;}]+)''',
+    re.I | re.M,
+)
 
 
-def _sanitize_rules():
-    """预编译脱敏规则（顺序与语义同旧实现：按 key 长度降序，每个 key 两条规则）。"""
-    global _sanitize_cache
-    keys = frozenset(SENSITIVE_KEYS)
-    cache = _sanitize_cache
-    if cache is None or cache[0] != keys:
-        rules = []
-        for key in sorted(keys, key=lambda k: (-len(k), k)):
-            placeholder = key.upper() if key in _UPPERCASE_PLACEHOLDER_KEYS else "****"
-            rules.append((
-                key,
-                # 匹配 key=value 或 key: value 模式
-                re.compile(rf'(\b{key}\s*[:=]\s*)([^\s,}}]+)', re.IGNORECASE),
-                rf'\g<1>{placeholder}',
-                # 匹配 JSON-like "key": "value"
-                re.compile(rf'[\'"]{key}[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]', re.IGNORECASE),
-                rf'"{key}": "{placeholder}"',
-            ))
-        cache = _sanitize_cache = (keys, tuple(rules))
-    return cache[1]
+def _placeholder(key):
+    return key.upper() if key in _UPPERCASE_PLACEHOLDER_KEYS else "****"
+
+
+def _safe_authority(match):
+    scheme, authority = match.groups()
+    if '@' in authority:
+        return scheme + '****@' + authority.rsplit('@', 1)[1]
+    # A caller may already have truncated an exception inside user:password.
+    if ':' in authority and not authority.startswith('[') and not authority.partition(':')[2].isdigit():
+        return scheme + '****'
+    return match[0]
+
+
+def _safe_field(match):
+    first = match.string[match.end('prefix')]
+    quote = first if first in "\"'" else ""
+    return match['prefix'] + quote + _placeholder(match['key'].lower()) + quote
 
 
 def sanitize(msg: str) -> str:
     """脱敏处理：替换日志中的敏感信息"""
     if not msg:
         return msg
-    # 快速路径：两条规则都要求 key 字面出现（忽略大小写）。casefold 覆盖 IGNORECASE 的
-    # 特殊等价字符（如 ſ→s、K→k），只有土耳其无点 ı 需要单独折叠成 i。
-    folded = msg.casefold().replace("ı", "i")
-    for key, kv_pattern, kv_repl, json_pattern, json_repl in _sanitize_rules():
-        if key not in folded:
-            continue
-        msg = kv_pattern.sub(kv_repl, msg)
-        msg = json_pattern.sub(json_repl, msg)
-    return msg
+    if '://' in msg:
+        msg = _AUTHORITY.sub(_safe_authority, msg)
+    msg = _PRIVATE_HEADER.sub(r'\g<1>****', msg)
+    msg = _CREDENTIAL.sub(r'\1 ****', msg)
+    return _KEY_VALUE.sub(_safe_field, msg)
+
+
+def sanitize_fields(value, depth=0):
+    """Return a redacted JSON-compatible copy, including nested fields and exception strings."""
+    if depth >= 16:
+        return "…"
+    if isinstance(value, dict):
+        return {sanitize(str(key)): (_placeholder(str(key).lower()) if str(key).lower() in SENSITIVE_KEYS
+                                     else sanitize_fields(item, depth + 1)) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        if len(value) == 2 and isinstance(value[0], str) and value[0].lower() in SENSITIVE_KEYS:
+            return [value[0], _placeholder(value[0].lower())]
+        return [sanitize_fields(item, depth + 1) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return sanitize(str(value))
 
 
 # ── Request ID 追踪 ──────────────────────────────────
@@ -266,14 +286,19 @@ def _clean_external(record: logging.LogRecord):
     except Exception:
         return  # 参数与格式不匹配：交给 handler 的 handleError 报告
     if len(message) > EXTERNAL_MESSAGE_MAX_CHARS:
-        cut = len(message) - EXTERNAL_MESSAGE_MAX_CHARS
-        message = f"{message[:EXTERNAL_MESSAGE_MAX_CHARS]}…(已截断 {cut} 字符)"
-    record.msg = sanitize(message)
+        prefix = message[:EXTERNAL_MESSAGE_MAX_CHARS]
+        if prefix and not prefix[-1].isspace() and not message[len(prefix)].isspace():
+            prefix = prefix[:-len(prefix.rsplit(None, 1)[-1])]
+        record.msg = f"{sanitize(prefix)}…(已截断 {len(message) - len(prefix)} 字符)"
+    else:
+        record.msg = sanitize(message)
     record.args = None
     if getattr(record, "log_extra", None) is None:
         rid = current_request_id()
         if rid:
             record.log_extra = {"request_id": rid}
+    if getattr(record, "log_extra", None):
+        record.log_extra = sanitize_fields(record.log_extra)
     record.__dict__[_CLEAN_ATTR] = True
 
 
@@ -541,27 +566,26 @@ class StructuredFormatter(logging.Formatter):
     """行格式见模块说明：消息（单行化）后追加 JSON payload（record.log_extra），traceback 作为续行。"""
 
     def format(self, record: logging.LogRecord) -> str:
-        record.message = _escape_line_breaks(record.getMessage())
+        message = record.getMessage()
+        record.message = _escape_line_breaks(message if getattr(record, _CLEAN_ATTR, False) else sanitize(message))
         if self.usesTime():
             record.asctime = self.formatTime(record, self.datefmt)
         text = self.formatMessage(record)
         extra = getattr(record, "log_extra", None)
         if extra and isinstance(extra, dict):
             try:
-                text = f"{text} {json.dumps(extra, ensure_ascii=False, default=str)}"
+                fields = extra if getattr(record, _CLEAN_ATTR, False) else sanitize_fields(extra)
+                text = f"{text} {json.dumps(fields, ensure_ascii=False)}"
             except Exception:
                 pass
         if record.exc_info and not record.exc_text:
             record.exc_text = self.formatException(record.exc_info)
         if record.exc_text:
+            record.exc_text = sanitize(record.exc_text)
             text = f"{text}\n{_safe_continuation(record.exc_text)}"
         if record.stack_info:
-            text = f"{text}\n{_safe_continuation(self.formatStack(record.stack_info))}"
+            text = f"{text}\n{_safe_continuation(sanitize(self.formatStack(record.stack_info)))}"
         return text
-
-    def formatException(self, ei) -> str:
-        return sanitize(super().formatException(ei))
-
 
 # ── 按天轮转 + 单文件大小上限 ─────────────────────────
 
@@ -908,7 +932,7 @@ class LogContext:
             log_extra['request_id'] = rid
         record_extra = {_CLEAN_ATTR: True}
         if log_extra:
-            record_extra['log_extra'] = log_extra
+            record_extra['log_extra'] = sanitize_fields(log_extra)
         self._logger.log(level, sanitize(str(msg)), exc_info=exc_info, extra=record_extra)
 
     def info(self, msg: str, extra: dict | None = None):

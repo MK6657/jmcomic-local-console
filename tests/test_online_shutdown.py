@@ -4,6 +4,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from core.upstream import UpstreamFailure
 
 
 def wait_until(predicate, timeout=2):
@@ -62,13 +63,14 @@ def test_stop_is_sticky_preserves_cache_and_blocks_all_new_reader_work(reader, m
     for call in (lambda: reader.image_file(Photo.photo_id, 0),
                  lambda: reader.album_pages("900001"),
                  lambda: reader._get_photo(Photo.photo_id, time.monotonic() + 1)):
-        with pytest.raises(TimeoutError, match="停止"):
+        with pytest.raises(UpstreamFailure, match="停止") as caught:
             call()
+        assert caught.value.kind == "stopping" and caught.value.http_status == 503
     reader._schedule_prefetch(Photo.photo_id, 0)
     assert not reader._prefetch_queue and not client_calls
     assert reader.stop(0) and reader.stop(0)
     assert target.read_bytes() == b"valid cached page"
-    with pytest.raises(TimeoutError):
+    with pytest.raises(UpstreamFailure, match="停止"):
         reader.image_file(Photo.photo_id, 0)
     reader.start()
     assert reader.image_file(Photo.photo_id, 0) == target
@@ -100,7 +102,7 @@ def test_active_foreground_transport_is_not_closed_or_published_during_stop(read
     finally:
         release.set()
         thread.join(2)
-    assert not thread.is_alive() and isinstance(result.get("error"), TimeoutError)
+    assert not thread.is_alive() and result["error"].kind == "stopping"
     assert reader.stop(1) and closed == [client]
     assert not reader._page_path(Photo.photo_id, 0).exists()
 
@@ -123,7 +125,7 @@ def test_album_listing_remains_owned_until_its_real_foreground_call_exits(reader
     finally:
         release.set()
         thread.join(2)
-    assert isinstance(result.get("error"), TimeoutError)
+    assert result["error"].kind == "stopping"
     assert reader.stop(1) and closed == [client] and not checked
 
 
@@ -193,7 +195,7 @@ def test_page_and_slot_waiters_exit_cooperatively_on_stop(reader, monkeypatch, w
         assert wait_until(lambda: reader._active_operations > 0)
         reader.request_stop()
         thread.join(0.5)
-        assert not thread.is_alive() and isinstance(result.get("error"), TimeoutError)
+        assert not thread.is_alive() and result["error"].kind == "stopping"
         assert reader.stop(0.2)
     finally:
         if context:
@@ -215,7 +217,7 @@ def test_stopped_lookup_waiter_returns_before_sdk_and_late_callback_cannot_publi
         assert wait_until(lambda: reader._lookup_callbacks == 1)
         reader.request_stop()
         thread.join(0.5)
-        assert not thread.is_alive() and isinstance(result.get("error"), TimeoutError)
+        assert not thread.is_alive() and result["error"].kind == "stopping"
         assert not reader.stop(0.02)
         with pytest.raises(RuntimeError):
             reader.start()

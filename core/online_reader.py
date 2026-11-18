@@ -36,14 +36,19 @@ from functools import wraps
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from PIL import Image
+
 from . import jm_service
 from .logger import log
 from .path_utils import get_cache_dir
-from .sdk_adapter import get_image_once, image_domains as _image_hosts, transport_and_session
+from .sdk_adapter import image_domains as _image_hosts, transport_and_session
 from .settings import get_settings
+from .upstream import UpstreamFailure, UpstreamTimeout, classify_failure, http_failure, known_failure, preferred_failure
 
 CACHE_ROOT = get_cache_dir() / "online"
 CACHE_LIMIT_BYTES = 512 * 1024 * 1024
+PAGE_MAX_BYTES = 64 * 1024 * 1024
+PAGE_MAX_PIXELS = 32_000_000
 _TRIM_INTERVAL = 30          # 秒；写入新图片后最多每 30 秒检查一次缓存大小
 _PHOTO_CACHE_SIZE = 512      # 内存里最多记这么多个章节的图片列表，最久没用的先忘
 _PHOTO_RETRY_AFTER = 2.0     # 章节列表查询失败后，这段时间内同一章节的请求直接失败、不再查（阅读页 3 秒后才自动重试）
@@ -64,7 +69,7 @@ _CUT_SLACK = 0.25            # 请求失败时离每页时限不到这么多秒�
 _HOST_COOLDOWN = 60.0        # 失败过的图片域名在这段时间内排到最后（其他域名都失败时才再试）
 _JPEG_QUALITY = 90
 _STALE_TEMP_SECONDS = 600    # 超过 10 分钟仍未改名的临时文件视为半成品
-_FAILED = "在线加载失败或超时，请稍后重试"
+_TIMEOUT_MESSAGE = "在线加载超时，请稍后重试"
 # 缓存里只有这种文件名是已完成的页面；写入时的临时文件形如 00001.tmp-xxxxxxxx.webp（旧版为 *.part）
 _PAGE_NAME = re.compile(r"\d{5,}\.webp")
 _TEMP_MARK = ".tmp-"
@@ -83,7 +88,7 @@ _client_closers = {}         # actual Thread -> client, reaped only after exit
 
 def _require_running():
     if _stop_event.is_set():
-        raise TimeoutError("在线阅读服务正在停止")
+        raise UpstreamFailure("stopping", "在线阅读服务正在停止", http_status=503)
 
 
 @contextmanager
@@ -209,13 +214,13 @@ def _acquire(lock, timeout):
 _photos = OrderedDict()      # photo_id -> JmPhotoDetail，最近用过的在后
 _photos_lock = threading.Lock()
 _photo_lookups = {}          # photo_id -> _Lookup：正在向上游查的章节
-_photo_failed_at = {}        # photo_id -> 最近一次查询失败的时间（_clock）
+_photo_failures = OrderedDict()  # photo_id -> (time, detached failure)
 _fetch_slots = threading.BoundedSemaphore(_MAX_PARALLEL_FETCHES)
 _page_locks = {}             # (photo_id, index) -> [Lock, 使用者数]；没人用时删除
 _page_locks_guard = threading.Lock()
 _trim_lock = threading.Lock()
 _last_trim = 0.0
-# clear_cache() 每次加 1：之前排队或进行中的预取不再写入缓存
+# clear_cache() 每次加 1：之前启动的取图不再写入缓存。
 _cache_epoch = 0
 _store_lock = threading.Lock()
 
@@ -261,8 +266,7 @@ class _Lookup:
 
 @_tracked
 def _get_photo(photo_id: str, deadline: float):
-    """章节图片列表：优先用内存里的；没有时向上游查，同一章节同时只查一次。最多等到 deadline，等不到或查询失败抛
-    TimeoutError；等不到时查询在后台继续，之后的请求接着等它，不会再发起一次。"""
+    """同一章节同时只查一次；等待超时后查询继续，已知失败在短暂冷却期保留原分类。"""
     with _photos_lock:
         photo = _photos.get(photo_id)
         if photo is not None:
@@ -275,9 +279,9 @@ def _get_photo(photo_id: str, deadline: float):
             lookup = None
         start = lookup is None
         if start:
-            failed_at = _photo_failed_at.get(photo_id)
-            if failed_at is not None and _clock() - failed_at < _PHOTO_RETRY_AFTER:
-                raise TimeoutError(_FAILED)  # 刚失败过，原因已记录：不马上再查
+            failure = _photo_failures.get(photo_id)
+            if failure is not None and _clock() - failure[0] < _PHOTO_RETRY_AFTER:
+                raise failure[1].detached()
             lookup = _photo_lookups[photo_id] = _Lookup()
     if stale:
         log.warning(f"在线阅读 获取章节 photo_id={photo_id} 超过 {int(_LOOKUP_MAX_AGE)} 秒仍未完成，重新获取")
@@ -296,13 +300,9 @@ def _get_photo(photo_id: str, deadline: float):
             first, lookup.late_logged = not lookup.late_logged, True
         if first:
             log.warning(f"在线阅读 获取章节 photo_id={photo_id} 超时，仍在后台获取")
-        raise TimeoutError(_FAILED)
+        raise UpstreamTimeout(_TIMEOUT_MESSAGE)
     if lookup.error is not None:
-        from .background_calls import BackgroundCallsBusy, BackgroundCallsStopped
-        from .metadata_budget import MetadataStopped
-        if isinstance(lookup.error, (BackgroundCallsBusy, BackgroundCallsStopped, MetadataStopped)):
-            raise jm_service.classify_failure(lookup.error)
-        raise TimeoutError(_FAILED)
+        raise lookup.error.detached()
     return lookup.photo
 
 
@@ -312,7 +312,7 @@ def _start_lookup(photo_id: str, lookup: _Lookup) -> None:
     global _lookup_callbacks
     with _lifecycle_cond:
         if _stop_event.is_set():
-            _finish_lookup(photo_id, lookup, None, TimeoutError(_FAILED))
+            _finish_lookup(photo_id, lookup, None, UpstreamFailure("stopping", "在线阅读服务正在停止", http_status=503))
             return
         lookup.owns_callback = True
         _lookup_callbacks += 1
@@ -346,19 +346,23 @@ def _finish_lookup(photo_id: str, lookup: _Lookup, photo, error) -> None:
     global _lookup_callbacks
     try:
         if error is None and photo is None:
-            error = ValueError("上游没有返回章节")
+            error = UpstreamFailure("invalid_response", "上游没有返回章节")
         if error is not None:
             log.warning(f"在线阅读 获取章节 photo_id={photo_id} 超时或失败 error={type(error).__name__}: {error}")
+            error = classify_failure(error).detached()
         with _lifecycle_cond:
             publish = not _stop_event.is_set() and lookup.generation == _lifecycle_generation
             with _photos_lock:
-                if publish:
+                if publish and _photo_lookups.get(photo_id) is lookup:
                     if error is None:
-                        _photo_failed_at.pop(photo_id, None)
+                        _photo_failures.pop(photo_id, None)
                         if getattr(photo, "page_arr", None):
                             _remember_locked(photo_id, photo)
                     else:
-                        _photo_failed_at[photo_id] = _clock()
+                        _photo_failures[photo_id] = (_clock(), error)
+                        _photo_failures.move_to_end(photo_id)
+                        if len(_photo_failures) > _PHOTO_CACHE_SIZE:
+                            _photo_failures.popitem(last=False)
                 if _photo_lookups.get(photo_id) is lookup:
                     del _photo_lookups[photo_id]
                 lookup.photo, lookup.error = photo, error
@@ -379,13 +383,14 @@ def album_pages(album_id: str) -> dict:
     client, _ = jm_service.get_client()
     try:
         album = jm_service._call_with_timeout(
-            f"在线阅读 获取专辑 album_id={album_id}", 20, _FAILED,
+            f"在线阅读 获取专辑 album_id={album_id}", 20, _TIMEOUT_MESSAGE,
             client.get_album_detail, album_id, _call_deadline=deadline, _call_stop=_stop_event,
             _call_client=client,
         )
         _require_running()
         failed = []
-        photos = jm_service.check_album_photos(client, album, failed=failed, deadline=deadline, stop_event=_stop_event)
+        chapter_deadline = min(deadline, jm_service.metadata_budget.deadline_after(min(15, jm_service._operation_timeout(15))))
+        photos = jm_service.check_album_photos(client, album, failed=failed, deadline=chapter_deadline, stop_event=_stop_event)
     finally:
         jm_service.close_client(client)
 
@@ -405,10 +410,9 @@ def album_pages(album_id: str) -> dict:
             })
     _remember_photos([photo for photo in photos if getattr(photo, "page_arr", None)])
     if not pages and failed:
-        # 一页都没有是因为章节列表没取到（网络失败/超时，单章节漫画最常见），不是“没有可在线阅读的页面”：
-        # 按可重试的加载失败处理（504），原因见上面 check_album_photos 的警告
         log.warning(f"在线阅读 所有章节的页面列表都获取失败 album_id={album_id} chapters={len(failed)}")
-        raise TimeoutError(_FAILED)
+        jm_service.metadata_budget.remaining(chapter_deadline, _stop_event, jm_service.background_calls.stop_event())
+        raise UpstreamFailure("upstream_error", "上游未能提供章节列表，请稍后重试")
     return {"title": str(getattr(album, "name", "") or ""), "pages": pages, "skipped_chapters": skipped}
 
 
@@ -445,27 +449,38 @@ def _page_budget() -> float:
     return max(_PAGE_BUDGET, setting)
 
 
+def _cached_page(path):
+    from stat import S_ISREG
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    return S_ISREG(info.st_mode) and info.st_size > 0
+
+
 @_tracked
 def image_file(photo_id: str, index: int) -> Path:
-    """返回单页图片的缓存路径；未缓存时从上游取。索引越界抛 IndexError，上游失败或到了每页时限抛 TimeoutError。
+    """返回单页图片的缓存路径；未缓存时从上游取。索引越界抛 IndexError，上游失败保留具体分类。
     时限从这里算起：等同一页的预取、等取图名额、查章节列表都算在内，不会等完再重新计时。
     无论是否命中缓存，都在后台预取本章节接下来的几页。"""
+    epoch = _cache_epoch
     target = _page_path(photo_id, index)
-    if target.is_file():
+    if _cached_page(target):
         _touch(target)
         _schedule_prefetch(photo_id, index)
         return target
     deadline = _clock() + _page_budget()
     with _page_lock((photo_id, index), deadline - _clock()) as acquired:
-        if not target.is_file():  # 同一页的另一个请求或预取刚取完就直接用
+        if not _cached_page(target):  # 同一页的另一个请求或预取刚取完就直接用
             if not acquired:
                 log.warning(f"在线阅读 取图失败 photo_id={photo_id} page={index + 1} error=等待同一页的另一次获取超时")
-                raise TimeoutError(_FAILED)
+                raise UpstreamTimeout(_TIMEOUT_MESSAGE)
             photo = _get_photo(photo_id, deadline)
             if index >= len(photo.page_arr or ()):
                 raise IndexError(f"photo {photo_id} has no page {index + 1}")
-            if not _fetch_page(photo, index, target, deadline):
-                raise TimeoutError(_FAILED)
+            if not _fetch_page(photo, index, target, deadline, epoch=epoch):
+                _require_running()
+                raise UpstreamFailure("cache_changed", "图片缓存已刷新，请重试", http_status=503)
     _schedule_prefetch(photo_id, index)
     _trim_cache()
     return target
@@ -473,8 +488,8 @@ def image_file(photo_id: str, index: int) -> Path:
 
 @_tracked
 def _fetch_page(photo, index: int, target: Path, deadline: float, epoch=None, background=False) -> bool:
-    """取一页、按需解扰、写入缓存，到 deadline 为止。上游失败或结果不是有效图片抛 TimeoutError。
-    epoch 不为 None 时（预取），clear_cache() 之后不再写入，返回 False。"""
+    """取一页、按需解扰、写入缓存，到 deadline 为止；不发布无效或超限的图片。
+    clear_cache() 之后不再发布旧请求的结果，返回 False。"""
     photo_id = str(photo.photo_id)
     image = photo[index]
     url = image.download_url
@@ -483,7 +498,7 @@ def _fetch_page(photo, index: int, target: Path, deadline: float, epoch=None, ba
     else:
         if not _acquire(_fetch_slots, max(0.0, deadline - _clock())):
             log.warning(f"在线阅读 取图失败 photo_id={photo_id} page={index + 1} error=等待取图名额超时")
-            raise TimeoutError(_FAILED)
+            raise UpstreamTimeout(_TIMEOUT_MESSAGE)
         try:
             data = _download(url, photo_id, index + 1, deadline)
         finally:
@@ -491,11 +506,15 @@ def _fetch_page(photo, index: int, target: Path, deadline: float, epoch=None, ba
     _require_running()
     try:
         content = _page_content(image, url, data)
-    except Exception as e:
+    except UpstreamFailure:
+        raise
+    except Image.DecompressionBombError as e:
+        raise UpstreamFailure("image_too_large", "上游图片超过单页像素限制") from e
+    except (ValueError, SyntaxError, OSError) as e:
         level = log.info if background else log.warning
         level(f"在线阅读{' 预取' if background else ''} 取图结果不是有效图片 photo_id={photo_id} page={index + 1} "
               f"size={len(data)} error={type(e).__name__}: {e}")
-        raise TimeoutError(_FAILED)
+        raise UpstreamFailure("invalid_response", "上游返回的图片无效，请稍后重试") from e
     return _store(target, content, epoch)
 
 
@@ -512,7 +531,6 @@ def _scramble_num(image, url: str) -> int:
 
 def _unscramble(source, num: int):
     """把加扰的页面还原，逐步照搬 jmcomic 的 JmImageTool.decode_and_save（测试逐像素比对），只是不在这里保存。"""
-    from PIL import Image
     width, height = source.size
     restored = Image.new("RGB", (width, height))
     over = height % num
@@ -531,11 +549,16 @@ def _unscramble(source, num: int):
 def _page_content(image, url: str, data: bytes) -> bytes:
     """要写入缓存的内容：不需要解扰的页面就是上游字节本身（先确认是完整的图片）；需要解扰的切片还原后编码为 JPEG。"""
     num = _scramble_num(image, url)
-    if num == 0:
-        _require_image(data)
-        return data
-    from PIL import Image
-    with Image.open(io.BytesIO(data)) as source:
+    if data.startswith(b'RIFF'):
+        _check_webp_canvas(data)
+    with Image.open(io.BytesIO(data), formats=("WEBP", "JPEG", "GIF", "PNG")) as source:
+        _check_pixels(*source.size)
+        if num == 0:
+            if source.format in ("JPEG", "GIF"):
+                source.load()
+            else:
+                source.verify()
+            return data
         restored = _unscramble(source, num)
     buffer = io.BytesIO()
     # JPEG q90：5.7 MP 的页面约 20 ms，WebP method 0 约 350 ms（jmcomic 默认 WebP 约 1 s），
@@ -551,18 +574,25 @@ def _sniff(head: bytes):
     return None
 
 
-def _require_image(data: bytes) -> None:
-    """原样保存前确认上游字节是完整的图片。WebP 打开时就会校验容器结构、PNG 的 verify 校验 CRC，
-    都能发现截断；JPEG / GIF 的 verify 查不出截断，解码一遍（JPEG 几十毫秒，GIF 只解第一帧）。"""
-    if _sniff(data[:12]) is None:
-        raise ValueError("不是图片")
-    from PIL import Image
-    with Image.open(io.BytesIO(data)) as image:
-        fmt = image.format
-        image.verify()
-    if fmt in ("JPEG", "GIF"):
-        with Image.open(io.BytesIO(data)) as image:
-            image.load()
+def _check_pixels(width, height):
+    if width * height > PAGE_MAX_PIXELS:
+        raise UpstreamFailure("image_too_large", "上游图片超过单页像素限制")
+
+
+def _check_webp_canvas(data):
+    """Pillow constructs libwebp's animation decoder in Image.open, even for a still image."""
+    if len(data) < 25 or data[8:12] != b'WEBP':
+        raise ValueError("无效的 WebP 图片头")
+    chunk = data[12:16]
+    if chunk == b'VP8L' and data[20] == 0x2f:
+        packed = int.from_bytes(data[21:25], 'little')
+        _check_pixels(1 + (packed & 0x3fff), 1 + ((packed >> 14) & 0x3fff))
+    elif chunk == b'VP8X' and len(data) >= 30:
+        _check_pixels(1 + int.from_bytes(data[24:27], 'little'), 1 + int.from_bytes(data[27:30], 'little'))
+    elif chunk == b'VP8 ' and len(data) >= 30 and data[23:26] == b'\x9d\x01\x2a':
+        _check_pixels(int.from_bytes(data[26:28], 'little') & 0x3fff, int.from_bytes(data[28:30], 'little') & 0x3fff)
+    else:
+        raise ValueError("无效的 WebP 图片头")
 
 
 # ── 取图：连接池 + 换域名 ────────────────────────────────
@@ -678,11 +708,32 @@ def _host_result(host: str, ok: bool) -> None:
 
 def _request(client, url: str, timeout) -> bytes:
     """取一次图片，保留 HTTP 状态供阅读器判断是否换节点。"""
-    resp = get_image_once(client, url, timeout)
+    from curl_cffi.curl import CURL_WRITEFUNC_ERROR
+    from jmcomic import JmModuleConfig
+    buffer = io.BytesIO()
+    oversized = False
+
+    def receive(chunk):
+        nonlocal oversized
+        if buffer.tell() + len(chunk) > PAGE_MAX_BYTES:
+            oversized = True
+            return CURL_WRITEFUNC_ERROR
+        return buffer.write(chunk)
+
+    kwargs = {"headers": JmModuleConfig.new_html_headers()}
+    client.update_request_with_specify_domain(kwargs, None, True)
+    try:
+        resp = client.postman.get(url, timeout=timeout, content_callback=receive, **kwargs)
+    except Exception as error:
+        if oversized:
+            raise UpstreamFailure("image_too_large", "上游图片超过单页字节限制") from error
+        raise
+    if oversized:
+        raise UpstreamFailure("image_too_large", "上游图片超过单页字节限制")
     status = resp.status_code
     if status != 200:
         raise _FetchError(f"HTTP {status}", status=status)
-    data = resp.content
+    data = buffer.getvalue()
     if not data:
         raise _FetchError("响应为空")
     if _sniff(data[:12]) is None:
@@ -698,6 +749,7 @@ def _download(url: str, photo_id: str, page: int, deadline: float, background: b
     parts = urlsplit(url)
     own = parts.netloc
     tried, last_error = [], None
+    failures = []
     statuses = set()          # 这一页已经收到的 HTTP 错误状态码（每个域名算一次）
     server_errors = []        # 对这一页回了 5xx 的域名
     quick_retry = True
@@ -716,8 +768,17 @@ def _download(url: str, photo_id: str, page: int, deadline: float, background: b
                     data = _request(client, host_url, (connect, total - connect))
                 except Exception as e:
                     _require_running()
+                    if isinstance(e, UpstreamFailure):
+                        raise
                     error = e
                     status = getattr(e, "status", None)
+                    if isinstance(e, _FetchError):
+                        failure = http_failure(status) if status else UpstreamFailure("invalid_response", "上游返回的图片无效")
+                    else:
+                        failure = known_failure(e)
+                        if failure is None:
+                            raise
+                    failures.append(failure)
                     quick = _clock() - started < _QUICK_FAILURE
                     if quick_retry and quick and (status is None or status >= 500):
                         quick_retry = False
@@ -748,7 +809,9 @@ def _download(url: str, photo_id: str, page: int, deadline: float, background: b
     level = log.info if background else log.warning
     level(f"{label} 取图失败 photo_id={photo_id} page={page} hosts={','.join(tried) or own} "
           f"error={_describe(last_error) if last_error else '超时'}")
-    raise TimeoutError(_FAILED)
+    if failures:
+        raise preferred_failure(failures) from last_error
+    raise UpstreamTimeout()
 
 
 def _describe(error) -> str:
@@ -772,7 +835,7 @@ def _schedule_prefetch(photo_id: str, index: int) -> None:
         return
     end = min(index + 1 + _PREFETCH_AHEAD, len(photo.page_arr or ()))
     keys = [(photo_id, i) for i in range(index + 1, end)]
-    keys = [key for key in keys if not _page_path(*key).is_file()]
+    keys = [key for key in keys if not _cached_page(_page_path(*key))]
     if not keys:
         return
     with _prefetch_cond:
@@ -833,14 +896,14 @@ def _prefetch_worker() -> None:
 def _prefetch(key, epoch: int) -> None:
     photo_id, index = key
     target = _page_path(photo_id, index)
-    if _stop_event.is_set() or epoch != _cache_epoch or target.is_file():
+    if _stop_event.is_set() or epoch != _cache_epoch or _cached_page(target):
         return
     photo = _cached_photo(photo_id)
     if photo is None or index >= len(photo.page_arr or ()):
         return  # 章节列表已不在内存里（清除缓存等）：后台不查章节，等读者打开这一页时再查
     with _page_lock(key) as acquired:
         # 拿不到锁：前台正在取这一页，不重复取
-        if not acquired or target.is_file() or epoch != _cache_epoch:
+        if not acquired or _cached_page(target) or epoch != _cache_epoch:
             return
         if _all_hosts_down(urlsplit(photo[index].download_url).netloc):
             return  # 所有图片域名刚失败过：不在后台反复撞，等读者翻到这一页时再取
@@ -894,7 +957,7 @@ def clear_cache() -> None:
         shutil.rmtree(CACHE_ROOT, ignore_errors=True)
     with _photos_lock:
         _photos.clear()
-        _photo_failed_at.clear()
+        _photo_failures.clear()
     with _pool_lock:
         _pool_epoch += 1
         idle, _idle_clients = [client for _, client in _idle_clients], []
@@ -957,11 +1020,10 @@ def _trim_cache(force: bool = False) -> None:
                 total -= size
             except OSError:
                 pass
-        for directory in CACHE_ROOT.iterdir():
-            if directory.is_dir() and not any(directory.iterdir()):
-                try:
-                    directory.rmdir()
-                except OSError:
-                    pass
+        for directory in CACHE_ROOT.glob("*"):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
     finally:
         _trim_lock.release()

@@ -75,3 +75,19 @@ def test_next_page_prioritizes_a_node_that_recently_succeeded(network):
     image_download.download_image(client, **arguments)
     assert [url for url, _ in calls] == ["https://first.invalid/image", "https://second.invalid/image",
                                        "https://second.invalid/image"]
+
+
+def test_full_disk_does_not_retry_or_demote_a_working_mirror(network, monkeypatch):
+    import errno
+    from core import image_download
+    client, calls, _, _ = network
+    def full(**kwargs):
+        calls.append(kwargs['img_url'])
+        raise OSError(errno.ENOSPC, 'fixture disk full')
+    monkeypatch.setattr(client, 'download_image', full)
+    with pytest.raises(OSError) as failed:
+        image_download.download_image(client, img_url='https://first.invalid/page', img_save_path='unused',
+                                     scramble_id=None, decode_image=True, timeout=5, attempts=3)
+    assert calls == ['https://first.invalid/page'] and not image_download._failed_hosts
+    assert '[local_file]' in image_download.failure_detail(failed.value)
+    assert '[timeout]' in image_download.failure_detail(TimeoutError('fixture timeout'))

@@ -4,6 +4,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from curl_cffi.requests import exceptions as curl_errors
 from jmcomic import (
     JsonResolveFailException, MissingAlbumPhotoException,
     RequestRetryAllFailException, ResponseUnexpectedException,
@@ -22,6 +23,10 @@ def http_error(status):
     (http_error(403), "access_denied", 502, 403),
     (http_error(404), "http_error", 502, 404),
     (http_error(500), "http_error", 502, 500),
+    (http_error(200), "invalid_response", 502, None),
+    (curl_errors.ReadTimeout("private"), "timeout", 504, None),
+    (curl_errors.CertificateVerifyError("private"), "tls", 502, None),
+    (curl_errors.ProxyError("private"), "connection", 502, None),
     (JsonResolveFailException("private HTML", {}), "invalid_response", 502, None),
     (json.JSONDecodeError("secret", "<html>", 0), "invalid_response", 502, None),
     (MissingAlbumPhotoException("secret", {}), "not_found", 404, None),
@@ -119,9 +124,7 @@ def test_http_routes_use_structured_failure_contract(client, monkeypatch, error,
         url = "/api/online/123"
     response = client.get(url)
     assert response.status_code == expected_status
-    # The legacy online timeout response still supplies its safe message/status.
-    if not (endpoint == "online" and kind == "timeout"):
-        assert response.json["error_kind"] == kind
+    assert response.json["error_kind"] == kind
     assert "secret" not in response.get_data(as_text=True)
 
 

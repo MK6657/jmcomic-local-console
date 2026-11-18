@@ -6,6 +6,8 @@ import queue
 import threading
 import time
 
+from .logger import sanitize_fields
+
 
 class ProgressTracker:
     """单个任务的进度跟踪器（支持多客户端独立消费）"""
@@ -33,6 +35,7 @@ class ProgressTracker:
 
     def push(self, event: str, data: dict):
         """广播进度事件给所有订阅客户端（每个客户端独立队列，互不消费）"""
+        data = sanitize_fields(data)
         with self._lock:
             for q in self._subscribers:
                 try:

@@ -126,11 +126,9 @@ class IndependentFutureTimeout(Exception):
 @pytest.fixture
 def independent_future_timeout(monkeypatch):
     from core import upstream
-    from routes import api_library
 
     assert not issubclass(IndependentFutureTimeout, TimeoutError)
     monkeypatch.setattr(upstream, "FuturesTimeout", IndependentFutureTimeout, raising=False)
-    monkeypatch.setattr(api_library, "FuturesTimeout", IndependentFutureTimeout)
     return IndependentFutureTimeout("private executor detail")
 
 
@@ -152,9 +150,8 @@ def test_independent_future_timeout_uses_tag_sync_failure_contract(
 
     future = Mock()
     future.result.side_effect = independent_future_timeout
-    pool = Mock()
-    pool.submit.return_value = future
-    monkeypatch.setattr(api_library, "ThreadPoolExecutor", Mock(return_value=pool))
+    submit = Mock(return_value=future)
+    monkeypatch.setattr(api_library.tag_jobs, "submit", submit)
     lookup = Mock(side_effect=AssertionError("fake executor must not perform a lookup"))
     monkeypatch.setattr(api_library, "get_album_detail_cached", lookup)
 
@@ -162,5 +159,5 @@ def test_independent_future_timeout_uses_tag_sync_failure_contract(
     assert_json_error(response, 504)
     assert response.get_json() == upstream.classify_failure(independent_future_timeout).payload()
     future.result.assert_called_once_with(timeout=20)
-    pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+    submit.assert_called_once_with(lookup, "123")
     lookup.assert_not_called()

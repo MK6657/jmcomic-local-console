@@ -9,9 +9,10 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 import json
 import ssl
 
+from curl_cffi.requests import exceptions as curl_errors
 from jmcomic import (
     JmcomicException, JsonResolveFailException, MissingAlbumPhotoException,
-    RegularNotMatchException,
+    RegularNotMatchException, ResponseUnexpectedException,
 )
 from requests.exceptions import (
     ConnectionError as RequestsConnectionError, HTTPError, SSLError, Timeout,
@@ -32,6 +33,12 @@ class UpstreamFailure(Exception):
             result["upstream_status"] = self.upstream_status
         return result
 
+    def detached(self):
+        """Copy the public failure without retaining transport responses or shared traceback frames."""
+        if self.kind == "timeout":
+            return UpstreamTimeout(str(self))
+        return UpstreamFailure(self.kind, str(self), http_status=self.http_status, upstream_status=self.upstream_status)
+
 
 class UpstreamTimeout(UpstreamFailure, TimeoutError):
     def __init__(self, message: str = "上游请求超时，请稍后重试"):
@@ -39,10 +46,21 @@ class UpstreamTimeout(UpstreamFailure, TimeoutError):
 
 
 _PRIORITY = {
+    "stopping": -2, "busy": -1,
     "not_found": 0, "access_denied": 1, "http_error": 2,
     "invalid_response": 3, "tls": 4, "connection": 5,
     "upstream_error": 6, "timeout": 7,
 }
+
+
+def preferred_failure(failures):
+    return min(failures, key=lambda failure: _PRIORITY.get(failure.kind, 6))
+
+
+def http_failure(status):
+    if status in (401, 403):
+        return UpstreamFailure("access_denied", "上游拒绝访问，请检查网络设置或稍后重试", upstream_status=status)
+    return UpstreamFailure("http_error", f"上游服务返回异常（HTTP {status}），请稍后重试", upstream_status=status)
 
 
 def _response_status(error: Exception) -> int | None:
@@ -51,7 +69,7 @@ def _response_status(error: Exception) -> int | None:
     if response is None:
         response = getattr(error, "response", None)
     status = getattr(response, "status_code", None)
-    return status if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599 else None
+    return status if isinstance(status, int) and 100 <= status <= 599 else None
 
 
 def classify_failure(error: Exception, *, timeout_message: str | None = None,
@@ -68,7 +86,8 @@ def classify_failure(error: Exception, *, timeout_message: str | None = None,
     from .metadata_budget import MetadataStopped
     if isinstance(error, (BackgroundCallsBusy, BackgroundCallsStopped, MetadataStopped)):
         kind = "busy" if isinstance(error, BackgroundCallsBusy) else "stopping"
-        return UpstreamFailure(kind, str(error), http_status=503)
+        message = "元数据请求过多，请稍后重试" if kind == "busy" else "服务正在停止，请稍后重试"
+        return UpstreamFailure(kind, message, http_status=503)
     if id(error) in _seen or len(_seen) >= 8:
         return UpstreamFailure("upstream_error", "上游请求失败，请稍后重试")
     seen = _seen | {id(error)}
@@ -78,23 +97,22 @@ def classify_failure(error: Exception, *, timeout_message: str | None = None,
     failures = [classify_failure(cause, timeout_message=timeout_message, _seen=seen)
                 for cause in causes if isinstance(cause, Exception)]
     if failures:
-        return min(failures, key=lambda failure: _PRIORITY.get(failure.kind, 6))
+        return preferred_failure(failures)
     if isinstance(error, MissingAlbumPhotoException):
         return UpstreamFailure("not_found", "上游未找到该漫画或章节", http_status=404)
     status = _response_status(error)
-    if status is not None:
-        kind = "access_denied" if status in (401, 403) else "http_error"
-        message = ("上游拒绝访问，请检查网络设置或稍后重试" if kind == "access_denied"
-                   else f"上游服务返回异常（HTTP {status}），请稍后重试")
-        return UpstreamFailure(kind, message, upstream_status=status)
+    if status is not None and status >= 400:
+        return http_failure(status)
     code = getattr(error, "code", None)
-    if isinstance(error, (TimeoutError, FuturesTimeout, Timeout)) or code == 28:
+    if isinstance(error, (TimeoutError, FuturesTimeout, Timeout, curl_errors.Timeout)) or code == 28:
         return UpstreamTimeout(timeout_message or "上游请求超时，请稍后重试")
-    if isinstance(error, (ssl.SSLError, SSLError)) or code in (35, 51, 53, 54, 58, 59, 60, 64, 66, 77, 80, 82, 83, 90, 91):
+    if isinstance(error, (ssl.SSLError, SSLError, curl_errors.SSLError)) or code in (35, 51, 53, 54, 58, 59, 60, 64, 66, 77, 80, 82, 83, 90, 91):
         return UpstreamFailure("tls", "与上游建立安全连接失败，请检查网络设置或稍后重试")
-    if isinstance(error, (ConnectionError, RequestsConnectionError)) or code in (5, 6, 7, 18, 52, 55, 56, 97):
+    if isinstance(error, (ConnectionError, RequestsConnectionError, curl_errors.ConnectionError, curl_errors.ProxyError)) or code in (5, 6, 7, 18, 52, 55, 56, 97):
         return UpstreamFailure("connection", "无法连接上游服务，请检查网络设置或稍后重试")
-    if isinstance(error, (json.JSONDecodeError, JsonResolveFailException, RegularNotMatchException)):
+    if (isinstance(error, (json.JSONDecodeError, JsonResolveFailException, RegularNotMatchException,
+                           curl_errors.ContentDecodingError, curl_errors.ChunkedEncodingError)) or
+            isinstance(error, ResponseUnexpectedException) and status is not None and 200 <= status < 300):
         return UpstreamFailure("invalid_response", "上游返回了无法解析的内容，请稍后重试")
     return UpstreamFailure("upstream_error", "上游请求失败，请稍后重试")
 
@@ -105,9 +123,7 @@ def known_failure(error: Exception) -> UpstreamFailure | None:
     from .metadata_budget import MetadataStopped
     if isinstance(error, (UpstreamFailure, BackgroundCallsBusy, BackgroundCallsStopped, MetadataStopped,
                           JmcomicException, TimeoutError, FuturesTimeout,
-                          Timeout, ConnectionError, RequestsConnectionError, HTTPError, ssl.SSLError)):
-        return classify_failure(error)
-    # curl_cffi does not derive from requests.exceptions.RequestException.
-    if type(error).__module__.startswith("curl_cffi."):
+                          Timeout, ConnectionError, RequestsConnectionError, HTTPError, ssl.SSLError,
+                          json.JSONDecodeError, curl_errors.CurlError)):
         return classify_failure(error)
     return None

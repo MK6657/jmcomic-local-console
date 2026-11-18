@@ -20,7 +20,7 @@ from core.jm_service import get_active_client_count, invalidate_option_cache, cl
 from core import online_reader
 from core import desktop_platform
 from core.settings import build_jmcomic_option
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 import re as _re
 
 api_system_bp = Blueprint("api_system", __name__)
@@ -118,6 +118,8 @@ def diagnose():
         # ── jmcomic API 域名可达性检查 ──
         jm_domain = ""
         jm_reachable = False
+        proxy_reachable = None
+        tcp_target = "domain"
         try:
             opt = build_jmcomic_option()
             client_config = opt.get("client", {})
@@ -133,20 +135,31 @@ def diagnose():
                     # 复用已经发现的网页域名，不在诊断请求中触发额外的域名发现。
                     known_html = getattr(JmModuleConfig, "DOMAIN_HTML", None)
                     domain_list = JmModuleConfig.DOMAIN_HTML_LIST or ([known_html] if known_html else [])
-            jm_domain = domain_list[0] if domain_list else ""
-            if jm_domain:
-                parsed = urlparse(jm_domain)
-                host = parsed.hostname or jm_domain
-                port = parsed.port or 443
-                sock = socket.create_connection((host, port), timeout=3)
-                sock.close()
-                jm_reachable = True
+            if domain_list:
+                domain = domain_list[0]
+                parsed = urlsplit(domain if "://" in domain else "https://" + domain)
+                host = parsed.hostname
+                if not host:
+                    raise ValueError("域名为空")
+                jm_domain = f"[{host}]" if ":" in host else host
+                if parsed.port is not None:
+                    jm_domain += f":{parsed.port}"
+                proxies = client_config.get("postman", {}).get("meta_data", {}).get("proxies") or {}
+                proxy = proxies.get(parsed.scheme) or proxies.get("all")
+                if proxy:
+                    tcp_target, jm_reachable, proxy_reachable = "proxy", None, False
+                    parsed = urlsplit(proxy)
+                default_port = 443 if parsed.scheme == "https" else (1080 if proxy else 80)
+                port = parsed.port or default_port
+                with closing(socket.create_connection((parsed.hostname, port), timeout=3)):
+                    if proxy:
+                        proxy_reachable = True
+                    else:
+                        jm_reachable = True
         except Exception:
-            jm_reachable = False
-            if jm_domain:
-                issues.append(f"jmcomic API 域名 {jm_domain} 不可达")
-                if level == "healthy":
-                    level = "degraded"
+            issues.append("无法连接已配置的代理端口" if tcp_target == "proxy" else "无法连接 jmcomic 域名端口")
+            if level == "healthy":
+                level = "degraded"
 
         return jsonify({
             "status": "ok",
@@ -164,6 +177,8 @@ def diagnose():
             "jmcomic": {
                 "domain": jm_domain,
                 "reachable": jm_reachable,
+                "tcp_target": tcp_target,
+                "proxy_reachable": proxy_reachable,
                 "active_clients": get_active_client_count(),
             },
             "warnings": issues,

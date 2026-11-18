@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from core.upstream import UpstreamFailure
 
 HOSTS = ["img-a.test", "img-b.test", "img-c.test"]   # stands in for JmModuleConfig.DOMAIN_IMAGE_LIST
 OWN = "img-own.test"                                  # the page's own image host (not in the list)
@@ -50,12 +51,14 @@ class ImageClient:
         client = self
 
         class Postman:
-            def get(self, url, headers=None, timeout=None):
+            def get(self, url, headers=None, timeout=None, *, content_callback):
                 assert headers == {"X-Requested-With": "com.JMComic3.app"}  # jmcomic's image headers
                 with cdn.lock:
                     cdn.calls.append((client, url, timeout))
                 result = cdn.answer(url, timeout)
-                return result if isinstance(result, Response) else Response(result)
+                response = result if isinstance(result, Response) else Response(result)
+                content_callback(response.content)
+                return response
 
         self.postman = Postman()
 
@@ -282,8 +285,9 @@ def test_truncated_upstream_image_is_not_cached(env):
     payload = _encode(_pattern((64, 96)), "JPEG")
     env.photos["100001"] = Photo("100001", 1)
     env.cdn.answer = lambda url, timeout: payload[:len(payload) // 2]
-    with pytest.raises(TimeoutError):
+    with pytest.raises(UpstreamFailure) as caught:
         env.reader.image_file("100001", 0)
+    assert caught.value.kind == "invalid_response"
     assert not (env.reader.CACHE_ROOT / "100001").exists()
 
 
@@ -319,8 +323,9 @@ def test_host_fallback_order_quick_retry_and_failure_memory(env):
 def test_recently_failed_hosts_are_still_tried_when_nothing_else_is_left(env):
     env.photos["100003"] = Photo("100003", 2, host="img-a.test")
     env.cdn.answer = refuse
-    with pytest.raises(TimeoutError):
+    with pytest.raises(UpstreamFailure) as caught:
         env.reader.image_file("100003", 0)
+    assert caught.value.kind == "connection"
     assert sorted(set(env.cdn.hosts())) == HOSTS
     env.cdn.calls.clear()
     env.cdn.answer = lambda url, timeout: page_bytes(url) if "img-c" in url else refuse(url, timeout)
@@ -363,6 +368,31 @@ def test_missing_page_is_not_held_against_the_host(env):
     assert env.cdn.hosts() == [OWN]  # a 404 does not put the host in its cool-down
 
 
+@pytest.mark.parametrize("status,kind", [(403, "access_denied"), (404, "http_error")])
+def test_reader_preserves_cdn_status_across_fallback(env, client, status, kind):
+    env.photos["100025"] = Photo("100025", 1)
+    def answer(url, timeout):
+        if OWN in url:
+            return Response(b"private fixture", status)
+        raise TimeoutError("private fixture")
+    env.cdn.answer = answer
+    response = client.get("/api/online-img/100025/0")
+    assert (response.status_code, response.json["error_kind"], response.json["upstream_status"]) == (502, kind, status)
+    assert "private" not in response.get_data(as_text=True)
+
+
+def test_reader_preserves_tls_lookup_failure_in_cooldown(env, client):
+    from curl_cffi.requests.exceptions import SSLError
+    def tls(photo_id):
+        raise SSLError("private TLS diagnostic")
+    env.api.answer = tls
+    for index in (0, 1):
+        response = client.get(f"/api/online-img/200009/{index}")
+        assert (response.status_code, response.json["error_kind"]) == (502, "tls")
+        assert "private" not in response.get_data(as_text=True)
+    assert env.api.calls == ["200009"]
+
+
 def test_page_missing_on_every_host_does_not_put_the_hosts_in_cool_down(env, monkeypatch):
     """The real CDN answers HTTP 502 (not 404) for a page it does not have, from every host. Two hosts giving
     the same status for the page means the page is broken: no more hosts are tried, no host is put in its
@@ -376,8 +406,9 @@ def test_page_missing_on_every_host_does_not_put_the_hosts_in_cool_down(env, mon
     env.cdn.answer = answer
     _read(env, "100015", 1)
     env.cdn.calls.clear()
-    with pytest.raises(TimeoutError):
+    with pytest.raises(UpstreamFailure) as caught:
         env.reader.image_file("100015", 2)
+    assert (caught.value.kind, caught.value.upstream_status) == ("http_error", 502)
     assert env.cdn.hosts() == [OWN, OWN, "img-a.test"]  # the page's own host (one quick retry), then one more
     assert not env.reader._host_failed_at and not env.reader._all_hosts_down(OWN)
     assert env.reader._last_good_host == OWN
@@ -446,14 +477,23 @@ def test_reader_uses_the_sdk_image_headers_without_its_retries(client, monkeypat
     url = "https://image.invalid/media/photos/123/00001.webp?v=1"
     timeout = (2, 5)
     payload = page_bytes(url)
-    get = Mock(side_effect=[Response(payload), ConnectionError("offline fixture")])
+    def transport(*args, content_callback=None, **kwargs):
+        if content_callback is None:
+            return Response(payload)
+        if get.call_count == 3:
+            raise ConnectionError("offline fixture")
+        content_callback(payload[:7])
+        content_callback(payload[7:])
+        return Response(b"")
+    get = Mock(side_effect=transport)
     try:
         assert image_client.client_key == impl and image_client.retry_times == 3
         monkeypatch.setattr(image_client.get_root_postman().session, "get", get)
         assert image_client.get_jm_image(url).content == payload
+        assert online_reader._request(image_client, url, timeout) == payload
         with pytest.raises(ConnectionError, match="offline fixture"):
             online_reader._request(image_client, url, timeout)
-        sdk_call, reader_call = get.call_args_list
+        sdk_call, reader_call, _ = get.call_args_list
         assert reader_call.args == sdk_call.args == (url,)
         assert reader_call.kwargs["headers"] == sdk_call.kwargs["headers"]
         assert reader_call.kwargs["timeout"] == timeout
@@ -662,8 +702,9 @@ def test_failed_prefetch_leaves_no_files(env, monkeypatch):
 def test_prefetch_waits_while_every_image_host_is_failing(env, monkeypatch):
     env.photos["100014"] = Photo("100014", 6)
     env.cdn.answer = refuse
-    with pytest.raises(TimeoutError):
+    with pytest.raises(UpstreamFailure) as caught:
         env.reader.image_file("100014", 0)
+    assert caught.value.kind == "connection"
     folder = env.reader.CACHE_ROOT / "100014"
     folder.mkdir(parents=True)
     (folder / "00002.webp").write_bytes(page_bytes("https://x/media/photos/100014/00002.webp"))
@@ -727,8 +768,8 @@ def test_failed_chapter_lookup_is_shared_logged_once_and_not_repeated_at_once(en
         try:
             env.reader.image_file("200002", index)
             outcomes[index] = "ok"
-        except TimeoutError:
-            outcomes[index] = "timeout"
+        except UpstreamFailure as error:
+            outcomes[index] = error.kind
     try:
         readers = [threading.Thread(target=read, args=(index,)) for index in range(3)]
         for reader in readers:
@@ -739,12 +780,13 @@ def test_failed_chapter_lookup_is_shared_logged_once_and_not_repeated_at_once(en
         release.set()
     for reader in readers:
         reader.join(5)
-    assert outcomes == {0: "timeout", 1: "timeout", 2: "timeout"}
+    assert outcomes == dict.fromkeys(range(3), "upstream_error")
     assert env.api.calls == ["200002"]
     errors = _log_text("error")
     assert "获取章节 photo_id=200002" in errors and "Could not connect to mysql!" in errors
-    with pytest.raises(TimeoutError):
+    with pytest.raises(UpstreamFailure) as caught:
         env.reader.image_file("200002", 3)  # right after the failure: not asked again
+    assert caught.value.kind == "upstream_error"
     assert env.api.calls == ["200002"]
     env.clock.advance(3)  # the reader's own retry comes 3 s later
     env.api.answer = lambda photo_id: env.upstream[photo_id]
