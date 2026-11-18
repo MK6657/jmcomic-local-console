@@ -47,6 +47,8 @@ from .task_commands import finish_download
 _global_option = None
 _global_client = None
 _option_lock = threading.RLock()
+_factory_drained = threading.Condition(_option_lock)
+_shared_builders = 0
 # 独立 client 活跃计数（用于 session 泄漏监控）
 _active_independent_clients = 0
 _clients_lock = threading.Lock()
@@ -62,15 +64,16 @@ _option_generation = 0
 _retired_clients = {}  # Strong ownership until a retired transport really closes.
 
 
-def _get_or_create_option():
-    """获取缓存的 JmOption 实例（模块级单例，惰性创建，settings 缓存失效时自动重建）"""
+def _get_or_create_option(generation):
+    """Capture settings and run SDK initialization outside the generation lock."""
     global _global_option
-    if _global_option is None:
-        with _option_lock:
-            if _global_option is None:
-                opt_dict = build_jmcomic_option()
-                _global_option = sdk_adapter.build_option(opt_dict)
-    return _global_option
+    candidate = sdk_adapter.build_option(build_jmcomic_option())
+    with _option_lock:
+        if generation != _option_generation:
+            return None
+        if _global_option is None:
+            _global_option = candidate
+        return _global_option
 
 
 def invalidate_option_cache(*, _owned_cleanup=False):
@@ -81,44 +84,102 @@ def invalidate_option_cache(*, _owned_cleanup=False):
         _option_generation += 1
         _global_option = None
         _global_client = None
+        sdk_adapter.publish_diagnostic_domain()
         if previous is not None:
             previous._jm_retired = True
             _retired_clients[id(previous)] = previous
-        safe = True
-        for retired in list(_retired_clients.values()):
-            if getattr(retired, "_jm_users", 0) == 0 and not _dispose_client(retired):
-                safe = False
+        idle = [client for client in _retired_clients.values() if not getattr(client, "_jm_users", 0)]
+    safe = True
+    for retired in idle:
+        if not _dispose_client(retired):
+            safe = False
     if not safe and not _owned_cleanup:
         background_calls.request_cleanup()
     return safe
 
 
+def _acquire_client(kind, timeout=None, stop=None):
+    """Construct optimistically, publish only into the generation we sampled."""
+    global _global_client, _active_independent_clients
+    shared = kind == "shared"
+    deadline = metadata_budget.deadline_after(20 if shared else 120)
+    while True:
+        with _option_lock:
+            if shared and stop.is_set():
+                raise BackgroundCallsStopped("后台调用正在停止，请稍后重试")
+            metadata_budget.remaining(deadline)
+            if shared and _global_client is not None:
+                _global_client._jm_users += 1
+                return _global_client, _global_option
+            option, generation = _global_option, _option_generation
+        if option is None:
+            option = _get_or_create_option(generation)
+            if option is None:
+                continue
+        deadline = min(deadline, sdk_adapter.discovery_deadline(option, timeout))
+        metadata_budget.remaining(deadline, stop)
+        overrides = {}
+        if kind == "image":
+            overrides["image_only"] = True
+            if option.client.postman.src_dict.get("type") == "curl_cffi_session":
+                overrides["use_thread_local_curl"] = False
+        elif kind == "check":
+            overrides.update(cache=False, timeout=timeout)
+        try:
+            candidate = sdk_adapter.new_client(option, deadline=deadline, **overrides)
+        except Exception:
+            if generation != option_generation():
+                continue
+            raise
+        try:
+            if shared:
+                metadata_budget.install(candidate)
+            elif kind == "check":
+                candidate.set_cache_dict(None)
+                candidate.retry_times = 0
+            with _option_lock:
+                if shared and stop.is_set():
+                    raise BackgroundCallsStopped("后台调用正在停止，请稍后重试")
+                metadata_budget.remaining(deadline)
+                if generation != _option_generation or (shared and _global_client is not None):
+                    continue
+                sdk_adapter.publish_diagnostic_domain(option)
+                if shared:
+                    setattr(candidate, _JM_SHARED_ATTR, True)
+                    candidate._jm_users = 1
+                    candidate._jm_retired = False
+                    _global_client = candidate
+                elif kind != "image":
+                    candidate._jm_counted = True
+                    with _clients_lock:
+                        _active_independent_clients += 1
+                acquired, candidate = candidate, None
+                return acquired, option
+        finally:
+            if candidate is not None and not _dispose_client(candidate):
+                with _option_lock:
+                    _retired_clients[id(candidate)] = candidate
+                background_calls.request_cleanup()
+
+
 def get_client(shared=True):
     """Acquire a client. Every acquisition must be balanced by close_client()."""
-    global _global_client, _active_independent_clients
-    with _option_lock:
-        if shared:
-            background_calls.require_accepting()
-        option = _get_or_create_option()
-        if shared:
-            if _global_client is None:
-                candidate = sdk_adapter.new_client(option)
-                try:
-                    metadata_budget.install(candidate)
-                except BaseException:
-                    _dispose_client(candidate)
-                    raise
-                _global_client = candidate
-                setattr(_global_client, _JM_SHARED_ATTR, True)
-                _global_client._jm_users = 0
-                _global_client._jm_retired = False
+    global _shared_builders
+    if not shared:
+        return _acquire_client("independent")
+    with _factory_drained:
+        background_calls.require_accepting()
+        if _global_client is not None:
             _global_client._jm_users += 1
-            return _global_client, option
-        client = sdk_adapter.new_client(option)
-        client._jm_counted = True
-        with _clients_lock:
-            _active_independent_clients += 1
-        return client, option
+            return _global_client, _global_option
+        stop = background_calls.stop_event()
+        _shared_builders += 1
+    try:
+        return _acquire_client("shared", stop=stop)
+    finally:
+        with _factory_drained:
+            _shared_builders -= 1
+            _factory_drained.notify_all()
 
 
 def option_generation() -> int:
@@ -133,12 +194,7 @@ def new_image_client():
     curl_cffi 的 Session 默认每个线程一个 curl 句柄，换一个线程用同一个 client 仍是新连接、新 TLS 握手；
     池里的 client 会被不同的请求线程轮流使用，所以改用 client 自己的句柄，连接随 client 复用。
     不计入 get_active_client_count()（池的大小有上限，不是泄漏）。"""
-    with _option_lock:
-        option = _get_or_create_option()
-        overrides = {}
-        if option.client.postman.src_dict.get("type") == "curl_cffi_session":
-            overrides["use_thread_local_curl"] = False
-        return sdk_adapter.new_client(option, **overrides)
+    return _acquire_client("image")[0]
 
 
 def new_check_client(timeout: int):
@@ -149,15 +205,7 @@ def new_check_client(timeout: int):
       - retry_times = 0：第一次出错就抛出，换哪个域名由检查自己决定（每个域名最多问一次）；
       - timeout 覆盖 curl 的总超时（调用方已限制在 20 秒以内）。
     计入 get_active_client_count()。"""
-    global _active_independent_clients
-    with _option_lock:
-        client = sdk_adapter.new_client(_get_or_create_option(), cache=False, timeout=timeout)
-    client.set_cache_dict(None)
-    client.retry_times = 0
-    client._jm_counted = True
-    with _clients_lock:
-        _active_independent_clients += 1
-    return client
+    return _acquire_client("check", timeout)[0]
 
 
 def get_active_client_count() -> int:
@@ -166,52 +214,53 @@ def get_active_client_count() -> int:
 
 
 def _dispose_client(client):
-    """Close the transport once; callers serialize lifetime transitions."""
-    if getattr(client, _JM_CLOSED_ATTR, False):
-        _retired_clients.pop(id(client), None)
+    """Close once without holding a service lock across native session cleanup."""
+    global _active_independent_clients
+    with _option_lock:
+        lock = getattr(client, "_jm_close_lock", None)
+        if lock is None:
+            lock = client._jm_close_lock = threading.Lock()
+    with lock:
+        if getattr(client, _JM_CLOSED_ATTR, False):
+            return True
+        try:
+            sdk_adapter.close_transport(client)
+        except Exception as exc:
+            log.warning(f"关闭 client 异常: {type(exc).__name__}")
+            return False
+        with _option_lock:
+            setattr(client, _JM_CLOSED_ATTR, True)
+            _retired_clients.pop(id(client), None)
+            if getattr(client, "_jm_counted", False):
+                with _clients_lock:
+                    _active_independent_clients -= 1
         return True
-    try:
-        root = client.get_root_postman()
-        if hasattr(root, "session") and hasattr(root.session, "close"):
-            root.session.close()
-        elif hasattr(root, "close"):
-            root.close()
-        elif hasattr(client, "close"):
-            client.close()
-    except Exception as exc:
-        log.warning(f"关闭 client 异常: {exc}")
-        return False
-    setattr(client, _JM_CLOSED_ATTR, True)
-    _retired_clients.pop(id(client), None)
-    return True
 
 
 def close_client(client) -> bool:
-    global _active_independent_clients
     if client is None:
         return True
     with _option_lock:
-        if getattr(client, _JM_SHARED_ATTR, False):
-            client._jm_users = max(0, getattr(client, "_jm_users", 0) - 1)
-            if getattr(client, "_jm_retired", False) and client._jm_users == 0:
-                _retired_clients[id(client)] = client
-                safe = _dispose_client(client)
-                if not safe:
-                    background_calls.request_cleanup()
-                return safe
-            return True
         if getattr(client, _JM_CLOSED_ATTR, False):
             return True
-        if not _dispose_client(client):
-            return False
-        if getattr(client, "_jm_counted", False):
-            with _clients_lock:
-                _active_independent_clients -= 1
-        return True
+        shared = getattr(client, _JM_SHARED_ATTR, False)
+        if shared:
+            client._jm_users = max(0, getattr(client, "_jm_users", 0) - 1)
+            if not getattr(client, "_jm_retired", False) or client._jm_users:
+                return True
+            _retired_clients[id(client)] = client
+    safe = _dispose_client(client)
+    if shared and not safe:
+        background_calls.request_cleanup()
+    return safe
 
 
 def _shutdown_client_cache():
-    return invalidate_option_cache(_owned_cleanup=True)
+    safe = invalidate_option_cache(_owned_cleanup=True)
+    if background_calls.stop_event().is_set():
+        with _factory_drained:
+            _factory_drained.wait_for(lambda: not _shared_builders)
+    return safe
 
 
 background_calls.set_shutdown_cleanup(_shutdown_client_cache)

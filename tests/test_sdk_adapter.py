@@ -111,10 +111,12 @@ def test_build_option_does_not_allow_sdk_to_mutate_the_callers_config(client, mo
     from jmcomic import JmModuleConfig
     config = {"client": {"domain": {"api": ["api-custom.invalid"]}}}
     before = deepcopy(config)
-    def construct(received):
-        received["client"]["domain"]["api"].append("mutated.invalid")
-        return "constructed"
-    monkeypatch.setattr(JmModuleConfig, "option_class", lambda: SimpleNamespace(construct=construct))
+    class Option:
+        @staticmethod
+        def construct(received):
+            received["client"]["domain"]["api"].append("mutated.invalid")
+            return "constructed"
+    monkeypatch.setattr(JmModuleConfig, "option_class", lambda: Option)
     assert sdk_adapter.build_option(config) == "constructed"
     assert config == before
 

@@ -144,7 +144,9 @@ def update_settings(settings: dict):
 
 def build_jmcomic_option() -> dict:
     """根据当前设置生成 jmcomic option 配置字典"""
+    from curl_cffi import CurlOpt
     s = get_settings()
+    proxy = s.get("proxy", "").strip()
 
     option = {
         "download": {
@@ -167,6 +169,8 @@ def build_jmcomic_option() -> dict:
                 "type": "curl_cffi_session",
                 "meta_data": {
                     "impersonate": "chrome",
+                    "proxies": {"http": proxy, "https": proxy} if proxy else {},
+                    "curl_options": {CurlOpt.NOPROXY: "" if proxy else "*"},
                     # ⭐ 显式设置 HTTP 请求超时（秒），防止 curl_easy_perform 无限阻塞
                     "timeout": int(s.get("timeout", 30)),
                 },
@@ -180,11 +184,5 @@ def build_jmcomic_option() -> dict:
     client_type = s.get("client_type", "html")
     if client_type == "api":
         option["client"]["impl"] = "api"
-
-    proxy = s.get("proxy", "").strip()
-    if proxy:
-        option["client"]["postman"]["meta_data"]["proxies"] = {
-            "http": proxy, "https": proxy,
-        }
 
     return option
