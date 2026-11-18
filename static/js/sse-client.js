@@ -5,7 +5,7 @@
  * 依赖: showToast (base.html), escapeHtml / apiFetch / encodeJobId (utils.js)
  *
  * 通过 setSSECallbacks 解耦不同页面的事件行为：
- *   - 首页（home.js）不设回调 → 仅显示 Toast
+ *   - 首页（home.js）设回调 → 更新终态徽章
  *   - 下载管理页（downloads.js）设回调 → 触发 refreshJobs
  */
 (function () {
@@ -33,6 +33,7 @@
     onProgress: null,   // function(data)
     onCompleted: null,  // function(data)
     onFailed: null,     // function(data)
+    onCanceled: null,
     onArchiving: null,  // function(data)
   };
 
@@ -107,7 +108,7 @@
         // 任务完成不代表整部漫画都已下载（可能只选了部分章节）
         showToast('✅ ' + title + ' 下载任务完成', 'success');
       } catch (err) { /* 忽略 */ }
-      if (_callbacks.onCompleted) _callbacks.onCompleted(e);
+      if (_callbacks.onCompleted) _callbacks.onCompleted(e, jobId);
     });
 
     // ── failed ──
@@ -120,7 +121,13 @@
         var errMsg = data.error_message ? ': ' + data.error_message : '';
         showToast('❌ ' + title + ' 下载失败' + errMsg, 'danger');
       } catch (err) { /* 忽略 */ }
-      if (_callbacks.onFailed) _callbacks.onFailed(e);
+      if (_callbacks.onFailed) _callbacks.onFailed(e, jobId);
+    });
+
+    source.addEventListener('canceled', function (e) {
+      if (connections[jobId] !== source) return;
+      closeConnection(jobId);
+      if (_callbacks.onCanceled) _callbacks.onCanceled(e, jobId);
     });
 
     // ── archiving ──
@@ -199,25 +206,14 @@
     if (cbs.onProgress) _callbacks.onProgress = cbs.onProgress;
     if (cbs.onCompleted) _callbacks.onCompleted = cbs.onCompleted;
     if (cbs.onFailed) _callbacks.onFailed = cbs.onFailed;
+    if (cbs.onCanceled) _callbacks.onCanceled = cbs.onCanceled;
     if (cbs.onArchiving) _callbacks.onArchiving = cbs.onArchiving;
   };
 
   // ── 页面关闭/隐藏时自动断开所有 SSE ──
-  // beforeunload：保留旧行为（同时在部分浏览器阻止 bfcache，对 SSE 页面是期望行为）
-  window.addEventListener('beforeunload', function () {
-    window.disconnectAllSSE();
-  });
   // pagehide：正常卸载与进入 bfcache 时都会触发，确保 EventSource 连接被释放，
   // 不占用浏览器连接池（EventSource 长连接会长期占住一个连接槽）
   window.addEventListener('pagehide', function () {
     window.disconnectAllSSE();
-  });
-  // pageshow：从 bfcache 恢复（event.persisted 为 true）时，为页面上仍处于
-  // running 状态的任务重建连接；connectSSE 内部有防重复逻辑（已存在连接则跳过），
-  // 普通首次加载（persisted 为 false）不在此处理，与各页面现有初始化逻辑保持一致
-  window.addEventListener('pageshow', function (event) {
-    if (event.persisted) {
-      window.connectAllSSE();
-    }
   });
 })();

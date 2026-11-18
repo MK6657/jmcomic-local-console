@@ -1,4 +1,6 @@
 """HTTP stream admission and cleanup using disposable progress managers."""
+import json
+
 import pytest
 
 
@@ -17,6 +19,20 @@ def make_response(client, job_id):
     from routes.api_jobs import job_events
     with client.application.test_request_context(f"/api/jobs/{job_id}/events"):
         return job_events(job_id)
+
+
+def test_reconnecting_after_cancel_gets_one_terminal_event_without_a_stream_slot(client, streams):
+    from core.task_commands import cancel_download, enqueue_download
+
+    job_id = enqueue_download("123", "fixture", []).job_id
+    assert cancel_download(job_id)[0]
+    with client.get(f"/api/jobs/{job_id}/events") as response:
+        assert response.status_code == 200 and response.mimetype == "text/event-stream"
+        event, data, separator, end = response.get_data(as_text=True).split("\n")
+        assert (event, separator, end) == ("event: canceled", "", "")
+        assert data.startswith("data: ")
+        assert json.loads(data[6:]) == {"job_id": job_id, "status": "canceled"}
+        assert streams.active_stream_count() == 0
 
 
 def test_capacity_rejected_before_streaming_status_is_committed(client, streams):

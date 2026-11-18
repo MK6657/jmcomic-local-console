@@ -64,3 +64,8 @@ def test_browser_limits_live_task_streams_to_five():
 
 def test_polling_does_not_override_a_reconnect_backoff():
     assert run("backoff") == {"pending": 1, "total": 1}
+
+
+@pytest.mark.skipif(NODE is None, reason="Node required")
+def test_home_canceled_event_is_terminal_across_visibility_and_page_restore():
+    subprocess.run([NODE, str(ROOT / "tests/home_sse.cjs")], check=True, timeout=15)

@@ -12,8 +12,29 @@
     // 如果页面上有 #downloadTabs，说明是下载管理页，不做处理
     if (document.getElementById('downloadTabs')) return;
 
-    // 为页面上所有 running 任务连接 SSE（服务器端渲染已展示初始数据）
-    window.connectAllSSE();
+    function finish(jobId, status, label, color) {
+      var badge = document.getElementById('pct-' + jobId);
+      if (!badge) return;
+      badge.closest('[data-job-id]').dataset.status = status;
+      badge.textContent = label;
+      badge.classList.replace('bg-primary', color);
+      document.getElementById('progress-' + jobId).parentElement.hidden = true;
+    }
+    window.setSSECallbacks({
+      onCanceled: function (event, jobId) { finish(jobId, 'canceled', '已取消', 'bg-secondary'); },
+      onCompleted: function (event, jobId) { finish(jobId, 'completed', '已完成', 'bg-success'); },
+      onFailed: function (event, jobId) { finish(jobId, 'failed', '失败', 'bg-danger'); },
+    });
+    document.querySelectorAll('[data-status="running"]').forEach(function (row) {
+      window._jobTitleMap[row.getAttribute('data-job-id')] = row.querySelector('strong').textContent;
+    });
+    function syncVisible() {
+      if (document.visibilityState === 'hidden') window.disconnectAllSSE();
+      else window.connectAllSSE();
+    }
+    document.addEventListener('visibilitychange', syncVisible);
+    window.addEventListener('pageshow', function (event) { if (event.persisted) syncVisible(); });
+    syncVisible();
 
     // 车号下载：带着输入框里的车号打开搜索页
     var heroDownload = document.getElementById('hero-download-btn');
