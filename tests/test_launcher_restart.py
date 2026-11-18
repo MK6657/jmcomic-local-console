@@ -95,13 +95,22 @@ def test_record_without_fingerprint_falls_back_to_timestamps(tmp_path):
     assert launcher.server_outdated({"timestamp": "not-a-number"}, root=tmp_path)
 
 
-def test_server_records_its_code_fingerprint(app):
+def test_server_records_its_code_fingerprint(app, tmp_path, monkeypatch):
+    import runpy
     import app as app_module
     import launcher
-    record = app_module._startup_record(5001)
+    source = tmp_path / "app.py"
+    source.write_text("version = 1")
+    fingerprint = launcher.code_fingerprint
+    monkeypatch.setattr(launcher, "code_fingerprint", lambda root=tmp_path: fingerprint(root))
+    startup = runpy.run_path(app_module.__file__)["_startup_record"]
+    record = startup(5001)
     assert record["port"] == 5001 and record["pid"] == os.getpid()
-    assert record["code_fingerprint"] == launcher.code_fingerprint()
-    assert not launcher.server_outdated(record)
+    assert record["code_fingerprint"] == fingerprint(tmp_path)
+    assert not launcher.server_outdated(record, tmp_path)
+    source.write_text("version = 2")
+    assert startup(5001)["code_fingerprint"] == record["code_fingerprint"]
+    assert launcher.server_outdated(record, tmp_path)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process-tree stop")

@@ -169,7 +169,8 @@ def _folder_state(path: str, job_id: str, now: float, root: list) -> LocalState:
         if now - checked_at < ttl:
             if state.state == "loose":
                 page_info = _lstat(evidence)
-                if page_info is not None and stat.S_ISREG(page_info.st_mode) and not _is_link(page_info):
+                if (page_info is not None and page_info.st_size > 0
+                        and stat.S_ISREG(page_info.st_mode) and not _is_link(page_info)):
                     return state  # 记下的那一页还在
             elif state.state == "missing":
                 return state
@@ -191,13 +192,13 @@ def _folder_state(path: str, job_id: str, now: float, root: list) -> LocalState:
     return state
 
 
-def local_states(album_ids) -> dict[str, LocalState]:
+def local_states(album_ids, *, conn=None) -> dict[str, LocalState]:
     """各 album_id 的本地状态，只含完成过下载的（从未下载的不在结果里）。非数字 id 忽略；超过 MAX_IDS 的部分不判断。
     只看最近一次完成的任务：它的目录后来被重新下载重新建出（superseded）时是 missing。"""
     ids = [a for a in dict.fromkeys(str(a) for a in album_ids) if validate_numeric(a)][:MAX_IDS]
     if not ids:
         return {}
-    rows = db.resource_records(ids)
+    rows = db.resource_records(ids, conn=conn)
     states: dict[str, LocalState] = {}
     now, root = time.monotonic(), []
     for row in rows:
@@ -214,6 +215,14 @@ def local_states(album_ids) -> dict[str, LocalState]:
 def readable_album_ids(album_ids) -> set[str]:
     """返回其中本地可读的 album_id（散图或压缩包）。非数字 id 忽略；超过 MAX_IDS 的部分不判断。"""
     return {album_id for album_id, state in local_states(album_ids).items() if state.readable}
+
+
+def states_among(album_ids, conn) -> dict[str, LocalState]:
+    ids = list(dict.fromkeys(album_ids))
+    states = {}
+    for offset in range(0, len(ids), MAX_IDS):
+        states.update(local_states(ids[offset:offset + MAX_IDS], conn=conn))
+    return states
 
 
 def readable_among(album_ids) -> set[str]:

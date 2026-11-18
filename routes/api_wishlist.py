@@ -1,17 +1,20 @@
 """收藏清单 API"""
 import json
 import re
-import threading
 
 from flask import Blueprint, jsonify, request, Response
 
-from core import batch_downloads, database as db
-from core.jm_service import get_album_detail, get_album_detail_cached
+from core import batch_downloads, database as db, tag_sync
+from core.jm_service import get_album_detail_cached
 from core.job_manager import job_manager
-from core.logger import bind_request_id, log
+from core.logger import log
+from core.local_availability import states_among
+from core.tag_jobs import tag_jobs
+from core.background_calls import BackgroundCallsStopped
+from core.upstream import known_failure
 from core.scheduler import window_state
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
-from routes.api_library import mark_local_details, readable_among  # 本地可读：与资源库共用同一分批判断
+from routes.api_library import mark_local_details
 
 api_wishlist_bp = Blueprint("api_wishlist", __name__)
 
@@ -21,32 +24,6 @@ _MAX_BATCH_DOWNLOAD = 50
 _MAX_BATCH_IMPORT_FILE = 200
 _MAX_BATCH_IMPORT_RAW_TOKENS = 200
 _MAX_BATCH_IMPORT_RAW_ACTUAL = 50
-
-
-def _sync_tags_for_wishlist(album_id: str):
-    """收藏时后台同步标签和元数据，确保 /library 立刻显示标签"""
-    try:
-        data = get_album_detail_cached(album_id)
-        tag_names = []
-        raw_tags = data.get("tags", []) or []
-        for t in raw_tags:
-            if isinstance(t, str):
-                tag_names.append(t)
-            elif isinstance(t, dict):
-                tag_names.append(t.get("name", ""))
-            else:
-                tag_names.append(str(t))
-        synced = db.batch_sync_auto_tags(album_id, tag_names)
-        db.upsert_album_meta(
-            album_id,
-            title=data.get("title", ""),
-            author=data.get("author", ""),
-            cover_url=data.get("cover", ""),
-        )
-        if synced > 0:
-            log.info(f"收藏同步标签 album_id={album_id} synced={synced}")
-    except Exception as e:
-        log.warning(f"收藏同步标签异常 album_id={album_id} error={e}")
 
 
 # ──────────────────────────────────────────────
@@ -76,6 +53,11 @@ def add_wishlist():
         cover_url = str(cover_url)[:2000]
 
     # 如果没有提供标题等信息，尝试从 jmcomic 获取
+    detail = None
+    try:
+        tag_jobs.require_accepting()
+    except BackgroundCallsStopped as exc:
+        return jsonify(known_failure(exc).payload()), 503
     if not title or not author:
         try:
             detail = get_album_detail_cached(album_id)
@@ -88,22 +70,25 @@ def add_wishlist():
         except Exception as e:
             log.warning(f"获取专辑详情失败 album_id={album_id} error={e}")
 
+    try:
+        tag_jobs.require_accepting()
+    except BackgroundCallsStopped as exc:
+        return jsonify(known_failure(exc).payload()), 503
     added = db.add_wishlist(album_id, title, author, cover_url)
     if added:
         log.info(f"添加收藏 album_id={album_id} title={title}")
         # 真正的后台异步同步标签（不阻塞 HTTP 响应）
         try:
-            t = threading.Thread(
-                target=bind_request_id(_sync_tags_for_wishlist),  # 记录归入添加收藏的请求
-                args=(album_id,),
-                daemon=True,
-            )
-            t.start()
+            tag_jobs.submit(tag_sync.sync_one, album_id, detail)
         except Exception as e:
             log.warning(f"启动标签同步线程失败 album_id={album_id} error={e}")
+            warning = "收藏已保存，标签未同步，可稍后手动同步"
+        else:
+            warning = None
         return jsonify({
             "status": "ok",
             "message": "已添加到收藏",
+            "warnings": [warning] if warning else [],
             "data": {"album_id": album_id, "title": title, "author": author},
         }), 201
     else:
@@ -151,12 +136,13 @@ def list_wishlist():
     page_size = max(1, min(200, page_size))
 
     # “已下载（可阅读）”与资源库、详情、搜索用同一条规则；只有完成过下载的收藏才可能可读
-    readable = readable_among(db.get_completed_album_ids(wishlist_only=True))
-    result = db.get_all_wishlist(
-        page=page, page_size=page_size, keyword=q, sort=sort,
-        status=status or None, readable_ids=readable,
-    )
-    mark_local_details(result["items"])  # archive 压缩包标记 / local_problem 本地文件不可用的原因
+    with db.library_snapshot() as conn:
+        states = states_among(db.get_completed_album_ids(wishlist_only=True, conn=conn), conn)
+        result = db.get_all_wishlist(
+            page=page, page_size=page_size, keyword=q, sort=sort, conn=conn,
+            status=status or None, readable_ids=(aid for aid, state in states.items() if state.readable),
+        )
+    mark_local_details(result["items"], states)
     return jsonify({"status": "ok", **result, "applied": {"status": status, "sort": sort}})
 
 

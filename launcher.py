@@ -19,6 +19,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from core.path_utils import get_data_dir, get_log_dir, get_path_config
 from core.process_control import request_shutdown, SHUTDOWN_PROTOCOL
 from core.runtime_dependencies import installed_versions
+from core.instance_lock import acquire_instance_lock
 
 HOST = "127.0.0.1"
 ROOT = Path(__file__).resolve().parent
@@ -254,6 +255,40 @@ def _server_python(root):
     return venv_python if not getattr(sys, "frozen", False) and venv_python.is_file() else Path(sys.executable)
 
 
+def _setup_needed(root):
+    requirements = root / "requirements.txt"
+    stamp = root / ".venv" / ".req.sha256"
+    try:
+        installed = stamp.read_text(encoding="ascii")
+    except (FileNotFoundError, UnicodeError):
+        return True
+    return (not (stamp.parent / "Scripts/python.exe").is_file()
+            or installed != hashlib.sha256(requirements.read_bytes()).hexdigest())
+
+
+def _prepare_source(root):
+    """Exclude a starting, draining, or unverified instance throughout venv mutation."""
+    lease = acquire_instance_lock()
+    try:
+        if not _setup_needed(root):
+            return
+        venv = root / ".venv"
+        executable = venv / "Scripts/python.exe"
+        requirements = root / "requirements.txt"
+        digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
+        stamp = venv / ".req.sha256"
+        stamp.unlink(missing_ok=True)
+        if not executable.is_file():
+            subprocess.run([sys.executable, "-m", "venv", str(venv)], cwd=root, check=True)
+        subprocess.run([str(executable), "-m", "pip", "install", "-r", str(requirements)], cwd=root, check=True)
+        subprocess.run([str(executable), "-m", "pip", "check"], cwd=root, check=True)
+        if hashlib.sha256(requirements.read_bytes()).hexdigest() != digest:
+            raise RuntimeError("依赖文件在安装期间已变化，请重新启动")
+        stamp.write_text(digest, encoding="ascii")
+    finally:
+        lease.close()
+
+
 def launch_flask(root=None):
     """Launch source Python or this portable executable; never undrained PIPEs."""
     paths = get_path_config(default_home=Path(root) if root is not None else None)
@@ -370,7 +405,11 @@ def main(argv=None, quiet=False):
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--wait", "-w", action="store_true", help="按 Enter 正常停止本窗口启动的服务")
     group.add_argument("--attach", action="store_true", help="仅打开经核实的既有实例，不启动或重启服务")
+    parser.add_argument("--source-setup", action="store_true", help="在独占实例锁内安装源码版依赖")
     args = parser.parse_args(argv)
+    if args.source_setup and (args.attach or os.name != "nt" or getattr(sys, "frozen", False)):
+        parser.error("--source-setup 只适用于 Windows 源码启动")
+    needs_setup = args.source_setup and _setup_needed(ROOT)
     if not args.attach:
         from core.database import _existing_schema
         _existing_schema()
@@ -380,7 +419,7 @@ def main(argv=None, quiet=False):
         if args.attach:
             return _attach(port, record, quiet)
         try:
-            outdated = server_outdated(record)
+            outdated = needs_setup or server_outdated(record)
         except (OSError, ImportError, ValueError, subprocess.SubprocessError):
             return _attach(port, record, quiet, "无法核实新版本或其运行依赖，已保留旧服务。")
         if not outdated:
@@ -396,6 +435,8 @@ def main(argv=None, quiet=False):
             return _attach(port, record, quiet, reason)
     elif args.attach:
         raise RuntimeError("所选实例没有可核实的运行服务；请核对实例目录或回到原启动窗口。")
+    if needs_setup:
+        _prepare_source(ROOT)
     proc = launch_flask()
     keep_running = False
     try:

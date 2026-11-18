@@ -156,7 +156,9 @@ class BackgroundCalls:
             self._condition.notify_all()
             while self._calls or self._cleanup_requested:
                 remaining = deadline - time.monotonic()
-                if remaining <= 0 or self._worker_error is not None:
+                if (remaining <= 0 or self._worker_error is not None or any(
+                        call.error is not None and call.cleanup_attempt == self._cleanup_round
+                        for call in self._calls)):
                     return False
                 # A late retry can arrive after the old worker decided to exit
                 # but before is_alive() becomes false. Keep that ownership and
@@ -212,6 +214,7 @@ class BackgroundCalls:
                     if call.future is None or call.future.done():
                         if call.cleanup_attempt != self._cleanup_round:
                             call.cleanup_attempt = self._cleanup_round
+                            call.error = None
                             selected = ("release", call)
                             break
                     elif not self._accepting and not call.cancel_requested:

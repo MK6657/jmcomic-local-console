@@ -68,7 +68,7 @@ def export_settings():
     """导出公共设置（不含 download_root）为 JSON 文件下载"""
     log.info("API导出设置")
     settings = get_settings()
-    # 代理可能含认证信息；不导出，也不在导入时覆盖本机代理。
+    # 导出文件保留目标机器的代理；手工文件可以显式提供 proxy。
     exportable = {
         k: settings[k] for k in DEFAULT_SETTINGS
         if k not in {"download_root", "proxy"}
@@ -118,6 +118,7 @@ def import_settings():
     skipped = 0
     errors = []
 
+    patch = {}
     for key, value in data.items():
         if key not in DEFAULT_SETTINGS:
             skipped += 1
@@ -127,15 +128,21 @@ def import_settings():
             skipped += 1
             errors.append("download_root 为只读项，已跳过")
             continue
+        patch[key] = value
+    if patch:
         try:
-            update_settings({key: value})  # update_settings 内部会处理 str() 和 bool 归一化
-            imported += 1
-        except Exception as e:
-            skipped += 1
-            log.warning(f"设置导入项 '{key}' 失败: {e}")
-            errors.append(f"设置 '{key}' 失败，已跳过")
+            update_settings(patch)
+            imported = len(patch)
+        except ValueError:
+            for key, value in patch.items():
+                try:
+                    update_settings({key: value})
+                    imported += 1
+                except ValueError:
+                    skipped += 1
+                    errors.append(f"设置 '{key}' 失败，已跳过")
 
     log.info(f"API导入设置 imported={imported} skipped={skipped} errors={len(errors)}")
-    warnings = _apply_saved_settings()
+    warnings = _apply_saved_settings() if imported else []
     return jsonify({"status": "ok", "imported": imported, "skipped": skipped, "errors": errors,
                     "warnings": warnings})

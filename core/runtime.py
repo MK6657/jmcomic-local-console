@@ -18,7 +18,7 @@ class ApplicationRuntime:
         self.logger = logger
         self.shutdown_timeout = shutdown_timeout
         self.additional_services = tuple(additional_services)
-        self._services = []
+        self._services = list(self.additional_services)
         self._updates_registered = False  # owns pre-start manual checks too
         self._lock = threading.RLock()
         self._stop_requested = threading.Event()
@@ -44,7 +44,8 @@ class ApplicationRuntime:
                     self._check_start_allowed()
                     # A start() that raises may already own a thread; include it
                     # in rollback before invoking it, not only on success.
-                    self._services.append((name, service))
+                    if (name, service) not in self._services:
+                        self._services.append((name, service))
                     if name == "updates":
                         self._updates_registered = True
                     service.start()

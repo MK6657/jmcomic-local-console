@@ -471,7 +471,7 @@ def test_library_query_count_unchanged_with_author_filter(client, library, monke
     monkeypatch.setattr(db, "get_db", counted)
     result = db.get_library(author="Author B", sort="author")
     assert [i["album_id"] for i in result["items"]] == ["204", "205"]
-    assert counted.call_count == 1 and len(statements) == 4
+    assert counted.call_count == 1 and statements[0] == "BEGIN" and len(statements[1:]) == 4
 
 
 # ─── Static checks: no inline handlers built from remote/user data ───

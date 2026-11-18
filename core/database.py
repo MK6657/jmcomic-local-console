@@ -577,6 +577,30 @@ def get_all_settings() -> dict:
 # ─── Wishlist 操作 ───
 
 
+@contextmanager
+def library_snapshot(conn=None):
+    """Reuse the caller's read snapshot or open one for a standalone list query."""
+    if conn is not None:
+        yield conn
+        return
+    conn = get_db()
+    try:
+        conn.execute("BEGIN")
+        yield conn
+    finally:
+        conn.close()
+
+
+def library_ids_after(cursor, limit=50):
+    with library_snapshot() as conn:
+        rows = conn.execute(
+            "SELECT album_id FROM wishlist WHERE album_id > ? UNION "
+            "SELECT album_id FROM resource_catalog WHERE album_id > ? ORDER BY album_id LIMIT ?",
+            (cursor, cursor, limit),
+        )
+        return [row[0] for row in rows]
+
+
 def add_wishlist(album_id: str, title: str = "", author: str = "", cover_url: str = "") -> bool:
     """添加收藏，返回 True 表示新增，False 表示已存在"""
     now = datetime.now().isoformat()
@@ -768,7 +792,7 @@ def _wishlist_item(row) -> dict:
 def get_all_wishlist(
     page: int = 1, page_size: int = 50,
     keyword: str = "", sort: str = "added_at",
-    status: str | None = None, readable_ids=None,
+    status: str | None = None, readable_ids=None, *, conn=None,
 ) -> dict:
     """获取收藏列表（分页）：关键词搜索 + 下载状态筛选 + 排序，全部在 SQL 里完成。
 
@@ -792,8 +816,7 @@ def get_all_wishlist(
         where += " AND (title LIKE ? ESCAPE ? OR author LIKE ? ESCAPE ? OR album_id LIKE ? ESCAPE ?)"
         params.extend([like, chr(92)] * 3)
 
-    conn = get_db()
-    try:
+    with library_snapshot(conn) as conn:
         counts = {group: 0 for group in WISHLIST_STATUS_GROUPS}
         for row in conn.execute(
             f"{_WISHLIST_ITEMS_CTE} SELECT filter_group, COUNT(*) FROM items WHERE 1=1{where} "
@@ -808,8 +831,6 @@ def get_all_wishlist(
             f"{_WISHLIST_ITEMS_CTE} SELECT * FROM items WHERE 1=1{where} ORDER BY {order} LIMIT ? OFFSET ?",
             params + [page_size, (page - 1) * page_size],
         ).fetchall() if total else []
-    finally:
-        conn.close()
     return {
         "items": [_wishlist_item(r) for r in rows],
         "total": total, "page": page, "page_size": page_size,
@@ -850,16 +871,13 @@ def favourite_rows(conn, album_ids, readable_ids) -> dict[str, dict]:
     return {row["album_id"]: dict(row) for row in rows}
 
 
-def get_completed_album_ids(wishlist_only: bool = False) -> list[str]:
+def get_completed_album_ids(wishlist_only: bool = False, *, conn=None) -> list[str]:
     """Indexed resources: candidates whose actual files are checked by local_availability."""
     sql = "SELECT DISTINCT album_id FROM resource_catalog WHERE 1=1"
     if wishlist_only:
         sql += " AND album_id IN (SELECT album_id FROM wishlist)"
-    conn = get_db()
-    try:
+    with library_snapshot(conn) as conn:
         return [row[0] for row in conn.execute(sql + " ORDER BY album_id")]
-    finally:
-        conn.close()
 
 
 def export_all_wishlist() -> list[dict]:
@@ -1127,7 +1145,7 @@ def get_albums_by_tag(tag: str) -> list[str]:
         conn.close()
 
 
-def batch_sync_auto_tags(album_id: str, tags: list) -> int:
+def batch_sync_auto_tags(album_id: str, tags: list, *, detail=None) -> int:
     """同步自动标签：删除该 album 下所有 source='auto' 的标签，
     然后插入当前 tags 列表。保留用户自定义标签。
     返回写入的标签数。
@@ -1153,7 +1171,8 @@ def batch_sync_auto_tags(album_id: str, tags: list) -> int:
                 count += 1
             except sqlite3.IntegrityError:
                 pass
-        conn.commit()
+        if detail is not None:
+            _write_album_meta(conn, album_id, detail.get("title"), detail.get("author"), detail.get("cover"), now)
         # 更新 album_meta 的同步时间戳
         conn.execute(
             "UPDATE album_meta SET tags_synced_at=? WHERE album_id=?", (now, album_id)
@@ -1270,7 +1289,7 @@ def get_library(
     sort: str = "updated_at",
     album_id: str | None = None,
     author: str | None = None,
-    readable_ids=None,
+    readable_ids=None, *, conn=None,
 ) -> dict:
     """获取资源库列表 — SQL 分页下沉版。
 
@@ -1300,8 +1319,7 @@ def get_library(
     if status not in LIBRARY_STATUS_FILTERS:
         status = None
 
-    conn = get_db()
-    try:
+    with library_snapshot(conn) as conn:
         # ── 构建 tag AND 子查询 ──
         if wanted_tags:
             tag_placeholders = ",".join("?" for _ in wanted_tags)
@@ -1340,8 +1358,8 @@ def get_library(
                 SELECT
                     w.album_id,
                     -- 收藏里没填的标题/作者/封面（如批量导入的车号）用 album_meta 缓存补上，作者排序/筛选才有意义
-                    COALESCE(NULLIF(w.title, ''), NULLIF(wm.title, ''), '') AS title,
-                    COALESCE(NULLIF(w.author, ''), NULLIF(wm.author, ''), '') AS author,
+                    COALESCE(NULLIF(TRIM(w.title), ''), NULLIF(TRIM(wm.title), ''), '') AS title,
+                    COALESCE(NULLIF(TRIM(w.author), ''), NULLIF(TRIM(wm.author), ''), '') AS author,
                     COALESCE(NULLIF(w.cover_url, ''), NULLIF(wm.cover_url, ''), '') AS cover_url,
                     CASE WHEN jc.album_id IS NOT NULL THEN 'completed' ELSE w.download_status END AS download_status,
                     w.added_at,
@@ -1484,20 +1502,17 @@ def get_library(
             "page_size": page_size,
         }
 
-    finally:
-        conn.close()
 
-
-def get_library_stat() -> dict:
+def get_library_stat(*, conn=None) -> dict:
     """返回资源库统计：total, wishlist_count, downloaded_count, tag_count"""
-    conn = get_db()
-    try:
+    with library_snapshot(conn) as conn:
         wishlist_count = conn.execute("SELECT COUNT(*) FROM wishlist").fetchone()[0]
         downloaded_count = conn.execute(
             "SELECT COUNT(DISTINCT album_id) FROM resource_catalog"
         ).fetchone()[0]
         tag_count = conn.execute(
-            "SELECT COUNT(DISTINCT tag) FROM album_tags"
+            "SELECT COUNT(DISTINCT tag) FROM album_tags WHERE album_id IN "
+            "(SELECT album_id FROM wishlist UNION SELECT album_id FROM resource_catalog)"
         ).fetchone()[0]
 
         # total = wishlist + completed jobs not in wishlist
@@ -1517,8 +1532,6 @@ def get_library_stat() -> dict:
             "downloaded_count": downloaded_count,
             "tag_count": tag_count,
         }
-    finally:
-        conn.close()
 
 
 # ─── Album Meta Cache ───
@@ -1531,21 +1544,21 @@ def upsert_album_meta(
     now = datetime.now().isoformat()
     conn = get_db()
     try:
-        conn.execute(
-            "INSERT INTO album_meta (album_id, title, author, cover_url, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(album_id) DO UPDATE SET "
-            "title=COALESCE(NULLIF(?, ''), title), "
-            "author=COALESCE(NULLIF(?, ''), author), "
-            "cover_url=COALESCE(NULLIF(?, ''), cover_url), "
-            "updated_at=?",
-            (album_id, title or "", author or "", cover_url or "", now,
-             title or "", author or "", cover_url or "", now),
-        )
+        _write_album_meta(conn, album_id, title, author, cover_url, now)
         conn.commit()
         return True
     finally:
         conn.close()
+
+
+def _write_album_meta(conn, album_id, title, author, cover_url, now):
+    conn.execute(
+        "INSERT INTO album_meta (album_id, title, author, cover_url, updated_at) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(album_id) DO UPDATE SET title=COALESCE(NULLIF(excluded.title, ''), title), "
+        "author=COALESCE(NULLIF(excluded.author, ''), author), "
+        "cover_url=COALESCE(NULLIF(excluded.cover_url, ''), cover_url), updated_at=excluded.updated_at",
+        (album_id, title or "", author or "", cover_url or "", now),
+    )
 
 
 def get_album_meta(album_id: str) -> dict | None:

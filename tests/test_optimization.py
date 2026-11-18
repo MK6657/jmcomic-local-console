@@ -116,7 +116,7 @@ def test_library_page_uses_one_connection_and_four_queries(client, monkeypatch, 
     result = db.get_library(page_size=25)
     assert len(result["items"]) == 25
     assert counted.call_count == 1
-    assert len(statements) == 4
+    assert statements[0] == "BEGIN" and len(statements[1:]) == 4
     # file_exists follows the shared readable rule (it said "exists" for an empty folder); still no stale answer
     # after external directory changes
     items = client.get("/api/library?page_size=25").get_json()["items"]
@@ -159,24 +159,32 @@ def test_busy_album_does_not_block_unrelated_queued_job(client, monkeypatch):
 
 def test_bulk_tag_sync_rejects_duplicates_and_releases_lock(client, monkeypatch):
     from routes import api_library
-    callbacks = []
-    def thread_factory(*args, **kwargs):
-        callbacks.append(kwargs["target"])
-        return Mock()
-    monkeypatch.setattr(api_library.threading, "Thread", thread_factory)
-    assert client.post("/api/library/tags/sync-all").status_code == 202
+    from core.tag_jobs import TagJobs
+    owner = TagJobs()
+    finishing = threading.Event()
+    monkeypatch.setattr(api_library, "tag_jobs", owner)
+    monkeypatch.setattr(api_library.tag_sync, "sync_all", lambda: finishing.wait(3))
     try:
+        assert client.post("/api/library/tags/sync-all").status_code == 202
         assert client.post("/api/library/tags/sync-all").status_code == 409
     finally:
-        callbacks[0]()
-    assert not api_library._bulk_sync_lock.locked()
+        finishing.set()
+        assert owner.stop(2)
+    owner.start()
+    assert client.post("/api/library/tags/sync-all").status_code == 202
+    assert owner.stop(2)
 
 
 def test_bulk_sync_failed_thread_start_releases_lock(client, monkeypatch):
     from routes import api_library
-    monkeypatch.setattr(api_library.threading.Thread, "start", Mock(side_effect=RuntimeError))
-    assert client.post("/api/library/tags/sync-all").status_code == 503
-    assert not api_library._bulk_sync_lock.locked()
+    from core.tag_jobs import TagJobs
+    owner = TagJobs()
+    monkeypatch.setattr(api_library, "tag_jobs", owner)
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", Mock(side_effect=RuntimeError))
+        assert client.post("/api/library/tags/sync-all").status_code == 503
+    assert client.post("/api/library/tags/sync-all").status_code == 202
+    assert owner.stop(2)
 
 
 def test_archive_cache_eviction_is_thread_safe(client, monkeypatch):

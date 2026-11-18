@@ -19,7 +19,7 @@ window.setSSECallbacks=()=>{};window.disconnectAllSSE=()=>{};window.syncSSE=ids=
 eval(fs.readFileSync(utilsPath,'utf8'));
 const counts={active:7,queued:60,completed:120,failed:80,canceled:3};
 const job=(id,status,latest)=>({job_id:id,album_id:'123',title:id,status,total_pages:1,done_pages:0,
- latest_completed_job_id:latest});
+ latest_completed_job_id:latest,maintenance:status==='completed'?{state:'failed',error:'archive <locked>'}:null});
 function answer(url){const u=new URL(url,'http://fixture');const group=u.searchParams.get('status');const p=Number(u.searchParams.get('page'));
  const jobs=group==='active'?Array.from({length:7},(_,i)=>job('run'+i,'running')):
  group==='completed'?[job(p===1?'new':'old','completed','new')]:[job(group+p,group)];
@@ -45,7 +45,10 @@ function page(number){const button=document.getElementById('completed-pagination
  poll();tab('failed');deliver(4);await flush();deliver(3);await flush();
  const afterLate={failed:document.getElementById('failed-section').innerHTML,completed:document.getElementById('completed-section').innerHTML};
  tab('completed');deliver(5);await flush();
- console.log(JSON.stringify({initial,second,afterLate,returnedUrl:held[5].url,mutations:calls.filter(c=>c.method!=='GET'&&c.url.startsWith('/api/jobs/'))}));
+ const mutations=calls.filter(c=>c.method!=='GET'&&/\/api\/(jobs|albums)\//.test(c.url));
+ const retry=el('button');retry.setAttribute('data-action','retry-maintenance');retry.setAttribute('data-album-id','123');content.appendChild(retry);
+ (content.handlers.click||[]).forEach(f=>f({target:retry}));await flush();
+ console.log(JSON.stringify({initial,second,afterLate,returnedUrl:held[5].url,mutations,retried:calls.filter(c=>c.url.endsWith('/retry'))}));
 })().catch(e=>{console.error(e);process.exit(1)});
 """
 
@@ -62,3 +65,6 @@ def test_downloads_page_counts_navigation_late_responses_and_read_only_polling()
     assert result["afterLate"]["completed"] == result["second"]["html"]
     assert "page=2" in result["returnedUrl"]
     assert result["mutations"] == []
+    assert '整册整理失败' in result['second']['html'] and 'archive &lt;locked&gt;' in result['second']['html']
+    assert 'data-action="retry-maintenance"' in result['second']['html']
+    assert result['retried'] == [{'url': '/api/albums/123/maintenance/retry', 'method': 'POST'}]

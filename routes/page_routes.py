@@ -60,17 +60,7 @@ def album_detail(album_id: str):
 def downloads():
     """下载管理页"""
     log.info("页面访问 下载管理页")
-    all_jobs = get_all_jobs()
-    # 给每个 job 计算百分比和路径别名
-    for job in all_jobs:
-        total = job.get("total_pages") or 1
-        done = job.get("done_pages") or 0
-        job["percentage"] = round(done / total * 100, 1)
-        job["current_page"] = done
-        job["path"] = job.get("output_path") or ""
-        job["error"] = job.get("error_message") or ""
-
-    return render_template("downloads.html", title="下载管理", jobs=all_jobs)
+    return render_template("downloads.html", title="下载管理")
 
 
 @page_bp.get("/preview/<album_id>")

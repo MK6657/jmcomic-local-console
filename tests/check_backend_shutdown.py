@@ -96,7 +96,7 @@ def check():
             try:
                 reader.image_file(photo.photo_id, 0)
             except Exception as error:
-                reader_errors.append(type(error).__name__)
+                reader_errors.append(getattr(error, "kind", type(error).__name__))
         reader_thread = threading.Thread(target=fetch, name="reader-drain-fixture", daemon=True)
         try:
             runtime.start()
@@ -117,7 +117,7 @@ def check():
             assert not (root_path / "cache/online/900001/00001.webp").exists()
             release.set()
             reader_thread.join(6)
-            assert not reader_thread.is_alive() and reader_errors == ["TimeoutError"]
+            assert not reader_thread.is_alive() and reader_errors == ["stopping"]
             from core.metadata_budget import MetadataStopped
             try:
                 future.result(timeout=6)

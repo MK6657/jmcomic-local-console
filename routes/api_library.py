@@ -1,22 +1,19 @@
 """
 资源库 + 标签管理 API
 """
-import re
-import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 from flask import Blueprint, jsonify, request
 
 import core.database as db
-from core import update_store
-from core.jm_service import get_album_detail, get_album_detail_cached
-from core.local_availability import MAX_IDS, local_states, readable_among  # readable_among 供其他路由沿用这里的导入
-from core.logger import bind_request_id, log
+from core import tag_sync, update_store
+from core.jm_service import get_album_detail_cached
+from core.local_availability import states_among, readable_among  # readable_among also imported by other routes
+from core.logger import log
+from core.tag_jobs import BulkSyncActive, tag_jobs
 from core.upstream import known_failure
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 
 api_library_bp = Blueprint("api_library", __name__, url_prefix="/api/library")
-_bulk_sync_lock = threading.Lock()
 
 
 def _sanitize_tag(tag: str) -> str:
@@ -24,7 +21,7 @@ def _sanitize_tag(tag: str) -> str:
     return tag.strip().lower()[:50]
 
 
-def mark_local_details(items):
+def mark_local_details(items, states):
     """列表条目的本地细节，与详情 / 搜索 / 下载管理同一规则（core.local_availability）：
     archive：只剩压缩包也能离线读时是 'cbz' / 'zip'（显示压缩包标记），否则 None；
     local_problem：“下载过 · 本地文件不可用”的原因 —— deleted 文件已删除 / archive_corrupt 压缩包损坏 /
@@ -33,10 +30,6 @@ def mark_local_details(items):
     “阅读”按钮的外观按它决定。
     update：检查新章节已确认有新章节时的摘要（core.update_store.summaries，与 POST /api/updates/states 同一形状），
     只给本地可读的条目，否则 None——列表只显示确认过的事实。条目需已带 readable / files_missing。"""
-    ids = [item["album_id"] for item in items]
-    states = {}
-    for start in range(0, len(ids), MAX_IDS):
-        states.update(local_states(ids[start:start + MAX_IDS]))
     try:
         # 一次查询；检查记录读不出来时列表照常显示，只是没有“有新章节”标记
         updates = update_store.summaries(str(item["album_id"]) for item in items if item.get("readable"))
@@ -53,14 +46,13 @@ def mark_local_details(items):
     return items
 
 
-def _mark_readable(items, readable=None):
+def _mark_readable(items, states):
     """给每个条目加上 readable 布尔值（已算好整批集合时直接复用，否则只判断这一页），
     再按与收藏相同的规则（db.download_state）加上 status_group / activity / files_missing，
     同一部漫画在资源库和收藏里显示同一个状态。"""
-    if readable is None:
-        readable = readable_among(item["album_id"] for item in items)
     for item in items:
-        item["readable"] = item["album_id"] in readable
+        state = states.get(item["album_id"])
+        item["readable"] = bool(state and state.readable)
         if item.get("download_status") == "completed":
             # 兼容字段：下载过的条目“本地文件在不在”与 readable / files_missing 同一个判断，不会自相矛盾
             item["file_exists"] = item["readable"]
@@ -69,7 +61,7 @@ def _mark_readable(items, readable=None):
             item["readable"], facts.get("active_job"), facts.get("latest_job"),
             facts.get("has_completed"), facts.get("legacy_status"),
         ))
-    return mark_local_details(items)
+    return mark_local_details(items, states)
 
 
 # 排序白名单
@@ -107,18 +99,14 @@ def library_list():
 
         # 按状态筛选时先判断整个资源库里哪些真能读（只有完成过下载的才可能），再交给 SQL 分组、过滤和分页：
         # 能读的漫画属于“可离线阅读”，哪怕之后又排了新任务或新任务失败了（与收藏清单相同）
-        readable = readable_among(db.get_completed_album_ids()) if status else None
-        result = db.get_library(
-            page=page,
-            page_size=page_size,
-            tag=tag,
-            keyword=keyword,
-            status=status,
-            sort=sort,
-            author=author,
-            readable_ids=readable,
-        )
-        _mark_readable(result["items"], readable)
+        with db.library_snapshot() as conn:
+            states = states_among(db.get_completed_album_ids(conn=conn), conn) if status else {}
+            result = db.get_library(page=page, page_size=page_size, tag=tag, keyword=keyword,
+                                    status=status, sort=sort, author=author, conn=conn,
+                                    readable_ids=(aid for aid, state in states.items() if state.readable))
+            if not status:
+                states = states_among((item["album_id"] for item in result["items"]), conn)
+        _mark_readable(result["items"], states)
         log.info(
             f"API资源库列表 结果数={result['total']} page={page} tag={tag} "
             f"q={keyword} status={status} sort={sort} author={author}"
@@ -154,8 +142,10 @@ def tag_cloud():
 def library_stats():
     """统计信息 GET /api/library/stats"""
     try:
-        stats = db.get_library_stat()
-        stats["readable_count"] = len(readable_among(db.get_completed_album_ids()))
+        with db.library_snapshot() as conn:
+            stats = db.get_library_stat(conn=conn)
+            states = states_among(db.get_completed_album_ids(conn=conn), conn)
+        stats["readable_count"] = sum(state.readable for state in states.values())
         return jsonify({"status": "ok", **stats})
     except Exception as e:
         log.error(f"API资源库统计失败 error={e}")
@@ -173,11 +163,13 @@ def library_item(album_id: str):
     try:
         # album_id 精确匹配（SQL 层 WHERE ai.album_id = ?），
         # 不走 keyword LIKE 模糊通道，避免命中标题/作者含相同数字串的其他条目
-        result = db.get_library(page=1, page_size=1, album_id=album_id)
+        with db.library_snapshot() as conn:
+            result = db.get_library(page=1, page_size=1, album_id=album_id, conn=conn)
+            states = states_among([album_id], conn) if result["items"] else {}
         item = result["items"][0] if result["items"] else None
         if not item:
             return jsonify({"status": "error", "message": "未找到该条目"}), 404
-        _mark_readable([item])
+        _mark_readable([item], states)
         return jsonify({"status": "ok", "item": item})
     except Exception as e:
         log.error(f"API资源库详情失败 album_id={album_id} error={e}")
@@ -209,7 +201,9 @@ def album_tags_add(album_id: str):
     if not validate_numeric(album_id):
         return jsonify({"status": "error", "message": "album_id 必须是纯数字"}), 400
     try:
-        body = request.get_json(force=True)
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify(status="error", message="请求体需为 JSON 对象"), 400
         raw_tags = body.get("tags", [])
         if not raw_tags or not isinstance(raw_tags, list):
             return jsonify({"status": "error", "message": "缺少 tags 列表"}), 400
@@ -249,9 +243,10 @@ def album_tags_delete(album_id: str):
     if not validate_numeric(album_id):
         return jsonify({"status": "error", "message": "album_id 必须是纯数字"}), 400
     try:
-        body = request.get_json(force=True) or {}
+        body = request.get_json(silent=True)
         total_deleted = 0
         if (not isinstance(body, dict)
+                or len(body) > 1
                 or ("tags" in body and (not isinstance(body["tags"], list)
                     or any(not isinstance(tag, str) for tag in body["tags"])))
                 or ("source" in body and body["source"] not in ("auto", "user"))
@@ -286,35 +281,13 @@ def album_tags_delete(album_id: str):
 @api_library_bp.post("/<album_id>/tags/sync")
 def album_tags_sync(album_id: str):
     """触发从 18comic 同步标签 POST /api/library/<album_id>/tags/sync
-    使用 ThreadPoolExecutor + 20s 超时
+    等待受管查询最多 20 秒。
     """
     if not validate_numeric(album_id):
         return jsonify({"status": "error", "message": "album_id 必须是纯数字"}), 400
     try:
-        pool = ThreadPoolExecutor(max_workers=1)
-        # 工作线程沿用本请求的 request_id：上游失败的原因（及 jmcomic 的重试记录）进入同一条“只看此请求”
-        fut = pool.submit(bind_request_id(get_album_detail_cached), album_id)
-        try:
-            data = fut.result(timeout=20)
-        except FuturesTimeout as error:
-            log.warning(f"API同步标签超时 album_id={album_id}")
-            failure = known_failure(error)
-            return jsonify(failure.payload()), failure.http_status
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
-
-        raw_tags = data.get("tags", []) or []
-        tag_names = [t if isinstance(t, str) else str(t.get("name") or "")
-                     for t in raw_tags if isinstance(t, (str, dict))]
-        synced = db.batch_sync_auto_tags(album_id, tag_names)
-
-        # 同时缓存元数据
-        db.upsert_album_meta(
-            album_id,
-            title=data.get("title", ""),
-            author=data.get("author", ""),
-            cover_url=data.get("cover", ""),
-        )
+        data = tag_jobs.submit(get_album_detail_cached, album_id).result(timeout=20)
+        synced = tag_sync.save_tags(album_id, data)
 
         # 获取同步后的总标签数
         all_tags = db.get_album_tags(album_id)
@@ -358,54 +331,15 @@ def search_tags_autocomplete():
 
 @api_library_bp.post("/tags/sync-all")
 def sync_all_tags():
-    """批量重新同步所有漫画标签 POST /api/library/tags/sync-all
-    从 wishlist + completed jobs 获取所有 album_id，逐个同步标签（单次最多 50 个）。
-    后台异步执行，立即返回接受状态。
-    """
-    if not _bulk_sync_lock.acquire(blocking=False):
-        return jsonify(status="busy", message="已有批量同步正在运行，请勿重复提交"), 409
-    def _sync_worker():
-        try:
-            all_lib = db.get_library(page=1, page_size=200)
-            all_ids = [item["album_id"] for item in all_lib.get("items", [])]
-            # 限前 50 个，避免超时
-            target_ids = all_ids[:50]
-            processed = 0
-            errors = 0
-            # 同步每个漫画的标签
-            for aid in target_ids:
-                try:
-                    data = get_album_detail_cached(aid)
-                    raw_tags = data.get("tags", []) or []
-                    tag_names = []
-                    for t in raw_tags:
-                        if isinstance(t, str):
-                            tag_names.append(t)
-                        elif isinstance(t, dict):
-                            tag_names.append(t.get("name", ""))
-                    synced = db.batch_sync_auto_tags(aid, tag_names)
-                    db.upsert_album_meta(aid,
-                        title=data.get("title", ""),
-                        author=data.get("author", ""),
-                        cover_url=data.get("cover", ""),
-                    )
-                    if synced > 0:
-                        processed += 1
-                except Exception as e:
-                    errors += 1
-                    log.warning(f"同步标签异常 album_id={aid} error={e}")
-            log.info(f"批量同步标签完成: processed={processed}, errors={errors}")
-        except Exception as e:
-            log.error(f"后台批量同步标签失败 error={e}")
-        finally:
-            _bulk_sync_lock.release()
-
+    """按稳定的 album_id 游标逐页同步整个资源库。"""
     try:
-        # 后台同步的全部记录沿用发起它的请求的 request_id，可以从“已接受”那条记录一路追到结果
-        t = threading.Thread(target=bind_request_id(_sync_worker), daemon=True)
-        t.start()
-    except Exception:
-        _bulk_sync_lock.release()
+        tag_jobs.submit(tag_sync.sync_all, bulk=True)
+    except BulkSyncActive as exc:
+        return jsonify(status="busy", message=str(exc)), 409
+    except Exception as exc:
+        failure = known_failure(exc)
+        if failure is not None:
+            return jsonify(failure.payload()), failure.http_status
         return jsonify(status="error", message="无法启动批量同步，请稍后重试"), 503
     log.info("API批量同步标签已接受，后台执行中")
     return jsonify({"status": "accepted", "message": "批量同步已开始，后台执行中"}), 202

@@ -13,6 +13,16 @@ _MUTEX_NAME = "Local\\JMComicDownloader_AppInstance"
 # 打包后：sys._MEIPASS，开发时：项目根目录
 from core.path_utils import get_resource_root, get_data_dir, get_download_root, ensure_dirs
 from core.instance_lock import acquire_instance_lock, InstanceBusyError
+
+
+def _instance_lease():
+    try:
+        return acquire_instance_lock(_MUTEX_NAME)
+    except InstanceBusyError:
+        raise SystemExit("Another JMComic instance is already running or starting.") from None
+
+
+_source_lease = _instance_lease() if __name__ == "__main__" else None
 _root = get_resource_root()
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
@@ -42,11 +52,9 @@ _shutdown_control = None
 
 def _acquire_lock():
     """A live named mutex cannot be stale; protect startup before any port is bound."""
-    global _mutex_handle
-    try:
-        mutex = acquire_instance_lock(_MUTEX_NAME)
-    except InstanceBusyError:
-        raise SystemExit("Another JMComic instance is already running or starting.")
+    global _mutex_handle, _source_lease
+    mutex = _source_lease or _instance_lease()
+    _source_lease = None
     _mutex_handle = mutex
     try:
         _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -59,87 +67,20 @@ def _acquire_lock():
 
 
 def _bind_preemptive() -> socket.socket:
-    """创建预绑定的 SO_REUSEADDR socket，绕过僵尸端口。
-
-    策略：默认端口 → 3 次重试 → fallback 端口 → 报错
-    返回已处于 LISTEN 状态的 socket 对象。
-
-    注意（Windows 行为）：
-    - 先用 connect() 检查端口是否真实被占，避免 SO_REUSEADDR 下
-      静默绑定到另一个进程已占用的端口（Windows 上两个 REUSEADDR
-      socket 可以绑定同一端口）。
-    - 确认空闲后用 SO_REUSEADDR 绑定以支持快速重启（避免 TIME_WAIT）。
-    """
+    """Bind the actual listener atomically; Windows must own the address exclusively."""
     host = "127.0.0.1"
 
-    def _check_port(port: int) -> bool:
-        """用 connect 探测端口是否真实被占（不受 SO_REUSEADDR 影响）"""
-        try:
-            with socket.create_connection((host, port), timeout=0.5):
-                return True  # 端口被占用
-        except (ConnectionRefusedError, TimeoutError, OSError):
-            return False  # 端口空闲
-
-    # 尝试默认端口（带重试）
-    for attempt in range(3):
-        # 先确认端口没有被占
-        if _check_port(_DEFAULT_PORT):
-            log.warning(f"端口 {_DEFAULT_PORT} 被占（connect 检测），等待重试 ({attempt+1}/3)...")
-            if attempt < 2:
-                time.sleep(3)
-                continue
-            log.warning(f"端口 {_DEFAULT_PORT} connect 检测仍被占，尝试绑定以确认")
-        # 用无 REUSEADDR 的 socket 做一次独占绑定检测
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            probe.bind((host, _DEFAULT_PORT))
-            probe.close()
-        except OSError as e:
-            probe.close()
-            if attempt < 2:
-                log.warning(f"端口 {_DEFAULT_PORT} 绑定被拒，等待重试 ({attempt+2}/3)...")
-                time.sleep(3)
-                continue
-            else:
-                log.warning(f"端口 {_DEFAULT_PORT} 最终不可用: {e}")
-                break
-        # 独占检测通过，用 SO_REUSEADDR 创建真正的 listener
+    for port in (_DEFAULT_PORT, *_FALLBACK_PORTS):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.bind((host, _DEFAULT_PORT))
+            option = socket.SO_EXCLUSIVEADDRUSE if os.name == "nt" else socket.SO_REUSEADDR
+            sock.setsockopt(socket.SOL_SOCKET, option, 1)
+            sock.bind((host, port))
             sock.listen()
-            log.info(f"绑定端口 {host}:{_DEFAULT_PORT}")
             return sock
-        except OSError as e:
+        except OSError as exc:
             sock.close()
-            log.warning(f"端口 {_DEFAULT_PORT} REUSEADDR 绑定异常: {e}")
-            if attempt < 2:
-                time.sleep(3)
-                continue
-            break
-    # fallback 端口
-    for fb in _FALLBACK_PORTS:
-        if _check_port(fb):
-            log.warning(f"Fallback 端口 {fb} 也被占用，跳过")
-            continue
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            probe.bind((host, fb))
-            probe.close()
-        except OSError:
-            probe.close()
-            continue
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, fb))
-            sock.listen()
-            log.warning(f"重要：端口 {_DEFAULT_PORT} 被占，降级到 {fb}")
-            return sock
-        except OSError:
-            sock.close()
-            continue
+            log.warning(f"无法绑定 {host}:{port}: {exc}")
     raise RuntimeError(f"无可用端口（尝试了 {_DEFAULT_PORT}, {_FALLBACK_PORTS} 均被占）")
 
 
@@ -184,8 +125,9 @@ from core.http_server import ManagedHTTPServer
 from core.process_control import create_shutdown_control, SHUTDOWN_PROTOCOL
 from core.progress import progress_manager
 from core import background_calls, online_reader
+from core.tag_jobs import tag_jobs
 
-background_services = (("requests", background_calls), ("reader", online_reader))
+background_services = (("requests", background_calls), ("reader", online_reader), ("tags", tag_jobs))
 
 # ── jmcomic 库全局优化（必须在任何 client 创建前设置）──
 from core.sdk_adapter import configure_sdk
@@ -261,7 +203,7 @@ def create_app() -> Flask:
         set_request_id()
         request._request_start_time = _time.time()
         if app.config.get("SHUTTING_DOWN"):
-            response = jsonify(status="error", message="服务正在关闭，请稍后重试")
+            response = jsonify(status="error", error_kind="stopping", message="服务正在关闭，请稍后重试")
             response.status_code = 503
             response.headers["Retry-After"] = "1"
             return response
@@ -408,16 +350,20 @@ def main():
     http = None
     acquired = False
     maintenance_started = False
-    closing = False
+    received_signal = None
+    serving = False
     old_handlers = {}
 
     def request_shutdown(signum, frame):
-        nonlocal closing
-        if closing:
-            return  # A second signal must not interrupt bounded draining/cleanup.
-        closing = True
-        log.warning(f"收到信号 {signum}，开始优雅关闭...")
-        raise _ShutdownRequested()
+        nonlocal received_signal
+        if received_signal is None:
+            received_signal = signum
+            if serving:
+                raise _ShutdownRequested()
+
+    def check_shutdown():
+        if received_signal is not None:
+            raise _ShutdownRequested()
 
     safe = True
     try:
@@ -430,7 +376,9 @@ def main():
         for signum in (signal.SIGINT, signal.SIGTERM):
             old_handlers[signum] = signal.signal(signum, request_shutdown)
         _shutdown_control = create_shutdown_control(os.environ.get("JMCONSOLE_LAUNCH_TOKEN"))
+        check_shutdown()
         application = create_app()  # Initializes schema, never recovers or starts jobs.
+        check_shutdown()
         sock = _bind_preemptive()
         actual_port = sock.getsockname()[1]
         http = ManagedHTTPServer(application, sock)
@@ -443,17 +391,30 @@ def main():
             f"DOWNLOAD_ROOT={get_download_root()} "
             f"MAX_LOG_AGE={MAX_LOG_AGE_DAYS}d MAX_LOG_SIZE={MAX_TOTAL_SIZE_MB}MB"
         )
+        check_shutdown()
         runtime.start()
+        check_shutdown()
         _PORT_FILE.write_text(json.dumps(_startup_record(actual_port)))
         log.info(f"服务已启动 → http://127.0.0.1:{actual_port}（waitress）")
+        serving = True
+        check_shutdown()
         http.run()
     except _ShutdownRequested:
         pass
     finally:
-        closing = True
+        serving = False
         shutdown_deadline = time.monotonic() + runtime.shutdown_timeout + 3
         if application is not None:
             getattr(application, "config", {})["SHUTTING_DOWN"] = True
+        if received_signal is not None:
+            log.warning(f"收到信号 {received_signal}，开始优雅关闭...")
+        streams_closed = True
+        if http is not None:
+            try:
+                progress_manager.close_all()
+            except Exception as exc:
+                streams_closed = False
+                log.error(f"关闭进度流失败: {type(exc).__name__}")
         control_stopped = True
         if _shutdown_control is not None:
             try:
@@ -464,7 +425,6 @@ def main():
                 control_stopped = False
             if not control_stopped:
                 log.error("停机控制线程未排空或关闭失败，保留实例所有权")
-        drained = False
         try:
             safe = runtime.stop(timeout=min(runtime.shutdown_timeout,
                                             max(0, shutdown_deadline - time.monotonic())))
@@ -476,7 +436,6 @@ def main():
             http_drained = True
             if http is not None:
                 try:
-                    progress_manager.close_all()
                     http_drained = http.stop(timeout=min(3, max(0, shutdown_deadline - time.monotonic())))
                 except Exception as exc:
                     http_drained = False
@@ -495,7 +454,7 @@ def main():
                 except Exception as exc:
                     safe = False
                     log.error(f"HTTP排空后的连接清理失败 component={name} error_type={type(exc).__name__}")
-            safe = safe and http_drained
+            safe = safe and http_drained and streams_closed
             drained = safe
             if sock is not None:
                 try:

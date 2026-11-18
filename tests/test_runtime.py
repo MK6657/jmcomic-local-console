@@ -404,6 +404,28 @@ def test_entry_repeated_signal_during_stop_does_not_interrupt_cleanup(entry, mon
     assert entry.events[-3:] == ["socket.close", "release", "shutdown_logging"]
 
 
+def test_startup_signal_finishes_schema_work_without_logging_in_handler(entry, monkeypatch):
+    from unittest.mock import Mock
+    warning = Mock()
+    monkeypatch.setattr(entry.app.log, "warning", warning)
+    def create():
+        entry.handlers[signal.SIGINT](signal.SIGINT, None)
+        warning.assert_not_called()
+        entry.events.append("schema ready")
+        return "application"
+    monkeypatch.setattr(entry.app, "create_app", create)
+    assert entry.app.main() == 0
+    assert "schema ready" in entry.events and "recover" not in entry.events
+    assert "release" in entry.events and not entry.marker.exists()
+    warning.assert_called_once()
+
+
+def test_entry_closes_sse_before_runtime_drain(entry, monkeypatch):
+    monkeypatch.setattr(entry.app.progress_manager, "close_all", lambda: entry.events.append("streams closed"))
+    assert entry.app.main() == 0
+    assert entry.events.index("streams closed") < entry.events.index("request_stop:updates")
+
+
 def test_entry_incomplete_drain_returns_failure_and_keeps_logging_available(entry):
     entry.jobs.stop = lambda timeout: False
     assert entry.app.main() == 1
