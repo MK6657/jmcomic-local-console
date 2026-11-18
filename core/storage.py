@@ -6,6 +6,7 @@ does not decide where the download root is: callers still authorize their destin
 """
 import os
 import re
+import shutil
 import stat
 import tempfile
 import threading
@@ -20,6 +21,57 @@ _REPARSE_POINT = 0x400
 _TEMP_PAGE = re.compile(r"[0-9]{5,}\.(?:tmp-)?[a-z0-9_]{8}\.(?i:webp|gif)\Z", re.ASCII)
 _SUFFIX = re.compile(r"\.[A-Za-z0-9]+\Z", re.ASCII)
 _staging_lock = threading.Lock()  # create an attempt / remove an empty root, never the network write
+
+
+def use_root_staging(root: Path) -> bool:
+    """Keep legacy Win32 temporary names off deep chapter paths without moving any durable data."""
+    from .validation import legacy_windows_paths, path_units
+    if not legacy_windows_paths() or str(root).startswith('\\\\?\\'):
+        return False
+    # Even an ID-only chapter may require twenty digits; the other components
+    # are the existing v5 workspace layout and the names mkstemp/mkdtemp emit.
+    longest = (Path(root) / '.jmcomic-work' / ('0' * 32) / 'pages' / ('__' + '9' * 20)
+               / STAGING_DIRECTORY / 'attempt-xxxxxxxx' / 'page-xxxxxxxx.webp')
+    return path_units(longest) > 259
+
+
+def staging_parent(parent: Path) -> Path:
+    from .path_guard import DOWNLOAD_ROOT
+    # Backup/checkpoint files outside the download tree keep their own volume.
+    root = Path(DOWNLOAD_ROOT)
+    return root if parent.is_relative_to(root) and use_root_staging(root) else parent
+
+
+@contextmanager
+def publication_tree(base: Path, root: Path):
+    """Create a unique private directory, coordinating its parent with page/CBZ writers."""
+    parent = root if use_root_staging(root) else base
+    staging = parent / STAGING_DIRECTORY
+    with _staging_lock:
+        ancestors = {path: _directory_identity(path) for path in reversed((parent, *parent.parents))}
+        staging.mkdir(exist_ok=True)
+        identity = _directory_identity(staging)
+        temp = Path(tempfile.mkdtemp(prefix='pub-', dir=staging))
+        temp_identity = _directory_identity(temp)
+    try:
+        yield temp
+    finally:
+        # A successful seal/project has already renamed the tree. Otherwise
+        # remove only this attempt, never a substituted directory or junction.
+        try:
+            _check_directories(ancestors)
+            if (_directory_identity(staging) == identity and temp.parent == staging
+                    and _directory_identity(temp) == temp_identity):
+                shutil.rmtree(temp)
+        except FileNotFoundError:
+            pass
+        with _staging_lock:
+            try:
+                _check_directories(ancestors)
+                if _directory_identity(staging) == identity:
+                    staging.rmdir()  # only if empty; concurrent or interrupted attempts stay intact
+            except OSError:
+                pass
 
 
 def is_temporary_path(path: str | Path) -> bool:
@@ -132,6 +184,8 @@ def staged_file(target: str | Path, *, suffix: str | None = None):
     The destination's parent must already exist. All of its ancestors, the staging
     root and the per-attempt directory must be ordinary directories. ``suffix`` is
     for an auxiliary raw GIF: its context can simply exit without publishing it.
+    On deep legacy Win32 download roots, stage under that same root rather than
+    repeating the task, shelf and chapter components in every temporary path.
     """
     target = Path(os.path.abspath(target))
     if is_temporary_path(target):
@@ -142,7 +196,7 @@ def staged_file(target: str | Path, *, suffix: str | None = None):
     identities = {path: _directory_identity(path)
                   for path in reversed((target.parent, *target.parent.parents))}
     _check_target(target)
-    staging = target.parent / STAGING_DIRECTORY
+    staging = staging_parent(target.parent) / STAGING_DIRECTORY
     with _staging_lock:
         try:
             staging.mkdir()

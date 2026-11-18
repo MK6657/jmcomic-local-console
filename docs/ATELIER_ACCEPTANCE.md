@@ -1,5 +1,9 @@
 # 藏书阁 Windows x64：本地交付与验收（2026-11-18）
 
+**后续修复包：** `releases/windows-x64-a786056510fb/JMComic-windows-x64.zip`（35,897,833 字节）；SHA-256 为 `99bf6960443163248acca2cde1123ab49f04697961b375d98658007979840e17`。下表记录的是首次交付的旧包。新版沿用其页面和 v5 数据格式，修复了 Windows 普通实例在较深的解压目录中、尚未请求第一页就报「下载路径过长」的问题。
+
+这次测试从最终 ZIP 重新解压 EXE，使用隔离实例和本机 HTTPS 合成上游，将下载根目录设为 164 个 UTF-16 单位。SDK 对一个专辑、两章元数据和四张图共请求七次。四页均已发布，阅读器、任务 ZIP 和整册 ZIP 的页序和逐页摘要均通过。真实上游另做只读检查：问题书目的专辑与章节元数据成功，首图 HEAD 返回 200、`image/webp`；没有代替用户重新下载该书。复跑方法和旧版对照见 [长路径验收](ATELIER_DOWNLOAD_PATH_QA.md)，用旧实例重试见 [Windows 使用说明](ATELIER_WINDOWS.md)。
+
 本版以 `codex/windows-vnext@2903b8c` 为基线。交付可运行的 Windows 程序、离线样书预览和源码；不需要用户安装 Node 或 Python。使用方法见 [Windows 藏书阁手册](ATELIER_WINDOWS.md)。这是新界面的首次交付，尚未在用户日常书库上试用。
 
 | 构件 | 标识 |

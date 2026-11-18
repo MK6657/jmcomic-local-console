@@ -141,6 +141,21 @@ def run_worker(root, token):
     _require(all(os.environ.get(key) == value for key, value in _paths(root).items()),
              "lifecycle worker paths are not isolated")
     _guard_network()
+    # Optional local HTML/CDN for a full download through the frozen SDK. Only
+    # this nonce-checked worker reads this file; ordinary starts never do so.
+    fixture = root / '.loopback-sdk-port'
+    if fixture.exists():
+        _require(fixture.is_file() and not fixture.is_symlink() and fixture.stat().st_size <= 5,
+                 'invalid fixture port file')
+        port = fixture.read_text('ascii')
+        _require(port.isascii() and port.isdecimal() and 1 <= int(port) <= 65535, 'invalid fixture port')
+        from jmcomic import JmModuleConfig
+        from curl_cffi.requests import Session
+        JmModuleConfig.DOMAIN_HTML_LIST = JmModuleConfig.DOMAIN_IMAGE_LIST = ['127.0.0.1:' + port]
+        request = Session.request
+        def local_request(session, *args, **kwargs):
+            return request(session, *args, **dict(kwargs, allow_redirects=False))
+        Session.request = local_request  # satisfy the existing no-redirect libcurl guard
     import app
     from core import database
     from core.instance_lock import maintenance_lock

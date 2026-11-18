@@ -126,6 +126,37 @@ def test_concurrent_attempts_keep_the_shared_root_until_the_last_cleanup(tmp_pat
     assert not (tmp_path / STAGING_DIRECTORY).exists()
 
 
+def test_deep_portable_instance_shares_only_temporary_space(tmp_path, monkeypatch):
+    from core import path_guard, validation
+    from core.storage import STAGING_DIRECTORY, publication_tree, staged_file
+    monkeypatch.setattr(validation, 'legacy_windows_paths', lambda: True)
+    root = tmp_path / ('r' * max(1, 164 - validation.path_units(tmp_path) - 1))
+    monkeypatch.setattr(path_guard, 'DOWNLOAD_ROOT', root)
+    base = root / '.jmcomic-work' / ('a' * 32)
+    chapter = base / 'pages' / '__1234567'
+    chapter.mkdir(parents=True)
+    destination = chapter / '00001.webp'
+    destination.write_bytes(b'previous')
+    store = root / STAGING_DIRECTORY
+    # A simultaneous publish tree, a failed image, then a successful retry.
+    with publication_tree(base, root) as tree:
+        assert tree.parent == store
+        (tree / 'keep').write_bytes(b'unrelated active publication')
+        with staged_file(destination) as first:
+            assert first.path.parents[1] == store and validation.path_units(first.path) <= 259
+            first.path.write_bytes(b'incomplete')
+            with pytest.raises(IOError):
+                first.publish(lambda p: False)
+        assert destination.read_bytes() == b'previous'
+        with staged_file(destination) as retry:
+            retry.path.write_bytes(b'complete')
+            retry.publish(lambda p: p.read_bytes() == b'complete')
+        assert (tree / 'keep').is_file()
+    assert not store.exists() and destination.read_bytes() == b'complete'
+    with staged_file(tmp_path / 'outside.zip') as outside:
+        assert outside.path.parents[1] == tmp_path / STAGING_DIRECTORY
+
+
 def test_existing_directory_cannot_be_a_publication_target(tmp_path):
     from core.storage import STAGING_DIRECTORY, staged_file
     target = tmp_path / "00001.webp"

@@ -8,7 +8,7 @@ from pathlib import Path
 from .file_tree import is_link
 from .logger import log
 from .path_guard import is_safe_path
-from .storage import STAGING_DIRECTORY, staged_file
+from .storage import STAGING_DIRECTORY, staged_file, staging_parent, use_root_staging
 from . import validation
 from .validation import (directory_budget, fit_dirname, path_units,
                          safe_dirname, short_root_error, validate_numeric)
@@ -19,14 +19,19 @@ CHAPTER_FORMAT = 2
 # image and the chapter marker have a five-character extension (.webp/.json).
 _STAGED_PAGE = Path(STAGING_DIRECTORY, 'attempt-xxxxxxxx', 'page-xxxxxxxx.webp')
 _STAGED_ARCHIVE = _STAGED_PAGE.with_suffix('.cbz')  # .zip has the same length
+_SHARED_LEAVES = (_STAGED_PAGE.relative_to(STAGING_DIRECTORY), Path('pub-xxxxxxxx', '.jm-publication.json'))
 
 
 def _workspace_chapter_budget(work):
     # Both seal() and project() copy the complete chapter into a fresh temporary
     # tree on this volume. Their marker is longer than the numbered page name.
-    prepare = work.parent / STAGING_DIRECTORY / 'pub-xxxxxxxx'
-    return min(directory_budget(work, _STAGED_PAGE), directory_budget(prepare, CHAPTER_MARKER),
-               directory_budget(work.parent / 'snapshot', CHAPTER_MARKER))
+    root = work.parents[2]
+    shared = use_root_staging(root)
+    prepare = (root if shared else work.parent) / STAGING_DIRECTORY / 'pub-xxxxxxxx'
+    if shared and directory_budget(root, *_SHARED_LEAVES) < path_units(STAGING_DIRECTORY):
+        raise short_root_error()
+    return min(directory_budget(work, CHAPTER_MARKER if shared else _STAGED_PAGE),
+               directory_budget(prepare, CHAPTER_MARKER), directory_budget(work.parent / 'snapshot', CHAPTER_MARKER))
 
 
 def _public_chapter_budget(target, view_parent):
@@ -55,10 +60,19 @@ def album_output_dir(root, job_id, title, album_id, photos, *, preferred=None, p
     original = root / fit_dirname(title, suffix, 255)
     if preferred is None and os.path.isdir(original):
         preferred = original
-    # Stable across later selections: half the public path can be needed by the
-    # repeated album name in Book/Book.cbz. Chapters share the remaining space.
-    stable = directory_budget(view_parent, _STAGED_ARCHIVE, archive=True)
+    # The archive repeats the album name in Book/Book.cbz. In a deep root,
+    # leave room for at least the selected chapter IDs in a versioned view.
+    shared = use_root_staging(root)
+    archive_leaves = () if shared else (_STAGED_ARCHIVE,)
+    stable = directory_budget(view_parent, *archive_leaves, archive=True)
+    if shared:
+        stable = min(stable, directory_budget(view_parent, Path('x' * required, CHAPTER_MARKER)))
     requested = preferred or root / fit_dirname(title, suffix, max(len(suffix), stable), archive=True)
+    if shared and preferred is None and not requested.is_dir():
+        previous_budget = directory_budget(view_parent, _STAGED_ARCHIVE, archive=True)
+        previous = root / fit_dirname(title, suffix, max(len(suffix), previous_budget), archive=True)
+        if previous != requested and previous.is_dir():
+            requested = previous
     if not validation.legacy_windows_paths():
         return requested
     target = requested
@@ -69,7 +83,7 @@ def album_output_dir(root, job_id, title, album_id, photos, *, preferred=None, p
             target = checked(root, _load(meta)['target'])
     if pack:
         for parent in ((target.parent, view_parent) if target.exists() else (target.parent,)):
-            if path_units(target.name) > directory_budget(parent, _STAGED_ARCHIVE, archive=True):
+            if path_units(target.name) > directory_budget(parent, *archive_leaves, archive=True):
                 raise short_root_error()
     budget = min(work_budget, _public_chapter_budget(target, view_parent))
     if budget < required:
@@ -90,7 +104,9 @@ def author_output_name(root, source, name, author, *, pack, check_control):
     title = safe_dirname(author)
     leaves = [Path(name) / '.jm-view.json']
     if pack:
-        leaves.extend((Path(name) / (name + '.cbz'), Path(name) / _STAGED_ARCHIVE))
+        leaves.append(Path(name) / (name + '.cbz'))
+        if not use_root_staging(root):
+            leaves.append(Path(name) / _STAGED_ARCHIVE)
     budget = directory_budget(root, *leaves)
     if validation.legacy_windows_paths() and path_units(Path(root) / title / name) > path_units(source):
         def fail(err):
@@ -126,7 +142,7 @@ def chapter_output_dir(album_dir, photo, *, create=True):
     """Never adopt an unmarked folder. A read-only lookup follows the writer's exact suffix rules."""
     from .publication import WORK, VIEWS, _load, checked
     album_dir = Path(album_dir)
-    budget = directory_budget(album_dir, _STAGED_PAGE)
+    budget = directory_budget(album_dir, _STAGED_PAGE if staging_parent(album_dir) == album_dir else CHAPTER_MARKER)
     if not is_safe_path(album_dir):
         raise ValueError('章节输出路径越权')
     if (validation.legacy_windows_paths() and album_dir.name == 'pages' and album_dir.parent.parent.name == WORK
@@ -163,7 +179,7 @@ def _chapter_directory(album_dir, photo, *, create, budget, plan=False):
     if '.jmcomic-work' in (part.casefold() for part in Path(album_dir).parts) and Path(album_dir).is_dir():
         # A paused task owns these chapter folders. Upstream may rename a chapter
         # while paused; keep its verified page identities under the original name.
-        if not (Path(album_dir) / base).exists():
+        if _marker(Path(album_dir) / base).get('photo_id') != photo_id:
             for prior in Path(album_dir).iterdir():
                 if prior.is_dir() and not is_link(prior) and _marker(prior).get('photo_id') == photo_id:
                     return prior

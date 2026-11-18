@@ -5,13 +5,12 @@ import json
 import os
 from pathlib import Path
 import shutil
-import tempfile
 
 from . import database as db
 from .backup_paths import safe_parts
 from .download_layout import CHAPTER_FORMAT, CHAPTER_MARKER, chapter_format, chapter_output_dir
 from .file_tree import is_link
-from .storage import STAGING_DIRECTORY, is_temporary_path, staged_file
+from .storage import STAGING_DIRECTORY, is_temporary_path, publication_tree, staged_file
 
 WORK = '.jmcomic-work'
 VIEWS = '.jmcomic-views'
@@ -127,12 +126,8 @@ class Workspace:
     def temporary_tree(self):
         # Only this invocation's temporary children are removed on failure. A hard
         # exit may leave one orphan, which ordinary full backups explicitly skip.
-        staging = self.base / STAGING_DIRECTORY
-        staging.mkdir(exist_ok=True)
-        if is_link(staging) or not staging.is_dir():
-            raise OSError('临时发布目录无效')
-        with tempfile.TemporaryDirectory(prefix='pub-', dir=staging) as path:
-            yield Path(path)
+        with publication_tree(self.base, self.root) as path:
+            yield path
 
     def seed(self, photos, existing, skip, valid, is_gif):
         copied = []
