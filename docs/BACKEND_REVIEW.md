@@ -1,6 +1,6 @@
 # 后端收尾复检交接
 
-工作分支：`codex/refactor-windows`。本指南适用于 Windows 本地浏览器便携版；使用与升级见 [Windows 便携版](WINDOWS_RELEASE.md)。历史审计记录保留了当时的风险和验证边界。
+本页是 `codex/refactor-windows`（v4）的历史复检说明。`codex/windows-vnext`（v5）请先看 [Windows 后端候选复检](WINDOWS_VNEXT_REVIEW.md)，只用恢复出的副本试用；本页的版本和通过数不代表新候选包。
 
 2026-11-17首批审计修复已接入：完成/失败/取消改为原子业务命令，状态更新禁止绕过守卫；超时章节返回稳定副本、未知页数不进入长期缓存；已有异常图片由逐页处理记录和重试。API错误为JSON，并补防嵌入响应头。已修和待修范围见 [审计修复记录](AUDIT_FIXES.md)，当前版本请记录HEAD，原审计 `7ae6ccb` 仅为历史快照。
 

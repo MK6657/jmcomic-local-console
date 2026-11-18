@@ -12,7 +12,9 @@
 
 ## 后端复检分支
 
-本次 Windows 后端重构发布在 **`codex/refactor-windows`** 分支，`main` 保留原版本。
+**当前 v5 Windows 后端候选：** 本地分支 `codex/windows-vnext`，从 `552bb65` 分出。[复检手册](docs/WINDOWS_VNEXT_REVIEW.md)说明如何只在副本上测试；[本次验收记录](docs/WINDOWS_VNEXT_ACCEPTANCE.md)给出实际包的 SHA-256 和覆盖范围。以下克隆命令用于取得上一版公开基线。
+
+上一版 Windows 后端重构发布在 **`codex/refactor-windows`** 分支，`main` 保留原版本。
 请审核者先阅读[克隆与测试指南](docs/GITHUB_REVIEW.md)和[独立审查委托](docs/INDEPENDENT_BACKEND_AUDIT.md)。
 
 [项目详细交接说明](docs/PROJECT_HANDOFF.md)记录早期后端审查的架构、固定产品提交和当时证据。审查 `552bb65` 请用上面的 vNext 处置表。

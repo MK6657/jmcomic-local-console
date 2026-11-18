@@ -16,7 +16,9 @@ See the [backup and upgrade instructions](docs/WINDOWS_RELEASE.md) before using 
 
 ## Backend review branch
 
-The Windows backend refactor is published on **`codex/refactor-windows`**; `main`
+The current v5 Windows candidate is on the local `codex/windows-vnext` branch, based on `552bb65`. Follow the [review guide](docs/WINDOWS_VNEXT_REVIEW.md) on a restored copy and compare the [candidate's checksums and verification scope](docs/WINDOWS_VNEXT_ACCEPTANCE.md). The clone command below retrieves the previous public baseline.
+
+The previous Windows backend refactor is published on **`codex/refactor-windows`**; `main`
 keeps the previous version. Reviewers should follow the [clone and test guide](docs/GITHUB_REVIEW.md)
 and [independent audit instructions](docs/INDEPENDENT_BACKEND_AUDIT.md).
 

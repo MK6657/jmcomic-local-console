@@ -1,5 +1,7 @@
 # 从 GitHub 获取并审核后端重构
 
+**注意审核对象：** 下面的 GitHub 克隆命令获取已公开的旧版分支。2026-11-18 的 Windows 后端候选在本地 `codex/windows-vnext`。在包含该分支的检出中执行 `git branch --show-current` 和 `git rev-parse HEAD`，对照[本次验收](WINDOWS_VNEXT_ACCEPTANCE.md)和[复检手册](WINDOWS_VNEXT_REVIEW.md)。不要将旧版审查结果算作 vNext 的验证。
+
 公开仓库：[MK6657/jmcomic-local-console](https://github.com/MK6657/jmcomic-local-console)。
 本次代码位于 [`codex/refactor-windows`](https://github.com/MK6657/jmcomic-local-console/tree/codex/refactor-windows)，`main` 保留原版本。
 

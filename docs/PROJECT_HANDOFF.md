@@ -1,6 +1,6 @@
 # JMComic Local Console 项目接手与复检说明
 
-**接手当前 Windows 版：** 先看[使用与升级](WINDOWS_RELEASE.md)和[本次发行验收](WINDOWS_ACCEPTANCE.md)，核对分支、产品提交、发行指纹和 ZIP 的 SHA-256。下面的架构、审计项与通过数是 2026-11-17 的历史基线；路线 B 首个候选的独立证据在[候选包交接](WINDOWS_CANDIDATE_B.md)。
+**接手 2026-11-18 后端候选：** 本地分支 `codex/windows-vnext` 从 `552bb65` 分出。先读[副本复检步骤](WINDOWS_VNEXT_REVIEW.md)和[本次实际验收](WINDOWS_VNEXT_ACCEPTANCE.md)，用 `git diff 552bb65..HEAD` 审查。下文的分支、命令和通过数是 2026-11-17 的旧版基线；回退用的旧包见[旧版发行验收](WINDOWS_ACCEPTANCE.md)。
 
 ## 1. 当前结论与产品目标
 

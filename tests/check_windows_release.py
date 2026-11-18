@@ -72,7 +72,7 @@ def checked_report(process, command):
     return report
 
 
-def check(release, check_launcher=False, check_restore=False):
+def check(release, check_launcher=False, check_restore=False, check_vnext=False):
     archive = release / "JMComic-windows-x64.zip"
     expected, filename = (release / "SHA256SUMS.txt").read_text(encoding="ascii").strip().split()
     assert filename == archive.name
@@ -99,6 +99,12 @@ def check(release, check_launcher=False, check_restore=False):
         if manifest['format'] >= 2:
             from tools.release_licenses import verify_bundle_licenses
             verify_bundle_licenses(executable.parent, manifest['license_sha256'])
+        publication = None
+        if check_vnext:
+            result = subprocess.run([sys.executable, str(ROOT / 'tests/check_vnext_portable.py'), str(executable)],
+                                    check=True, stdout=subprocess.PIPE, timeout=200)
+            publication = json.loads(result.stdout.splitlines()[-1])
+            assert publication['status'] == 'ok' and publication['source_sha256'] == manifest['source_sha256']
         untouched = root / "inherited-instance-must-not-be-opened"
         process = subprocess.run([str(executable), "self-check"], cwd=unrelated, env=environment(untouched),
                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -180,7 +186,8 @@ def check(release, check_launcher=False, check_restore=False):
             "system_python_removed_from_path": True, "inherited_instance_untouched": True,
             "instance_selection_preview_and_cancel": True, "portable_backup_info": True, "portable_v2_full_restore": check_restore,
             "unmapped_backup_preserved_old_zip": check_restore,
-            "busy_launcher_rejected": launcher_checked, "upstream_requests": 0}
+            "busy_launcher_rejected": launcher_checked, "upstream_requests": 0,
+            "vnext_extracted_checks": publication['checks'] if publication else None}
 
 
 if __name__ == "__main__":
@@ -188,5 +195,6 @@ if __name__ == "__main__":
     parser.add_argument("release", type=Path)
     parser.add_argument("--check-launcher", action="store_true")
     parser.add_argument("--check-restore", action="store_true", help="offline maintenance; requires a free service mutex")
+    parser.add_argument('--check-vnext', action='store_true', help='v5 publication, task/album exports and restart on this extracted EXE')
     options = parser.parse_args()
-    print(json.dumps(check(options.release.resolve(), options.check_launcher, options.check_restore)))
+    print(json.dumps(check(options.release.resolve(), options.check_launcher, options.check_restore, options.check_vnext)))

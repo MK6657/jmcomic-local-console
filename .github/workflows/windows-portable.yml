@@ -3,7 +3,7 @@ name: Windows portable package
 on:
   workflow_dispatch:
   push:
-    branches: [codex/refactor-windows]
+    branches: [codex/refactor-windows, codex/windows-vnext]
     tags: ['windows-v*']
     paths:
       - '.github/workflows/windows-portable.yml'
@@ -16,6 +16,7 @@ on:
       - 'core/release_check.py'
       - 'core/release_lifecycle.py'
       - 'tests/check_windows_release.py'
+      - 'tests/check_vnext_portable.py'
 
 permissions:
   contents: read
@@ -58,7 +59,7 @@ jobs:
       - name: Package and run EXE self-check and restart checks
         run: python tools/build_windows.py --output releases/ci-windows-x64
       - name: Verify extracted ZIP, busy launcher and v2 backup/restore
-        run: python tests/check_windows_release.py releases/ci-windows-x64 --check-launcher --check-restore
+        run: python tests/check_windows_release.py releases/ci-windows-x64 --check-launcher --check-restore --check-vnext
       - uses: actions/upload-artifact@v4
         with:
           name: JMComic-windows-x64
