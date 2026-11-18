@@ -86,7 +86,7 @@
         // 左侧封面
         html += '<div class="col-12 col-md-4 col-lg-3">';
         if (album.cover) {
-            html += '<img src="' + window.escapeHtmlAttr(album.cover) + '" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title) + '" decoding="async">';
+            html += '<img src="/api/cover/' + encodeURIComponent(album.album_id) + '/portrait" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title) + '" decoding="async">';
         } else {
             html += COVER_PLACEHOLDER;
         }

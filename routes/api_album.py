@@ -5,7 +5,7 @@ import io
 import re
 from pathlib import Path
 
-from flask import Blueprint, jsonify, make_response, redirect, send_file
+from flask import Blueprint, jsonify, make_response, redirect, request, send_file
 
 from core import archive_pages
 from core.database import get_db, get_all_jobs, get_job, get_completed_job_by_album_id
@@ -41,6 +41,7 @@ def album_detail(album_id: str):
 
 
 @api_album_bp.get("/api/cover/<album_id>")
+@api_album_bp.get("/api/cover/<album_id>/portrait")
 def cover_redirect(album_id: str):
     """返回本地封面图片，若无本地文件则 302 重定向到 CDN"""
     if not validate_numeric(album_id):
@@ -83,12 +84,14 @@ def cover_redirect(album_id: str):
                     return send_file(str(cached_cover), mimetype=mime, max_age=0)
 
         # -- CDN 回退（本地没有封面）--
-        url = JmcomicText.get_album_cover_url(album_id)
+        size = "" if request.args.get("fallback") == "square" else "_3x4"
+        url = JmcomicText.get_album_cover_url(album_id, size=size)
         if not url.startswith(("http://", "https://")):
             log.error(f"封面 URL scheme 异常 album_id={album_id} url={url}")
             return jsonify({"status": "error", "message": "获取封面失败"}), 500
         resp = make_response(redirect(url, code=302))
-        resp.headers['Cache-Control'] = 'private, max-age=86400'
+        # A successful download changes the preferred cover immediately.
+        resp.headers['Cache-Control'] = 'private, no-store'
         resp.headers['Vary'] = 'Cookie'
         return resp
     except Exception as e:

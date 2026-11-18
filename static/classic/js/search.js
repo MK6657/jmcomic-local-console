@@ -336,7 +336,7 @@
 
       // 封面
       if (item.cover_url) {
-        html += '<img src="' + escapeHtmlAttr(item.cover_url) + '" class="card-img-top" alt="" loading="lazy" decoding="async">';
+        html += '<img src="/api/cover/' + encodeURIComponent(item.album_id) + '/portrait" class="card-img-top" alt="" loading="lazy" decoding="async">';
       } else {
         html += '<div class="cover-placeholder"><i class="bi bi-image"></i></div>';
       }

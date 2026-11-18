@@ -105,11 +105,11 @@
   overflow-wrap: anywhere; text-align: start; line-break: anywhere;
 }
 .shelf-ticket::before { content: '藏書票'; display: block; color: var(--seal); font-size: .75rem; letter-spacing: .15em; }
-.atelier-collection .shelf-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 0; }
-.atelier-collection .shelf-cover img[hidden] { display: none; }
-.atelier-collection .library-card .shelf-cover img {
-  object-fit: contain; background: var(--bg-tint);
+.atelier-collection .shelf-cover img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: contain; border-radius: 0; background: var(--bg-tint);
 }
+.atelier-collection .shelf-cover img[hidden] { display: none; }
 .atelier-collection .library-card .shelf-cover:hover img { opacity: 1; }
 .atelier-collection[data-layout="shelf"] .library-card .shelf-cover { width: min(90%,11rem); }
 .atelier-collection[data-layout="catalog"] :is(.shelf-results,.library-grid) { grid-template-columns: minmax(0,1fr); gap: 0; }

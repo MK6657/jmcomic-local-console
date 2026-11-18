@@ -332,7 +332,8 @@ Response:
 ### 4.4 封面 API
 
 ```
-GET /api/cover/<album_id>  →  有安全可读的本地散图时返回图片，否则 302 到 SDK 封面 URL
+GET /api/cover/<album_id>/portrait  →  优先返回本地散图、归档首页或封面缓存，否则 302 到 SDK 的竖版封面
+                                     竖版加载失败时带 ?fallback=square 重试一次。书封按原比例完整显示收到的图。
 ```
 
 ### 4.5 下载任务 API

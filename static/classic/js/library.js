@@ -270,12 +270,12 @@
 
         // 封面（加载失败换成缺省封面：见 grid 上捕获阶段的 error 委托）
         var coverLink = newTabLink(detailUrl, 'card-cover-link');
-        if (item.cover_url) {
+        if (item.cover_url || item.readable) {
             coverLink.title = title;
             var img = el('img', 'card-cover thumb-img');
             img.loading = 'lazy';
             img.alt = title;
-            img.src = item.cover_url;
+            img.src = '/api/cover/' + encodeURIComponent(albumId) + '/portrait';
             coverLink.appendChild(img);
         } else {
             var placeholder = el('div', 'placeholder-cover');

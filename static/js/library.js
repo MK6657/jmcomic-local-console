@@ -277,12 +277,11 @@
         coverLink.appendChild(ticket);
         // Match the detail page for locally readable books. The upstream
         // catalog thumbnail may already have been cropped before we receive it.
-        var coverUrl = item.readable ? '/api/cover/' + encodeURIComponent(albumId) : item.cover_url;
-        if (coverUrl && coverUrl !== '/static/images/no-cover.svg') {
+        if (item.readable || (item.cover_url && item.cover_url !== '/static/images/no-cover.svg')) {
             var img = el('img', 'card-cover thumb-img');
             img.loading = 'lazy';
             img.alt = '';
-            img.src = coverUrl;
+            img.src = '/api/cover/' + encodeURIComponent(albumId) + '/portrait';
             coverLink.appendChild(img);
         }
         var pedestal = el('div', 'shelf-pedestal');

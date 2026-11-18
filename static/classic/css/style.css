@@ -561,7 +561,7 @@ code {
 .album-card .cover-placeholder {
   width: 100%;
   aspect-ratio: 120 / 170;
-  object-fit: cover;
+  object-fit: contain;
   background: var(--bg-tertiary);
 }
 .album-card .cover-placeholder {
@@ -847,7 +847,7 @@ code {
 .library-card .card-cover {
   width: 100%;
   aspect-ratio: 120/170;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
   background: var(--bg-tertiary);
 }

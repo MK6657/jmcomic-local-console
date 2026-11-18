@@ -513,7 +513,7 @@
       var maintenance = (items.find(function (job) { return job.maintenance; }) || {}).maintenance;
       var ribbon = maintenance && { pending: maintenance.error ? '等待重试整册整理' : '等待整册整理', running: '正在整理整册', failed: '整册整理失败', completed: '整册整理完成' }[maintenance.state];
       html += '<article class="folio-card" data-album-id="' + escapeHtmlAttr(id) + '"><header class="folio-book-head">'
-        + '<a class="bound-book folio-cover" href="/album/' + path + '" aria-label="查看书目：' + escapeHtmlAttr(title) + '"><span aria-hidden="true">藏</span><img alt="" src="/api/cover/' + path + '" loading="lazy" decoding="async"></a>'
+        + '<a class="bound-book folio-cover" href="/album/' + path + '" aria-label="查看书目：' + escapeHtmlAttr(title) + '"><span aria-hidden="true">藏</span><img alt="" src="/api/cover/' + path + '/portrait" loading="lazy" decoding="async"></a>'
         + '<div class="folio-book-caption"><p class="folio-kicker">馆藏卷宗 <b>JM ' + escapeHtml(id) + '</b></p>'
         + '<h3><a href="/album/' + path + '">' + escapeHtml(title) + '</a></h3>'
         + (book.author ? '<p class="folio-author">' + escapeHtml(book.author) + '</p>' : '') + '</div>'

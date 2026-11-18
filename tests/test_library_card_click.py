@@ -439,8 +439,8 @@ def _query(url):
     return parts.path, parse_qs(parts.query)
 
 
-def test_readable_card_uses_the_same_cover_endpoint_as_detail(harness):
-    assert harness["coverSources"] == ["/c.jpg", "/api/cover/456"]
+def test_library_cards_share_the_portrait_endpoint_for_local_and_remote_covers(harness):
+    assert harness["coverSources"] == ["/api/cover/456/portrait"] * 2
 
 
 def test_tag_index_keeps_selected_tags_and_filters_combined_on_the_server(harness):

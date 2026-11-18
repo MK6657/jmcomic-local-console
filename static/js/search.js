@@ -334,7 +334,7 @@
 
       // 封面
       if (item.cover_url && item.cover_url !== '/static/images/no-cover.svg') {
-        html += '<img src="' + escapeHtmlAttr(item.cover_url) + '" class="card-img-top" alt="" loading="lazy" decoding="async">';
+        html += '<img src="/api/cover/' + encodeURIComponent(item.album_id) + '/portrait" class="card-img-top" alt="" loading="lazy" decoding="async">';
       }
 
       html += '</a></div><div class="card-body d-flex flex-column">';

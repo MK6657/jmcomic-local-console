@@ -211,6 +211,7 @@ window.showToast = function (message, type) {
 </script>
 
 <!-- 页面自定义 JS (在子模板中按需追加) -->
+<script src="{{ asset_url('shared/cover-fallback.js') }}"></script>
 {% block scripts_extra %}{% endblock %}
 </body>
 </html>

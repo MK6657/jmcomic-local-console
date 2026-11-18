@@ -210,6 +210,7 @@ window.showToast = function (message, type) {
 <script src="{{ asset_url('js/atelier-shell.js') }}"></script>
 
 <!-- 页面自定义 JS (在子模板中按需追加) -->
+<script src="{{ asset_url('shared/cover-fallback.js') }}"></script>
 {% block scripts_extra %}{% endblock %}
 {% if atelier_demo and demo_stop_token %}
 <form class="text-center mb-3" action="/demo/close" method="post">

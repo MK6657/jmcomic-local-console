@@ -235,7 +235,7 @@
       var image = el('img');
       image.loading = 'lazy';
       image.alt = '';
-      image.src = '/api/cover/' + encodeURIComponent(albumId);
+      image.src = '/api/cover/' + encodeURIComponent(albumId) + '/portrait';
       cover.appendChild(image);
     }
     var book = el('a', 'wish-book');
