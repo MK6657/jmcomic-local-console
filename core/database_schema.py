@@ -7,7 +7,7 @@ from functools import lru_cache
 import re
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 BASE_SCHEMA_SQL = r"""
             CREATE TABLE IF NOT EXISTS jobs (
@@ -143,6 +143,18 @@ RESOURCE_TABLE_SQL = r"""CREATE TABLE IF NOT EXISTS resource_catalog (
 RESOURCE_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_resource_catalog_album_latest ON resource_catalog(album_id, created_at DESC, job_order DESC)"
 QUEUE_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, queued_at, id)"
 
+PUBLICATION_DDL = {
+    'task_page_receipts': """CREATE TABLE task_page_receipts (job_id TEXT NOT NULL, page TEXT NOT NULL,
+        digest TEXT NOT NULL, PRIMARY KEY(job_id, page))""",
+    'published_tasks': """CREATE TABLE published_tasks (
+        job_id TEXT PRIMARY KEY, album_id TEXT NOT NULL, job_order INTEGER NOT NULL,
+        snapshot TEXT NOT NULL, manifest TEXT NOT NULL)""",
+    'idx_published_album': 'CREATE INDEX idx_published_album ON published_tasks(album_id, job_order)',
+    'album_maintenance': """CREATE TABLE album_maintenance (
+        album_id TEXT PRIMARY KEY, state TEXT NOT NULL, payload TEXT NOT NULL,
+        error TEXT NOT NULL DEFAULT '', generation INTEGER NOT NULL DEFAULT 1)""",
+}
+
 
 def catalog_triggers() -> dict[str, str]:
     columns = ("job_id", "album_id", "title", "selected_photo_ids", "output_path", "created_at",
@@ -248,6 +260,8 @@ def _expected_objects():
         connection.execute(RESOURCE_INDEX_SQL)
         connection.execute("ALTER TABLE jobs ADD COLUMN queued_at TEXT")
         connection.execute(QUEUE_INDEX_SQL)
+        for ddl in PUBLICATION_DDL.values():
+            connection.execute(ddl)
         for statement in catalog_triggers().values():
             connection.execute(statement)
         return {(kind, name): _tokens(sql) for kind, name, sql in connection.execute(
@@ -267,6 +281,8 @@ def validate_schema(connection, version):
     if type(version) is not int or not 0 <= version <= CURRENT_SCHEMA_VERSION:
         raise SchemaError("数据库版本不受支持")
     expected = _expected_objects()
+    if version < 5:
+        expected = {key: value for key, value in expected.items() if key[1] not in PUBLICATION_DDL}
     rows = connection.execute(
         "SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL LIMIT ?",
         (_MAX_SCHEMA_OBJECTS + 1,),
@@ -286,7 +302,7 @@ def validate_schema(connection, version):
         if key not in expected:
             raise SchemaError(f"不支持的数据库结构对象：{name}")
         tokens, target = _tokens(sql), expected[key]
-        if kind == "table" and name == "jobs" and version < CURRENT_SCHEMA_VERSION:
+        if kind == "table" and name == "jobs" and version < 4:
             header, fields, suffix = _table_parts(tokens)
             target_header, target_fields, target_suffix = _table_parts(target)
             names = {field[0] for field in fields if field}
@@ -315,7 +331,7 @@ def validate_schema(connection, version):
         raise SchemaError("数据库资源目录触发器缺失或版本不一致")
     if version >= 3 and ("index", "idx_resource_catalog_album_latest") not in actual:
         raise SchemaError("数据库资源目录索引缺失")
-    if version == CURRENT_SCHEMA_VERSION and actual.keys() != expected.keys():
+    if version >= 4 and actual.keys() != expected.keys():
         missing = sorted(name for _, name in expected.keys() - actual.keys())
         raise SchemaError("数据库结构对象缺失：" + ", ".join(missing))
     return {name: sql for (kind, name), sql in actual.items() if kind == "trigger"}

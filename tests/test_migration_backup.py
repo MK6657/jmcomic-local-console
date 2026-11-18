@@ -5,6 +5,10 @@ import zipfile
 
 import pytest
 
+from core.database_schema import PUBLICATION_DDL
+
+DROP_PUBLICATION_SQL = "".join(f'DROP {ddl.split()[1]} "{name}";' for name, ddl in reversed(PUBLICATION_DDL.items()))
+
 
 @pytest.fixture
 def legacy(client, tmp_path, monkeypatch):
@@ -16,6 +20,7 @@ def legacy(client, tmp_path, monkeypatch):
     target = sqlite3.connect(database)
     source.backup(target)
     source.close()
+    target.executescript(DROP_PUBLICATION_SQL)
     for trigger in ("catalog_completed_job_insert", "catalog_completed_job_update", "catalog_revoked_completion"):
         target.execute(f"DROP TRIGGER IF EXISTS {trigger}")
     target.execute("DROP TABLE resource_catalog")
@@ -84,7 +89,7 @@ def test_automatic_snapshot_preserves_unmappable_paths_for_diagnosis(legacy, tmp
     monkeypatch.setattr(db, "get_download_root", lambda: new_root)
     monkeypatch.setattr(backup, "_inventory", lambda *args: pytest.fail("migration scanned resources"))
     db.init_db()
-    archive, = backups.glob("pre-migration-v2-to-v4-*.zip")
+    archive, = backups.glob(f"pre-migration-v2-to-v{db.CURRENT_SCHEMA_VERSION}-*.zip")
     info = backup.inspect_backup(archive)
     assert info.schema_version == 2 and info.manifest["resources"]["mode"] == "database"
     assert info.manifest["resources"]["source_root"] == str(new_root) and not new_root.exists()

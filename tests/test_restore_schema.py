@@ -12,6 +12,8 @@ import zipfile
 
 import pytest
 
+from core.database_schema import CURRENT_SCHEMA_VERSION
+from test_migration_backup import DROP_PUBLICATION_SQL
 from test_restore import source, _backup, _rewrite_archive, _assert_not_published
 
 
@@ -26,7 +28,7 @@ def _source_state(source):
     )
 
 
-def _assert_valid_payload(backup, tmp_path, version=4):
+def _assert_valid_payload(backup, tmp_path, version=CURRENT_SCHEMA_VERSION):
     """Reopen the rewritten DDL with trusted_schema OFF, as production does."""
     with zipfile.ZipFile(backup) as archive:
         assert archive.testzip() is None
@@ -181,6 +183,7 @@ def test_v3_restored_catalog_survives_first_startup_queue_backfill(source, tmp_p
     from core import database as db
     from core.restore import restore_backup
     with closing(sqlite3.connect(source[0])) as conn, conn:
+        conn.executescript(DROP_PUBLICATION_SQL)
         conn.execute("UPDATE jobs SET queued_at=NULL")
         conn.execute("UPDATE resource_catalog SET title='Independent title',superseded_at='2026-01-02',"
                      "output_path=? WHERE job_id='job_done'", (str(source[1] / "Independent_123"),))
@@ -195,7 +198,7 @@ def test_v3_restored_catalog_survives_first_startup_queue_backfill(source, tmp_p
     monkeypatch.setattr(db, "get_download_root", lambda: result.downloads)
     db.init_db()
     with closing(sqlite3.connect(result.database)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         assert connection.execute("SELECT title,superseded_at,output_path FROM resource_catalog "
                                   "WHERE job_id='job_done'").fetchone() == (
             "Independent title", "2026-01-02", str(result.downloads / "Independent_123"))
@@ -240,7 +243,8 @@ def test_views_and_virtual_tables_are_refused(source, tmp_path, kind):
 
 @pytest.mark.parametrize("table", [
     "jobs", "settings", "resource_catalog", "search_history", "wishlist", "album_tags",
-    "album_detail_cache", "album_meta", "album_update_checks", "update_check_log",
+    "album_detail_cache", "album_meta", "album_update_checks", "update_check_log", "published_tasks", "album_maintenance",
+    "task_page_receipts",
 ])
 def test_unknown_columns_in_every_application_table_are_refused(source, tmp_path, table):
     backup = _backup(source, tmp_path / "unknown-column.zip")
@@ -303,7 +307,7 @@ def _assert_preserved_data(result, *, version, queue):
         assert conn.execute("SELECT tag FROM album_tags WHERE album_id='123'").fetchone()[0] == "my-tag"
         assert conn.execute("SELECT baseline_ids, new_count FROM album_update_checks WHERE album_id='123'").fetchone() == (
             '["71"]', 1)
-        if version == 4:
+        if version >= 3:
             assert conn.execute("SELECT output_path FROM resource_catalog WHERE job_id='job_done'").fetchone()[0] == str(
                 result.downloads / "Title_123")
             assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0] == 3
@@ -317,7 +321,7 @@ def _assert_preserved_data(result, *, version, queue):
             assert conn.execute("SELECT DISTINCT output_path FROM jobs WHERE job_id!='job_done'").fetchall() == [
                 (str(result.downloads / "Other_456"),)]
             assert conn.execute("SELECT created_at FROM jobs WHERE job_id='old_running'").fetchone()[0] == "2020-01-01T00:00:00"
-            if version == 4:
+            if version >= 4:
                 assert [row[0] for row in conn.execute(
                     "SELECT job_id FROM jobs WHERE status='queued' "
                     "ORDER BY COALESCE(NULLIF(queued_at,''),created_at,''), id").fetchall()] == [
@@ -326,15 +330,19 @@ def _assert_preserved_data(result, *, version, queue):
 
 
 @pytest.mark.parametrize("included", [False, True], ids=["inventory-with-queue", "full-with-resources"])
-def test_current_v4_schema_restores_with_existing_data_contracts(source, tmp_path, included):
+@pytest.mark.parametrize("version", [4, CURRENT_SCHEMA_VERSION], ids=["historical-v4", "current"])
+def test_restored_schema_preserves_existing_data_contracts(source, tmp_path, included, version):
     from core.restore import restore_backup
     if not included:
         _seed_queue(source)
-    backup = _backup(source, tmp_path / "valid-v4.zip", included=included)
-    _assert_valid_payload(backup, tmp_path)
+    if version == 4:
+        with closing(sqlite3.connect(source[0])) as conn:
+            conn.executescript(DROP_PUBLICATION_SQL + "PRAGMA user_version=4")
+    backup = _backup(source, tmp_path / f"valid-v{version}.zip", included=included)
+    _assert_valid_payload(backup, tmp_path, version=version)
     before, archive_before = _source_state(source), backup.read_bytes()
-    result = restore_backup(backup, tmp_path / "valid-v4-instance")
-    _assert_preserved_data(result, version=4, queue=not included)
+    result = restore_backup(backup, tmp_path / f"valid-v{version}-instance")
+    _assert_preserved_data(result, version=version, queue=not included)
     assert result.resources_included is included
     assert result.restored_files == (1 if included else 0)
     assert bool(result.warnings) is not included
@@ -358,6 +366,7 @@ def test_automatic_v2_snapshot_restores_queue_pause_and_paths(source, tmp_path, 
     with closing(sqlite3.connect(source[0].as_uri() + "?mode=ro", uri=True)) as original:
         with closing(sqlite3.connect(legacy)) as conn:
             original.backup(conn)
+            conn.executescript(DROP_PUBLICATION_SQL)
             for trigger in ("catalog_completed_job_insert", "catalog_completed_job_update", "catalog_revoked_completion"):
                 conn.execute(f"DROP TRIGGER {trigger}")
             conn.execute("DROP TABLE resource_catalog")
@@ -372,7 +381,7 @@ def test_automatic_v2_snapshot_restores_queue_pause_and_paths(source, tmp_path, 
     monkeypatch.setattr(db, "get_backup_dir", lambda: backups)
     monkeypatch.setattr(db, "get_download_root", lambda: source[1])
     db.init_db()
-    archives = list(backups.glob("pre-migration-v2-to-v4-*.zip"))
+    archives = list(backups.glob(f"pre-migration-v2-to-v{CURRENT_SCHEMA_VERSION}-*.zip"))
     assert len(archives) == 1
     backup = archives[0]
     _assert_valid_payload(backup, tmp_path, version=2)

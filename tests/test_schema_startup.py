@@ -7,6 +7,7 @@ import pytest
 
 from core import database as db
 from core.database_schema import validate_schema
+from test_migration_backup import DROP_PUBLICATION_SQL
 
 
 @pytest.fixture
@@ -31,7 +32,8 @@ def mutate(path, statement):
 
 
 @pytest.mark.parametrize("statement", [
-    "DROP TABLE jobs", "DROP TABLE settings", "DROP TABLE resource_catalog",
+    "DROP TABLE jobs", "DROP TABLE settings", "DROP TABLE resource_catalog", "DROP TABLE published_tasks",
+    "DROP TABLE album_maintenance", "DROP INDEX idx_published_album", "DROP TABLE task_page_receipts",
     "DROP TABLE album_update_checks", "DROP TABLE update_check_log",
     "DROP TRIGGER catalog_completed_job_insert", "DROP TRIGGER catalog_completed_job_update",
     "DROP TRIGGER catalog_revoked_completion", "DROP INDEX idx_jobs_queue",
@@ -49,7 +51,7 @@ def test_current_schema_mismatch_fails_before_any_initialization_write(instance,
     mutate(path, statement)
     before = {file.name: file.read_bytes() for file in path.parent.iterdir()}
     connect = Mock(side_effect=AssertionError("must validate before WAL or writable connection"))
-    snapshot = Mock(side_effect=AssertionError("do not fabricate a migration for corrupt v4"))
+    snapshot = Mock(side_effect=AssertionError("do not fabricate a migration for a corrupt current schema"))
     monkeypatch.setattr(db, "get_db", connect)
     monkeypatch.setattr(backup, "create_backup", snapshot)
     with pytest.raises(RuntimeError, match="数据库结构校验失败"):
@@ -83,10 +85,10 @@ def test_normal_current_startup_stays_idempotent_and_preserves_independent_catal
 
 def test_normal_legacy_v3_can_add_missing_unversioned_tables_after_snapshot(instance):
     path, backups = instance
-    mutate(path, "DROP TABLE album_update_checks; DROP TABLE update_check_log; PRAGMA user_version=3;")
+    mutate(path, DROP_PUBLICATION_SQL + "DROP TABLE album_update_checks; DROP TABLE update_check_log; PRAGMA user_version=3;")
     before = path.read_bytes()
     db.init_db()
-    archives = list(backups.glob("pre-migration-v3-to-v4-*.zip"))
+    archives = list(backups.glob(f"pre-migration-v3-to-v{db.CURRENT_SCHEMA_VERSION}-*.zip"))
     assert len(archives) == 1
     import zipfile
     with zipfile.ZipFile(archives[0]) as archive:
@@ -103,7 +105,40 @@ def test_normal_legacy_v3_can_add_missing_unversioned_tables_after_snapshot(inst
 def test_analyze_statistics_and_identifier_quoting_are_compatible(instance):
     path, _ = instance
     mutate(path, 'DROP INDEX idx_jobs_status; CREATE INDEX "idx_jobs_status" ON "jobs"("status"); ANALYZE;')
+    assert db._existing_schema() == db.CURRENT_SCHEMA_VERSION
+
+
+def test_genuine_v4_migration_preserves_catalog_and_does_not_invent_task_snapshots(instance, tmp_path):
+    from core.restore import restore_backup
+    path, backups = instance
+    mutate(path, DROP_PUBLICATION_SQL + "PRAGMA user_version=4; "
+           "INSERT INTO jobs(job_id,album_id,status) VALUES('legacy','123','completed'); "
+           "UPDATE resource_catalog SET title='Independent catalog'; DELETE FROM jobs;")
     assert db._existing_schema() == 4
+    db.init_db()
+    db.init_db()
+    archive, = backups.glob(f"pre-migration-v4-to-v{db.CURRENT_SCHEMA_VERSION}-*.zip")
+    restored = restore_backup(archive, tmp_path / "before-v5")
+    with closing(sqlite3.connect(restored.database)) as old:
+        assert old.execute("PRAGMA user_version").fetchone()[0] == 4
+        validate_schema(old, 4)
+    with closing(db.get_db()) as current:
+        validate_schema(current, db.CURRENT_SCHEMA_VERSION)
+        assert current.execute("PRAGMA user_version").fetchone()[0] == db.CURRENT_SCHEMA_VERSION
+        assert current.execute("SELECT title FROM resource_catalog").fetchone()[0] == "Independent catalog"
+        assert current.execute("SELECT COUNT(*) FROM published_tasks").fetchone()[0] == 0
+        assert current.execute("SELECT COUNT(*) FROM album_maintenance").fetchone()[0] == 0
+        assert current.execute("SELECT COUNT(*) FROM task_page_receipts").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("damage", ["DROP INDEX idx_jobs_queue", "CREATE TABLE published_tasks(private TEXT)"])
+def test_v4_preflight_remains_strict_before_v5_migration(instance, damage):
+    path, backups = instance
+    mutate(path, DROP_PUBLICATION_SQL + "PRAGMA user_version=4; " + damage)
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="结构校验失败"):
+        db.init_db()
+    assert path.read_bytes() == before and not backups.exists()
 
 
 @pytest.mark.parametrize("bad_sql", [
@@ -143,7 +178,7 @@ def test_unicode_identifier_casefold_does_not_hide_a_missing_column(instance):
 @pytest.mark.parametrize("version", [0, 1, 2, 3])
 def test_supported_historical_versions_migrate_from_real_column_layout(instance, version):
     path, backups = instance
-    statements = ["DROP INDEX idx_jobs_queue", "ALTER TABLE jobs DROP COLUMN queued_at"]
+    statements = [DROP_PUBLICATION_SQL, "DROP INDEX idx_jobs_queue", "ALTER TABLE jobs DROP COLUMN queued_at"]
     if version < 3:
         statements += [f"DROP TRIGGER {name}" for name in (
             "catalog_completed_job_insert", "catalog_completed_job_update", "catalog_revoked_completion")]
@@ -153,7 +188,7 @@ def test_supported_historical_versions_migrate_from_real_column_layout(instance,
     statements += [f"PRAGMA user_version={version}"]
     mutate(path, ";".join(statements))
     db.init_db()
-    assert len(list(backups.glob(f"pre-migration-v{version}-to-v4-*.zip"))) == 1
+    assert len(list(backups.glob(f"pre-migration-v{version}-to-v{db.CURRENT_SCHEMA_VERSION}-*.zip"))) == 1
     with closing(db.get_db()) as connection:
         validate_schema(connection, db.CURRENT_SCHEMA_VERSION)
     db.init_db()
@@ -201,7 +236,7 @@ def test_missing_internal_autoincrement_table_is_refused(instance):
 @pytest.mark.parametrize("version", [0, 1, 2])
 def test_historical_schema_still_requires_original_settings_table(instance, monkeypatch, version):
     path, backups = instance
-    mutate(path, "DROP TRIGGER catalog_completed_job_insert; DROP TRIGGER catalog_completed_job_update; "
+    mutate(path, DROP_PUBLICATION_SQL + "DROP TRIGGER catalog_completed_job_insert; DROP TRIGGER catalog_completed_job_update; "
                  "DROP TRIGGER catalog_revoked_completion; DROP TABLE resource_catalog; "
                  f"DROP TABLE settings; PRAGMA user_version={version}")
     before = path.read_bytes()
@@ -213,7 +248,7 @@ def test_historical_schema_still_requires_original_settings_table(instance, monk
 
 def test_v3_missing_catalog_index_is_refused_before_migration(instance, monkeypatch):
     path, backups = instance
-    mutate(path, "DROP INDEX idx_resource_catalog_album_latest; PRAGMA user_version=3")
+    mutate(path, DROP_PUBLICATION_SQL + "DROP INDEX idx_resource_catalog_album_latest; PRAGMA user_version=3")
     before = path.read_bytes()
     monkeypatch.setattr(db, "get_db", Mock(side_effect=AssertionError("no writer")))
     with pytest.raises(RuntimeError, match="结构校验失败"):
@@ -224,7 +259,7 @@ def test_v3_missing_catalog_index_is_refused_before_migration(instance, monkeypa
 def test_queue_migration_failure_rolls_back_schema_backfill_and_triggers(instance):
     from core.database_schema import QUEUE_INDEX_SQL
     path, _ = instance
-    mutate(path, "DROP INDEX idx_jobs_queue; ALTER TABLE jobs DROP COLUMN queued_at; PRAGMA user_version=3")
+    mutate(path, DROP_PUBLICATION_SQL + "DROP INDEX idx_jobs_queue; ALTER TABLE jobs DROP COLUMN queued_at; PRAGMA user_version=3")
 
     class FailingConnection(sqlite3.Connection):
         def execute(self, sql, *args, **kwargs):

@@ -13,7 +13,7 @@ from .path_utils import get_data_dir, get_backup_dir, get_download_root
 from .instance_lock import maintenance_lock
 from .database_schema import (
     CURRENT_SCHEMA_VERSION, BASE_SCHEMA_SQL, RESOURCE_TABLE_SQL, RESOURCE_INDEX_SQL,
-    QUEUE_INDEX_SQL, catalog_triggers, validate_schema, SchemaError,
+    QUEUE_INDEX_SQL, PUBLICATION_DDL, catalog_triggers, validate_schema, SchemaError,
 )
 
 # 资源库最大条目安全上限（防止全表扫描 OOM）
@@ -156,6 +156,12 @@ def _run_migrations(conn):
             for statement in triggers.values():
                 conn.execute(statement)
             conn.execute("PRAGMA user_version = 4")
+    if version < 5:
+        with conn:
+            conn.execute('BEGIN IMMEDIATE')
+            for ddl in PUBLICATION_DDL.values():
+                conn.execute(ddl)
+            conn.execute('PRAGMA user_version = 5')
 
 
 def _migrate_resource_catalog(conn):
