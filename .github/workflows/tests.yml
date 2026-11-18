@@ -5,7 +5,7 @@ name: Tests
 
 on:
   push:
-    branches: [main, codex/refactor-windows]
+    branches: [main, codex/refactor-windows, codex/windows-vnext]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -45,6 +45,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
+
+      - name: Check installed dependency compatibility
+        run: python -m pip check
 
       - name: Compile Python sources
         run: python -m compileall -q app.py launcher.py core routes

@@ -94,6 +94,11 @@ def check(release, check_launcher=False, check_restore=False):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(package.read(member))
         executable = extracted / "JMComic" / "JMComic.exe"
+        manifest = json.loads((release / 'release.json').read_bytes())
+        assert json.loads((executable.parent / '_internal/release.json').read_bytes()) == manifest
+        if manifest['format'] >= 2:
+            from tools.release_licenses import verify_bundle_licenses
+            verify_bundle_licenses(executable.parent, manifest['license_sha256'])
         untouched = root / "inherited-instance-must-not-be-opened"
         process = subprocess.run([str(executable), "self-check"], cwd=unrelated, env=environment(untouched),
                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,

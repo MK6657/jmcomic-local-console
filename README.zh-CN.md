@@ -8,14 +8,14 @@
 这是一个**本地 Python 应用**，不是浏览器扩展，也不是在线托管服务。
 请仅访问和下载你有权使用的内容。仓库不包含下载内容、个人凭据或第三方参考项目。
 
-**直接在 Windows 上使用：** [下载已验收的 x64 便携包，查看校验值](docs/WINDOWS_ACCEPTANCE.md)。完整解压后双击 `JMComic.exe`，无需安装 Python 或 Node。升级已有实例前请先看[备份与升级步骤](docs/WINDOWS_RELEASE.md)。
+**直接在 Windows 上使用：** [下载上一版已验收的 x64 便携包，查看校验值](docs/WINDOWS_ACCEPTANCE.md)。完整解压后双击 `JMComic.exe`，无需安装 Python 或 Node。升级已有实例前请先看[备份与升级步骤](docs/WINDOWS_RELEASE.md)。[vNext 审计处置表](docs/AUDIT_DISPOSITION_2026-11-18.md)记录旧包基线，不代表新版已验收。
 
 ## 后端复检分支
 
 本次 Windows 后端重构发布在 **`codex/refactor-windows`** 分支，`main` 保留原版本。
 请审核者先阅读[克隆与测试指南](docs/GITHUB_REVIEW.md)和[独立审查委托](docs/INDEPENDENT_BACKEND_AUDIT.md)。
 
-接手开发或复检请从[项目详细交接说明](docs/PROJECT_HANDOFF.md)开始，内含当前架构、固定产品提交、剩余问题、验证证据及可直接转交其他模型的任务文本。
+[项目详细交接说明](docs/PROJECT_HANDOFF.md)记录早期后端审查的架构、固定产品提交和当时证据。审查 `552bb65` 请用上面的 vNext 处置表。
 
 ```bash
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
@@ -119,7 +119,7 @@ python -m venv .venv
 如需代理，在设置页填写。代理认证信息会保存在本地 SQLite 数据库中，不要分享数据库。
 网络客户端使用 `jmcomic 2.7.10` 维护的域名和 APP 协议版本，不再覆盖为旧的 API 地址。
 API 与 HTML 使用各自的域名；Chrome 能打开网页不代表 APP 接口可用，网页端也可能拒绝程序请求（403）。
-下载目录固定为项目内的 `downloads/`。开启“打包后删除原图”会删除源图片，
+下载目录默认为实例目录内的 `downloads/`，可在启动前设置 `JMCONSOLE_DOWNLOAD_DIR`。开启“打包后删除原图”会删除源图片，
 没有明确需要时请保持关闭。
 
 ## 数据与隐私
@@ -173,11 +173,13 @@ Windows便携包通过 `tools/build_windows.py` 构建，只有EXE自检通过�
 
 - 启动失败：查看 `runtime/logs/launcher.log`，或直接运行 `app.py` 获取报错。
 - 缺少依赖：使用同一个 Python 解释器安装完整的 `requirements.txt`。
-- 搜索失败：检查网络、代理和日志；`core/settings.py` 中的上游域名可能随时间失效。
+- 搜索失败：用请求编号对照日志中的原始错误、状态码与耗时。API 与 HTML 默认分别使用 SDK 维护的域名；首页可打开不代表搜索接口可用。
 - 离线测试通过不代表上游联网、真实下载或 EXE 打包已经验证。
 - 打开文件夹和单实例互斥锁包含 Windows 专用实现，不保证其他平台可直接运行。
 
-## 本次维护
+## 历史维护记录
+
+以下测试数对应各小节当时的维护批次。上一版便携包的实测结果以开头链接的 Windows 验收记录为准。
 
 ### 章节、清理状态与 PDF 完整性
 
@@ -205,8 +207,7 @@ Windows便携包通过 `tools/build_windows.py` 构建，只有EXE自检通过�
 - ZIP/PDF/CBZ 文件扫描跳过符号链接和 Windows 目录联接；预览支持多层章节、
   自然页序，以及含空格、井号等字符的文件名。
 - 不完整或取消的下载不会自动打包、删除原图；重新下载失败会保留旧的有效图片。
-- 自动 ZIP/CBZ 留在任务对应目录；清理原图时保留归档、备注等文件。删除原图后，
-  本地阅读器没有图片可展示，可通过导出取得归档。
+- 自动 ZIP/CBZ 留在任务对应目录；清理原图时保留归档、备注等文件。当前阅读器可以直接读取 CBZ 和本程序生成的 ZIP，删除原图后仍能离线阅读其中的页面。
 - 同专辑任务避免并发写入；下载线程启动失败会释放队列容量。
 - 修改设置后，共享连接等使用者及超时后台请求结束再释放。
 - 单实例锁覆盖端口绑定前的启动阶段；缺少 Waitress 时明确提示安装依赖，
@@ -223,6 +224,6 @@ Windows便携包通过 `tools/build_windows.py` 构建，只有EXE自检通过�
 
 ## 第三方组件
 
-运行依赖见 `requirements.txt`。随仓库保存的前端资源保留原作者声明，详见
+运行依赖见 `requirements.txt`。本地前端资源和 Windows 便携运行时（含 pikepdf 和原生 qpdf）的许可证原文位置详见
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。项目原创代码尚未选定许可证，
 这不构成开源授权；如要按开源项目公开分发，应先选择许可证。

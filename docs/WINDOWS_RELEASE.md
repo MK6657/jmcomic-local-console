@@ -24,7 +24,7 @@ Windows 10 1903 及以上和 Windows 11 可将程序解压至含中文或其他 
 
 `launch --home` 要求所选目录里已有 `runtime/data/app.db`，打印位置后输入 `y` 才启动并允许升级，直接回车取消。只想打开一个已经运行的对应实例，可用 `JMComic.exe attach --home 'D:\JMComicRestored'`。升级前若有排队、运行、暂停任务或仍在使用的客户端，启动器暂缓自动替换。需要主动升级时请从旧服务的原窗口正常退出。
 
-下载时暂停一本，在途写入结束后，下一本可自动开始。恢复不会新建任务；同一实例中已确认且未变的图片即使关闭“跳过已存在的文件”也可以复用。如果已经开始移动图片或打包后清理原图，暂停会明确提示“正在整理”，这时不能把文件操作安全地拆成两段。
+下载时暂停一个任务，在途写入结束后，下一个任务可自动开始，包括同册的其他章节。恢复不会新建任务；已确认且未变的图片即使关闭“跳过已存在的文件”也可以复用。新任务完成即可按任务导出，书库只显示已发布内容。整册打包、移目录与清理在同册任务都结束后单独进行，失败可从下载中心重试整理。
 
 自检命令不需要日常实例停机，使用临时目录与本机临时端口，不启动任务调度器：
 
@@ -73,7 +73,11 @@ python -m venv .venv-build
 
 `requirements-build.txt` 自动使用 `requirements-windows-build-constraints.txt` 锁定本次发行所用的直接与间接依赖。构建脚本核对实装版本，发现不符会指出包名并停止。只在维护升级时刷新约束，再执行离线回归及解压验证；这组约束不限制日常源码开发。源码指纹用于区分打包输入，不是可逐字节复现的 ZIP 哈希。
 
+自 format 2 起，构建会把实装 Windows wheel 的许可文本、CPython 许可证、PyInstaller bootloader 例外及补充的原生库声明装入 `_internal/licenses/`。例如 PDF 合并既需 pikepdf 的 `LICENSE.txt`，也需它的 `third-party-licenses/qpdf.txt` 和 Windows qpdf 所含 OpenSSL、zlib 的声明。`release.json` 的 `license_sha256` 给出各文件的相对路径和摘要；发布前检查实际 PyInstaller 输出，解压验证时再次对照包内外清单。包根 `THIRD_PARTY_NOTICES.md` 给出来源。升级原生依赖时须复核二进制及其对应文本。成功发布后只清理本次创建的 `build/windows-<uuid>`，构建失败保留现场；现有 `releases/` 不覆盖。
+
 GitHub Actions 的 **Windows portable package** 在重构分支的打包配置、依赖或发行检查发生变化时运行，也支持 `windows-v*` 标签。普通页面或文档修改不会单独触发打包。工作流另支持手动触发；GitHub 的手动运行入口要求默认分支也包含这个工作流。它在 Windows runner 上安装约束版本，运行离线测试、本机队列用例、实际 EXE 及 ZIP 的启停和恢复检查。成功才保留 ZIP、SHA-256 和依赖清单供下载；此流程不自动创建 GitHub Release。
+
+只检查发行输入、不创建 EXE 或 ZIP 时，可在 `.venv-build` 安装 `requirements-build.txt` 和 `requirements-dev.txt` 后运行 `python -m pytest -q tests/test_portable_constraints.py tests/test_release_licenses.py`。它检查直接 import、锁定范围，以及 PyInstaller 数据文件的目标路径、qpdf 原文和漏收/篡改检测。首页取消终态的独立脚本是 `node tests/home_sse.cjs`。这些检查不能代替最终 ZIP 及恢复验收。
 
 需要验证实际ZIP，可显式运行以下脚本（普通pytest仍禁止网络）：
 
@@ -82,6 +86,18 @@ GitHub Actions 的 **Windows portable package** 在重构分支的打包配置�
 ```
 
 它核实ZIP哈希/CRC，解压到含中文和空格的临时目录，再从无Python的PATH及无关工作目录运行EXE自检和两次实际启停；检查继承的实例目录未被读取或创建，以及便携CLI能校验一份合成旧库的备份。`--check-launcher` 额外验证单实例锁被占用时，启动器的实际EXE子进程会退出，不接管或停止已有服务。另加 `--check-restore` 可让解压出的 EXE 从 v2 临时实例制作完整备份，再故意切换下载根向同名 ZIP 备份。后一次必须拒绝，原包哈希不变，且能恢复到新目录；脚本会核对恢复后的图片字节和任务路径。这一项调用普通维护命令，须在服务锁空闲时执行。
+
+**vNext 候选包交接：** 若构建时存在 `docs/WINDOWS_VNEXT_REVIEW.md`，其内容计入指纹，并以 `WINDOWS_VNEXT_REVIEW.md` 原名放在 EXE 旁。发布后另写的 `docs/WINDOWS_VNEXT_ACCEPTANCE.md` 不参与指纹，也不入包。
+
+在构建所用的源码检出目录运行下面的专项，把路径换成**从待验 ZIP 解压出的 EXE**。驱动和样本生成器使用 `.venv-build`；服务进程直接运行该 EXE，工作目录在临时实例内，`PATH` 只含 System32。
+
+```powershell
+.\.venv-build\Scripts\python.exe tests/check_vnext_portable.py 'D:\候选包解压目录\JMComic\JMComic.exe'
+```
+
+脚本先让 EXE 从空目录建库，核对 v5 和三张新表，再正常停机。源码只在离线样本准备阶段写入同一书目的两个任务：A 暂停且留有一页和回执，B 已发布两页。随后两次由 EXE 的隔离前台入口运行正常应用：检查本地阅读返回 B 的原始页，A 的真实工作页不可直读或按任务导出；分别核对 B 任务和书目的 ZIP 成员与字节、PDF 页数与图像内容。首次通过普通设置接口保存回环代理，重启再次读取设置、阅读和导出，并核对 A 的工作页与回执仍在。
+
+前台入口使用独立互斥体，并限制 Python socket 和 libcurl 只能访问本机；不使用日常启动器、浏览器、生产实例或真实上游。每次停机前核对启动记录、PID、健康响应中的实例目录身份和一次性令牌，只通知该次进程并等待其退出。无法核实退出时返回非零并报告保留的临时目录和 PID。退出码 0 后，把末行 JSON 中的 EXE SHA-256、候选源码指纹及检查项与发行 ZIP 的 SHA-256 一起记入独立验收记录。该专项不验证真实 SDK 下载、外部代理转发或日常启动器交互。
 
 产物尚未签名。当前机器构建及自检不能替代干净Windows虚拟机的兼容性验收；真实上游、完整安装/卸载体验、Docker仍需分别验收。
 

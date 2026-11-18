@@ -8,7 +8,9 @@ on:
     paths:
       - '.github/workflows/windows-portable.yml'
       - 'build.spec'
-      - 'tools/build_windows.py'
+      - 'tools/*.py'
+      - 'tools/licenses/**'
+      - 'THIRD_PARTY_NOTICES.md'
       - 'tools/windows-portable.manifest'
       - 'requirements*.txt'
       - 'core/release_check.py'

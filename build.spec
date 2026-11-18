@@ -7,17 +7,17 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy
 ROOT = Path(SPECPATH).resolve()
 metadata = Path(os.environ["JMCONSOLE_BUILD_METADATA"])
 datas = [(str(ROOT / "templates"), "templates"), (str(ROOT / "static"), "static"),
-         (str(metadata), ".")]
+         (str(metadata), "."), (str(metadata.parent / "licenses"), "licenses")]
 # These SDK packages discover implementations dynamically. The remaining native
 # packages (curl_cffi, Pillow, pikepdf) use PyInstaller's standard/contrib hooks.
-for package in ("jmcomic", "commonx"):
+for package in ("jmcomic", "common"):
     datas += collect_data_files(package)
-for distribution in ("jmcomic", "commonx", "curl_cffi", "Pillow", "img2pdf", "Flask", "requests", "waitress"):
+for distribution in ("jmcomic", "commonx", "curl_cffi", "Pillow", "img2pdf", "pikepdf", "packaging", "Flask", "requests", "waitress"):
     datas += copy_metadata(distribution)
 
 a = Analysis(
     [str(ROOT / "desktop.py")], pathex=[str(ROOT)], binaries=[], datas=datas,
-    hiddenimports=collect_submodules("jmcomic") + collect_submodules("commonx")
+    hiddenimports=collect_submodules("jmcomic") + collect_submodules("common.postman")
                   + ["PIL.WebPImagePlugin", "PIL.GifImagePlugin"],
     hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=["pytest", "PyInstaller", "tkinter", "matplotlib", "numpy", "pandas"],

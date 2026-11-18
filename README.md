@@ -10,7 +10,7 @@ This is a **local Python application**, not a browser extension or a hosted serv
 Only use it for content you are authorized to access and download. This repository
 does not include downloaded content, credentials, or the upstream reference project.
 
-**Run on Windows:** [Download the verified x64 portable package and checksums](docs/WINDOWS_ACCEPTANCE.md).
+**Run on Windows:** [Download the previously verified x64 portable package and checksums](docs/WINDOWS_ACCEPTANCE.md). The [vNext audit disposition](docs/AUDIT_DISPOSITION_2026-11-18.md) identifies that immutable baseline; it is not acceptance of a new build.
 Extract the whole package and open `JMComic.exe`. No separate Python or Node installation is required.
 See the [backup and upgrade instructions](docs/WINDOWS_RELEASE.md) before using an existing instance.
 
@@ -20,8 +20,7 @@ The Windows backend refactor is published on **`codex/refactor-windows`**; `main
 keeps the previous version. Reviewers should follow the [clone and test guide](docs/GITHUB_REVIEW.md)
 and [independent audit instructions](docs/INDEPENDENT_BACKEND_AUDIT.md).
 
-Start with the [project handoff](docs/PROJECT_HANDOFF.md) for the current architecture,
-verified product commit, remaining audit items, acceptance evidence, and a review prompt.
+The [project handoff](docs/PROJECT_HANDOFF.md) records the earlier backend review, verified product commit, and evidence for that snapshot. For findings against `552bb65`, use the vNext disposition above.
 
 ```bash
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
@@ -159,8 +158,7 @@ a working browser page does not prove APP API availability, and HTML hosts can r
 programmatic requests with 403.
 
 Configure a proxy on the Settings page if needed. Its credentials remain in the
-local SQLite database; never share that database. Download output is fixed to
-`downloads/`. Optional "delete originals after packing" removes source images;
+local SQLite database; never share that database. Downloads default to `downloads/` under the instance root; set `JMCONSOLE_DOWNLOAD_DIR` before startup to select another root. Optional "delete originals after packing" removes source images;
 keep it disabled unless intended.
 
 ## Local data and privacy
@@ -228,7 +226,9 @@ see the [build guide](docs/WINDOWS_RELEASE.md).
 - Offline tests do not prove upstream availability, real downloads or EXE packaging.
 - Windows-specific folder opening and the single-instance mutex are not portable.
 
-## Maintenance changes
+## Earlier maintenance history
+
+Test counts in this section belong to the individual changes at the time. For the previous portable package use the linked Windows acceptance record.
 
 ### Chapter, cleanup and PDF correctness
 
@@ -266,7 +266,7 @@ Validation: 137 tests passed, one Windows file-symlink permission case skipped.
 - Incomplete/canceled downloads do not trigger automatic packaging or original-image
   deletion. Failed image replacement preserves the previous valid image.
 - Automatic ZIP/CBZ archives stay in the recorded output directory. Original-image
-  cleanup preserves archives, notes and other files; readers need original images.
+  cleanup preserves archives, notes and other files. The current reader reads archived pages directly from CBZ and application-created ZIP files, including when the original images are gone.
 - Same-album workers cannot write concurrently; failed thread startup releases capacity.
 - Shared client retirement waits for in-flight and timed-out background calls to finish.
 - Windows mutex protection applies even before startup binds a port. Missing Waitress
@@ -283,7 +283,6 @@ Validation: 137 tests passed, one Windows file-symlink permission case skipped.
 
 ## Third-party components
 
-Runtime dependencies are listed in `requirements.txt`. Vendored frontend assets
-retain their notices; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Runtime dependencies are listed in `requirements.txt`. See [third-party notices](THIRD_PARTY_NOTICES.md) for the frontend assets and license texts shipped with the Windows runtime, including pikepdf and its native qpdf library.
 No license has been selected for the project's original code yet. This is not an
 open-source license grant; select a license before distributing it as open source.

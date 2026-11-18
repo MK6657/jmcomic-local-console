@@ -1,8 +1,41 @@
 """A new SDK dependency cannot silently enter the portable runtime unpinned."""
-import pytest
+import ast
+from importlib import metadata
+from pathlib import Path
+import sys
 from types import SimpleNamespace
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+import pytest
+
 from tools import build_windows
+
+
+def test_direct_imports_are_declared_in_source_runtime_requirements():
+    root = Path(__file__).resolve().parents[1]
+    owners = metadata.packages_distributions()
+    declared = {canonicalize_name(Requirement(line).name)
+                for raw in (root / 'requirements.txt').read_text(encoding='utf-8').splitlines()
+                if (line := raw.partition('#')[0].strip())}
+    missing = set()
+    for pattern in ('*.py', 'core/*.py', 'routes/*.py'):
+        for source in root.glob(pattern):
+            for node in ast.walk(ast.parse(source.read_bytes(), filename=str(source))):
+                if isinstance(node, ast.ImportFrom) and node.level == 0:
+                    modules = [node.module]
+                elif isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                else:
+                    continue
+                for module in modules:
+                    top = module.split('.')[0]
+                    if top in sys.stdlib_module_names or (root / (top + '.py')).exists() or (root / top / '__init__.py').exists():
+                        continue
+                    providers = owners.get(top, [])
+                    if providers and declared.isdisjoint(map(canonicalize_name, providers)):
+                        missing.add((source.name, module, tuple(providers)))
+    assert not missing, sorted(missing)
 
 
 def test_release_refuses_unpinned_or_drifted_transitive_requirement(tmp_path, monkeypatch):

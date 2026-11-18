@@ -16,11 +16,12 @@ import zipfile
 ROOT = Path(__file__).resolve().parent.parent
 if __name__ == "__main__" and not __package__:
     sys.path.insert(0, str(ROOT))
+OPTIONAL_REVIEW = "WINDOWS_VNEXT_REVIEW.md"
 SOURCE_PATTERNS = ("app.py", "desktop.py", "launcher.py", "jmcomic_cli.py", "core/*.py", "routes/*.py",
                    "templates/**/*.html", "static/**/*", "requirements*.txt", "build.spec", "tools/*.py",
-                   "tools/windows-portable.manifest",
+                   "tools/windows-portable.manifest", "tools/licenses/**/*",
                    "docs/WINDOWS_RELEASE.md", "docs/BACKEND_REVIEW.md", "docs/DATA_MAINTENANCE.md",
-                   "docs/AUDIT_FIXES.md",
+                   "docs/AUDIT_FIXES.md", f"docs/{OPTIONAL_REVIEW}",
                    "LICENSE", "THIRD_PARTY_NOTICES.md")
 
 
@@ -113,7 +114,18 @@ def verified_packages():
     return packages
 
 
+def copy_release_docs(root, bundle):
+    shutil.copyfile(root / "docs/WINDOWS_RELEASE.md", bundle / "README-Windows.md")
+    for name in ("BACKEND_REVIEW.md", "DATA_MAINTENANCE.md", "AUDIT_FIXES.md"):
+        shutil.copyfile(root / "docs" / name, bundle / name)
+    review = root / "docs" / OPTIONAL_REVIEW
+    if review.is_file():
+        shutil.copyfile(review, bundle / review.name)
+
+
 def build(output=None):
+    from tools.release_licenses import stage_licenses, verify_bundle_licenses
+
     if sys.platform != "win32" or platform.machine().upper() not in {"AMD64", "X86_64"}:
         raise RuntimeError("请在64位Windows上构建Windows发行包")
     packages = verified_packages()
@@ -122,10 +134,11 @@ def build(output=None):
     work = ROOT / "build" / ("windows-" + uuid.uuid4().hex)
     work.mkdir(parents=True)
     manifest = {
-        "format": 1, "application": "jmcomic-local-console", "platform": "windows-x64",
+        "format": 2, "application": "jmcomic-local-console", "platform": "windows-x64",
         "source_sha256": source_id, "python": platform.python_version(),
         "built_at": datetime.now(timezone.utc).isoformat(),
         "packages": packages,
+        "license_sha256": stage_licenses(ROOT, work / "licenses"),
     }
     metadata = work / "release.json"
     metadata.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -135,18 +148,17 @@ def build(output=None):
     if source_fingerprint() != source_id:
         raise RuntimeError("构建期间源代码发生变化，产物未发布；请在代码稳定后重建")
     bundle = work / "dist" / "JMComic"
+    verify_bundle_licenses(bundle, manifest["license_sha256"])
     result = check_bundle(bundle / "JMComic.exe", cwd=work)
     lifecycle = check_bundle(bundle / "JMComic.exe", cwd=work, command="lifecycle-check")
+    copy_release_docs(ROOT, bundle)
     if source_fingerprint() != source_id:
         raise RuntimeError("自检期间源码发生变化，产物未发布")
     (bundle / "SELF_CHECK.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     (bundle / "LIFECYCLE_CHECK.json").write_text(json.dumps(lifecycle, indent=2) + "\n", encoding="utf-8")
-    shutil.copyfile(ROOT / "docs" / "WINDOWS_RELEASE.md", bundle / "README-Windows.md")
-    for name in ("BACKEND_REVIEW.md", "DATA_MAINTENANCE.md", "AUDIT_FIXES.md"):
-        shutil.copyfile(ROOT / "docs" / name, bundle / name)
-    for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
-        if (ROOT / name).is_file():
-            shutil.copyfile(ROOT / name, bundle / name)
+    shutil.copyfile(ROOT / "THIRD_PARTY_NOTICES.md", bundle / "THIRD_PARTY_NOTICES.md")
+    if (ROOT / "LICENSE").is_file():
+        shutil.copyfile(ROOT / "LICENSE", bundle / "LICENSE")
     publish = work / "publish"
     publish.mkdir()
     # Both locations are known children of this invocation's build directory.
@@ -163,6 +175,11 @@ def build(output=None):
     if os.path.lexists(target):
         raise FileExistsError("发行目标在构建期间已出现，产物未覆盖")
     os.rename(publish, target)  # Windows refuses replacement of an existing directory.
+    if work.resolve().parent == (ROOT / "build").resolve() and not target.is_relative_to(work.resolve()):
+        try:
+            shutil.rmtree(work)
+        except OSError as error:
+            print(f"发行已完成，未能清理本次临时目录 {work}: {error}", file=sys.stderr)
     return target
 
 

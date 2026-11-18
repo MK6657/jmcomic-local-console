@@ -99,6 +99,28 @@ def test_release_zip_contains_bundle_and_preserves_files(tmp_path):
         zip_bundle(bundle, archive)
 
 
+def test_optional_candidate_review_is_shipped_and_hashed_but_post_release_acceptance_is_neither(tmp_path):
+    from tools.build_windows import copy_release_docs, source_fingerprint
+    docs, bundle = tmp_path / 'docs', tmp_path / 'JMComic'
+    docs.mkdir()
+    bundle.mkdir()
+    for name in ('WINDOWS_RELEASE.md', 'BACKEND_REVIEW.md', 'DATA_MAINTENANCE.md', 'AUDIT_FIXES.md'):
+        (docs / name).write_text('required')
+    initial = source_fingerprint(tmp_path)
+    acceptance = 'WINDOWS_VNEXT_ACCEPTANCE.md'
+    (docs / acceptance).write_text('results after release')
+    copy_release_docs(tmp_path, bundle)
+    assert not (bundle / acceptance).exists() and source_fingerprint(tmp_path) == initial
+    review = 'WINDOWS_VNEXT_REVIEW.md'
+    for content in (b'first candidate', b'updated handoff'):
+        (docs / review).write_bytes(content)
+        copy_release_docs(tmp_path, bundle)
+        assert (bundle / review).read_bytes() == content and not (bundle / acceptance).exists()
+        current = source_fingerprint(tmp_path)
+        assert current != initial
+        initial = current
+
+
 @pytest.mark.parametrize("returncode,stdout", [
     (0, '{"status":"error","exit_code":1}'),
     (1, '{"status":"ok","exit_code":0}'),

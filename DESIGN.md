@@ -74,7 +74,7 @@ typography:
 
 # JMComic 本地下载控制台 — 设计文档
 
-> 基于 jmcomic v2.7.0，Flask + Bootstrap 5，本地运行
+> Windows 本地控制台，Flask + Bootstrap 5；运行版本见 `requirements.txt`，便携包的实装版本见其 `release.json`。
 > theme_mode: eye-care（护眼风格，已锁定）
 
 ---
@@ -83,17 +83,17 @@ typography:
 
 | 项目 | 内容 |
 |------|------|
-| 项目根目录 | `D:\Hermes\禁漫下载搜索插件\` |
-| 下载目录 | `D:\Hermes\禁漫下载搜索插件\downloads\` |
-| 核心引擎 | `jmcomic` v2.7.0（pip 包） |
+| 程序与实例根目录 | 源码目录或 EXE 所在目录；`JMCONSOLE_HOME` 可单独指定实例根目录 |
+| 下载目录 | 默认 `<实例根>/downloads/`，可在启动前设置 `JMCONSOLE_DOWNLOAD_DIR` |
+| 核心引擎 | `jmcomic` 2.7.10；API 与 HTML 默认域名分别由 SDK 维护 |
 | Web 框架 | Flask |
 | 前端 | Bootstrap 5 + 原生 HTML/CSS/JS（本地资源，无 CDN） |
 | 数据库 | SQLite（WAL 模式） |
 | 实时推送 | Server-Sent Events (SSE) |
 | 启动方式 | `python app.py` → `http://127.0.0.1:5000` |
-| 生产服务器 | waitress（回退 Flask 开发服务器） |
+| HTTP 服务器 | Waitress；缺失时启动失败 |
 | 监听地址 | 默认 `127.0.0.1`（仅本机） |
-| 单实例保护 | PID 锁文件防多开 |
+| 单实例保护 | Windows 命名互斥体；`runtime/data/flask.pid` 和 `flask.json` 供启动器核验运行实例 |
 | 主题锁定 | **eye-care 护眼风格** — 暖灰/浅米色背景，降低蓝光刺激 |
 
 ---
@@ -120,7 +120,7 @@ typography:
 
 | 功能 | 说明 |
 |------|------|
-| 🔍 漫画搜索 | 4 种排序（最新/浏览量/点赞/图片数），原生标签语法（AND/OR/NOT） |
+| 🔍 漫画搜索 | 页面提供最新/浏览量/点赞排序，API 还支持图片数排序；原生标签语法（AND/OR/NOT） |
 | 📄 漫画详情 | 章节列表、标签、作者、浏览量、点赞数 |
 | ⬇️ 下载管理 | 多任务并发、暂停/继续/取消、指数退避重试 |
 | 📦 CBZ 打包 | 下载后自动打包，可选删除原始文件 |
@@ -129,7 +129,7 @@ typography:
 | 🏷️ 资源库+标签 | 标签云筛选、多标签 AND 组合、自动同步（18comic）、用户自定义标签 |
 | 🖼️ 图片预览 | 内嵌网页查看器 |
 | ⏰ 定时调度 | 定时刷新/下载 |
-| 🔒 单实例保护 | PID 文件防多开 |
+| 🔒 单实例保护 | 服务和离线维护共用 Windows 互斥体 |
 
 ---
 
@@ -185,10 +185,11 @@ Response:
       "title": "xxx",
       "author": "xxx",
       "tags": ["中文", "同人"],
-      "cover_url": "/api/cover/123456"
+      "cover_url": "https://example.invalid/cover.jpg"
     }
   ],
   "total": 42,
+  "has_more": true,
   "page": 1,
   "page_size": 20
 }
@@ -208,7 +209,7 @@ GET /api/album/<album_id>
 Response:
 {
   "status": "ok",
-  "album": {
+  "data": {
     "album_id": "123456",
     "title": "xxx",
     "author": "xxx",
@@ -218,9 +219,9 @@ Response:
     "views": 546,
     "likes": 91,
     "description": "...",
-    "cover": "/api/cover/123456",
+    "cover": "https://example.invalid/cover.jpg",
     "photos": [
-      {"photo_id": "123456", "title": "第1话", "page_count": 65}
+      {"photo_id": "123456", "title": "第1话", "page_count": 65, "page_count_known": true}
     ],
     "chapter_count": 1
   }
@@ -230,7 +231,7 @@ Response:
 ### 4.4 封面 API
 
 ```
-GET /api/cover/<album_id>  →  302 重定向到封面图片 URL
+GET /api/cover/<album_id>  →  有安全可读的本地散图时返回图片，否则 302 到 SDK 封面 URL
 ```
 
 ### 4.5 下载任务 API
@@ -240,7 +241,7 @@ POST /api/jobs
   Body: { "album_id": "123456", "photo_ids": ["123456"] }
   → { "status": "ok", "job_id": "job_xxxxx" }
 
-GET  /api/jobs                       → 全部任务列表
+GET  /api/jobs?page=&page_size=&status= → 任务分页、各状态总数及 pages；默认每页 50，上限 200
 GET  /api/jobs/<job_id>              → 单任务详情
 GET  /api/jobs/<job_id>/events       → SSE 事件流（实时进度）
 POST /api/jobs/<job_id>/cancel       → 取消任务
@@ -248,7 +249,8 @@ POST /api/jobs/<job_id>/pause        → 暂停任务
 POST /api/jobs/<job_id>/resume       → 恢复任务
 POST /api/jobs/<job_id>/retry        → 重试 / 重新下载（失败、已取消、已完成的任务；未结束的任务 400）
 DELETE /api/jobs/<job_id>            → 删除任务
-DELETE /api/jobs/clear               → 清空已完成/失败/已取消任务
+POST /api/jobs/clear/completed、/api/jobs/clear/failed、/api/jobs/clear/canceled → 按状态清记录
+POST /api/jobs/clear/finished        → 清空上述三种终态记录
 POST /api/jobs/<job_id>/open-folder  → 打开下载目录
 ```
 
@@ -257,6 +259,7 @@ POST /api/jobs/<job_id>/open-folder  → 打开下载目录
 ```
 GET  /api/settings   → { "status": "ok", "settings": {...} }
 POST /api/settings    Body: { "key": "value", ... }  → { "status": "ok" }
+GET  /api/settings/export；POST /api/settings/import（multipart 的 file 字段）
 ```
 
 ### 4.7 收藏 API
@@ -266,9 +269,10 @@ GET    /api/wishlist?page=&q=&sort=             → 收藏列表（分页）
 GET    /api/wishlist/<album_id>                  → 单个收藏
 POST   /api/wishlist                              Body: { album_id, title, author, cover_url }
 DELETE /api/wishlist/<album_id>                   → 取消收藏
-POST   /api/wishlist/import                       Body: { "items": [...] }  → 批量导入
+POST   /api/wishlist/import                       Body: { "raw": "123,456" }  → 批量导入车号
 GET    /api/wishlist/export                       → 导出全部收藏
-POST   /api/wishlist/batch-check                  Body: { "album_ids": [...] }  → 批量检查收藏状态
+POST   /api/wishlist/check                        Body: { "album_ids": [...] }  → 批量检查收藏状态
+POST   /api/wishlist/import-file                  → 从上传文件导入收藏
 POST   /api/wishlist/download                     Body: { "ids": [...] }  → 收藏单行「下载」（整部），见 4.12
 ```
 
@@ -284,13 +288,16 @@ POST   /api/library/<album_id>/tags                Body: { "tags": [...] }  → 
 DELETE /api/library/<album_id>/tags                Body: { "tags": [...] }  → 删除标签
 POST   /api/library/<album_id>/tags/sync           → 从 18comic 同步标签
 GET    /api/library/search-tags?q=                  → 标签自动补全
+POST   /api/library/tags/sync-all                   → 启动批量同步
 ```
 
 ### 4.9 预览 API
 
 ```
-GET /api/preview/<album_id>/list                    → 该漫画所有章节/图片列表
-GET /api/preview/cover/                             → 预览用封面
+GET /api/preview/<album_id>                         → 本地章节/图片列表
+GET /api/preview-img/<path:img_path>                → 本地散图
+POST /api/preview/available                         → 批量查询本地可读状态
+GET /api/local-chapters/<album_id>                  → 本地章节清点
 GET /api/online/<album_id>                          → 在线页列表（结构同本地列表，另附 photo_id、skipped_chapters）
 GET /api/online-img/<photo_id>/<index>              → 单页图片：首次从上游下载解码，缓存到 runtime/cache/online/
 GET /api/preview-archive/<album_id>/<n>             → 只剩压缩包时的第 n 页（从 CBZ / 本程序的 ZIP 里读出，不解压到下载目录）
@@ -299,7 +306,16 @@ GET /api/preview-archive/<album_id>/<n>             → 只剩压缩包时的第
 ### 4.10 导出 API
 
 ```
-GET /api/export/wishlist/format                     → 收藏导出（指定格式）
+POST /api/export/<job_id>/zip、/api/export/<job_id>/pdf           → 按任务导出
+POST /api/library/<album_id>/export/zip、/api/library/<album_id>/export/pdf → 按资源记录导出
+GET /api/wishlist/export                            → 收藏导出
+```
+
+### 系统状态与日志（`routes/api_system.py`）
+
+```
+GET /api/system/health、/api/system/diagnose、/api/system/logs
+POST /api/system/clear-cache、/api/system/logs/flush、/api/system/logs/open-folder
 ```
 
 ### 4.11 检查新章节 API
@@ -367,6 +383,8 @@ canceled  已取消
 
 ### jobs 表
 
+以下仅示意任务进度字段；建库及迁移以 `core/database_schema.py`、`core/database.py` 为准，其中包括 `queued_at`、`superseded_at` 和资源记录触发器。
+
 ```sql
 CREATE TABLE jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -392,8 +410,8 @@ CREATE TABLE jobs (
 ```
 创建任务(queued)
   → 调度器领取(running)
-  → 逐页下载（指数退避重试，最多4次）
-     → 检查暂停状态 → 等待直到恢复
+  → 逐页下载（依据已保存的重试次数、可用节点与总超时；零重试只尝试一次）
+     → 暂停时等待在途写入排空并让出名额；恢复沿用原任务、重新排队
      → 检查取消/删除 → 终止
   → 整理目录（按作者/扁平化）
   → CBZ 打包（可选）
@@ -415,6 +433,8 @@ CREATE TABLE jobs (
 | `wishlist` | 收藏清单 | album_id(UNIQUE), title, author, cover_url, download_status |
 | `album_tags` | 标签 | album_id, tag, source(auto/user) |
 | `album_meta` | 漫画元数据缓存 | album_id, title, author, cover_url, tags_synced_at |
+| `resource_catalog` | 独立于任务历史的资源位置；清除完成记录后仍可阅读/导出 | job_id, album_id, output_path |
+| `album_detail_cache` | 有有效期的详情缓存 | album_id, detail_json, cover_cdn_url, cached_at |
 | `album_update_checks` | 检查新章节（每部漫画一行） | album_id, baseline_ids（下载时记下的上游章节）, new_chapters / new_count（已确认的新章节）, removed_ids, result, last_success_at, error_kind, fail_count, next_check_at |
 | `update_check_log` | 检查记录（只留最近 2000 条） | album_id, trigger（auto/manual）, started_at, outcome, error_kind, requests, upstream_count, new_count |
 
@@ -431,77 +451,24 @@ CREATE TABLE jobs (
 
 ## 七、项目结构
 
-```
-D:\Hermes\禁漫下载搜索插件\
-│
-├── app.py                    # Flask 入口 + PID 单实例锁
-├── launcher.py               # 启动器
-├── jmcomic_cli.py            # CLI 工具
-├── requirements.txt          # Python 依赖
-├── DESIGN.md                 # ← 本文件（设计规范，已锁定）
-├── design_library_tags.md    # 资源库+标签系统设计方案（备查）
-│
-├── core\                     # 核心业务层
-│   ├── __init__.py
-│   ├── database.py           # SQLite CRUD（6 张表）
-│   ├── jm_service.py         # jmcomic API 封装 + 下载引擎
-│   ├── settings.py           # 设置管理 + jmcomic option 构建
-│   ├── job_manager.py        # 后台任务调度器
-│   ├── scheduler.py          # 定时下载调度器
-│   ├── progress.py           # SSE 进度推送
-│   ├── packer.py             # CBZ 打包
-│   ├── path_utils.py         # 路径工具
-│   ├── path_guard.py         # 路径安全守卫
-│   └── logger.py             # 日志系统
-│
-├── routes\                   # Flask 蓝图（9 个）
-│   ├── __init__.py
-│   ├── page_routes.py        # 页面路由（9 个页面）
-│   ├── api_search.py         # 搜索 + 搜索历史
-│   ├── api_album.py          # 漫画详情
-│   ├── api_jobs.py           # 任务 CRUD + SSE
-│   ├── api_settings.py       # 设置管理
-│   ├── api_wishlist.py       # 收藏管理
-│   ├── api_library.py        # 资源库 + 标签管理
-│   ├── api_preview.py        # 图片预览
-│   └── api_export.py         # 收藏导出
-│
-├── templates\                # Jinja2 模板（9 个）
-│   ├── base.html             # 基础布局（导航栏 + Toast）
-│   ├── index.html            # 首页
-│   ├── search.html           # 搜索页
-│   ├── detail.html           # 漫画详情 + 标签编辑
-│   ├── downloads.html        # 下载管理
-│   ├── settings.html         # 设置页
-│   ├── wishlist.html         # 收藏清单
-│   ├── library.html          # 资源库 + 标签云
-│   └── preview.html          # 图片预览
-│
-├── static\
-│   ├── css/style.css         # 自定义样式（含资源库/标签/响应式）
-│   ├── js/search.js          # 搜索页 JS
-│   ├── images/no-cover.svg   # 缺省封面
-│   └── vendor\               # Bootstrap 5 本地资源
-│       └── bootstrap\...
-│       └── bootstrap-icons\...
-│
-├── data\                     # 运行时数据
-│   ├── app.db                # SQLite 数据库
-│   └── flask.pid             # PID 锁文件
-│
-├── downloads\                # 下载文件存放
-│
-├── logs\                     # 应用日志
-│   └── app.log
-│
-└── build\                    # PyInstaller 构建输出
-```
+当前部署使用以下目录。结构以 `core/database_schema.py`、`core/path_utils.py`、`routes/` 的蓝图和装饰器为准；不把文件个数作为接口契约。
+
+| 路径 | 内容 |
+| --- | --- |
+| `app.py`、`launcher.py`、`desktop.py`、`jmcomic_cli.py` | 服务、源码启动器、便携入口与维护命令 |
+| `core/`、`routes/` | 下载、读写、调度与生命周期；HTML、API 蓝图 |
+| `templates/`、`static/` | Jinja 页面和错误页；按页加载的 JS、本地字体/图标和样式 |
+| `<实例>/runtime/data/`、`runtime/logs/` | SQLite 数据库、实例记录；应用及启动器日志 |
+| `<实例>/downloads/`、`runtime/cache/`、`runtime/backups/` | 默认下载、缓存与备份；可在启动前分别覆盖，详见 [Windows 使用说明](docs/WINDOWS_RELEASE.md) |
+| `tools/`、`build.spec`、`releases/` | 构建输入与新的便携发行目录 |
 
 ---
 
 ## 八、Eye-care 护眼风格详细设计说明
 
 > 以下规则适用于 theme_mode = eye-care 的本项目。
+
+首页只为可见页面上仍在运行的任务订阅进度。收到取消终态，原百分比徽章改用已有次要徽章显示“已取消”，隐藏进度条；返回标签或从页面缓存恢复都不重新订阅该任务。完成和失败沿用现有成功/失败徽章。复用已有元素、颜色和字号，不新增视觉 token。
 
 ### 设计目标
 
@@ -768,9 +735,8 @@ Primary(蓝色) / Secondary(暖灰+边框) / Ghost(全透明) / Danger(红色)
 4. **字体**层级必须遵守 typography token
 5. **圆角/阴影**必须遵守对应 token
 6. 如需覆盖上述规则，必须**先更新本 DESIGN.md**，再改代码
-7. AGENTS.md 的行为规范完全适用（见 `D:\Hermes\templates\AGENTS.md`）
+7. 开发时同时遵守本项目 [AGENTS.md](AGENTS.md)。
 
 ---
 
-*本文件由 DD 自动生成，基于 `D:\Hermes\templates\DESIGN.md` 母模板。*
-*生成时间：2026-07-02 · 基于代码实际状态*
+*初版生成于 2026-07-02。带日期的交互记录说明当时的决策；Windows 发行证据按包分别记录。*
