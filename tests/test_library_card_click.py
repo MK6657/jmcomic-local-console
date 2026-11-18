@@ -393,12 +393,14 @@ const cardIds = p => p.grid.children.filter(k => k.classList && k.classList.cont
   }
 
   out.localActions = [];
+  out.coverSources = [];
   for (const readable of [false, true]) {
     const p = page({cardClick: 'true'}), data = listReply(456), exports = [];
     data.items[0].readable = readable;
     p.win.downloadExport = (...args) => exports.push(args);
     p.respond('/api/library?', data); await flush();
     const card = find(p.grid, hasClass('library-card'));
+    out.coverSources.push(find(card, hasClass('card-cover')).src);
     for (const action of ['export-zip', 'export-pdf']) {
       const button = find(card, x => x.dataset.action === action);
       if (button) p.click(button);
@@ -435,6 +437,10 @@ CONTROLS = ["titleLink", "coverLink", "coverImg", "info", "infoIcon", "read", "p
 def _query(url):
     parts = urlsplit(url)
     return parts.path, parse_qs(parts.query)
+
+
+def test_readable_card_uses_the_same_cover_endpoint_as_detail(harness):
+    assert harness["coverSources"] == ["/c.jpg", "/api/cover/456"]
 
 
 def test_tag_index_keeps_selected_tags_and_filters_combined_on_the_server(harness):

@@ -275,12 +275,14 @@
         var ticket = el('span', 'shelf-ticket', title);
         ticket.setAttribute('aria-hidden', 'true');
         coverLink.appendChild(ticket);
-        var coverUrl = item.cover_url === '/static/images/no-cover.svg' ? '' : item.cover_url;
-        if (coverUrl || item.readable) {
+        // Match the detail page for locally readable books. The upstream
+        // catalog thumbnail may already have been cropped before we receive it.
+        var coverUrl = item.readable ? '/api/cover/' + encodeURIComponent(albumId) : item.cover_url;
+        if (coverUrl && coverUrl !== '/static/images/no-cover.svg') {
             var img = el('img', 'card-cover thumb-img');
             img.loading = 'lazy';
             img.alt = '';
-            img.src = coverUrl || '/api/cover/' + encodeURIComponent(albumId);
+            img.src = coverUrl;
             coverLink.appendChild(img);
         }
         var pedestal = el('div', 'shelf-pedestal');

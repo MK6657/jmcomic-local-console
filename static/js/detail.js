@@ -82,7 +82,7 @@
 
         html += '<div class="monograph-front"><div class="monograph-plate"><div class="bound-book monograph-cover">';
         html += '<img src="/api/cover/' + encodeURIComponent(album.album_id) + '" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title) + ' 封面" decoding="async">';
-        html += '</div><span class="monograph-seal">藏书阁</span></div><div class="monograph-imprint">';
+        html += '</div></div><div class="monograph-imprint">';
         html += '<p class="folio-kicker">MONOGRAPH <b>书目扉页</b></p><h1 class="card-title">' + window.escapeHtml(album.title) + '</h1>';
         html += '<p class="monograph-byline">' + window.escapeHtml(album.author || '作者未署名') + '</p>';
         html += '<div class="monograph-meta"><span class="album-id-seal">JM ' + window.escapeHtml(album.album_id) + '</span>';

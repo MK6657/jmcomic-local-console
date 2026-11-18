@@ -58,11 +58,10 @@
 .monograph-front { display: grid; grid-template-columns: minmax(160px, 29%) minmax(0,1fr); align-items: center; gap: clamp(24px,4vw,48px); padding-block: 32px; }
 .monograph-plate { padding: 24px; background: var(--bg-sidebar); display: grid; place-items: center; position: relative; border-radius: var(--r-md); }
 .monograph-cover { width: 100%; max-width: 232px; aspect-ratio: 3/4; }
-.album-monograph .monograph-cover .detail-cover { display: block; width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover; border: 0; border-radius: 0; box-shadow: none; margin: 0; }
+.album-monograph .monograph-cover .detail-cover { display: block; width: 100%; height: 100%; max-width: none; max-height: none; object-fit: contain; border: 0; border-radius: 0; box-shadow: none; margin: 0; }
 .album-monograph .monograph-cover .detail-cover-placeholder { display: grid; align-content: center; justify-items: center; gap: 16px; background: var(--bg-subtle); color: var(--seal); }
 .detail-cover-placeholder span { font: 600 32px var(--font-serif); border: 2px solid var(--seal); padding: 8px; writing-mode: vertical-rl; }
 .detail-cover-placeholder small { font: 12px var(--font-serif); letter-spacing: .16em; }
-.monograph-seal { position: absolute; bottom: 8px; right: 8px; color: var(--seal); border: 1px solid var(--seal); padding: 0 4px; font: 600 12px var(--font-serif); background: var(--bg-card); }
 .monograph-imprint { min-width: 0; overflow-wrap: anywhere; }
 .monograph-imprint h1 { font: 600 clamp(28px, 4vw, 44px)/1.28 var(--font-serif); margin: 8px 0; color: var(--ink); }
 .monograph-byline { font: 500 16px var(--font-serif); margin: 0 0 16px; }
