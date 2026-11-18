@@ -98,10 +98,13 @@ def enqueue_download(album_id: str, title: str, photo_ids: list[str]) -> Enqueue
         return _enqueue(conn, album_id, str(title or album_id)[:500], selected)
 
 
-def finish_download(job_id: str, to_status: str, *, photo_ids=(), **extra) -> bool:
+def finish_download(job_id: str, to_status: str, *, photo_ids=(), publication=None, **extra) -> bool:
     """Only the still-running attempt may publish a terminal result and its side effects."""
     if to_status not in ("completed", "failed"):
         raise ValueError("下载结果只能是 completed 或 failed")
+    if extra.get("error_message") is not None:
+        from .logger import sanitize
+        extra["error_message"] = sanitize(str(extra["error_message"]))
     with db.transaction() as conn:
         row = conn.execute("SELECT album_id FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
@@ -110,6 +113,9 @@ def finish_download(job_id: str, to_status: str, *, photo_ids=(), **extra) -> bo
             return False
         db._refresh_wishlist_after_job_delete(conn, [row["album_id"]])
         if to_status == "completed":
+            if publication is not None:
+                from .publication import record
+                record(conn, job_id, row['album_id'], publication)
             update_store.absorb_downloaded(row["album_id"], photo_ids, conn=conn)
     discard_checkpoint(job_id)
     return True

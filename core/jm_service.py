@@ -20,7 +20,8 @@ from jmcomic import (
 
 from . import database as db
 from .download_checkpoint import DownloadCheckpoint
-from .logger import log, bind_request_id
+from .publication import Workspace, private_path
+from .logger import log, bind_request_id, sanitize
 from .progress import progress_manager
 from .settings import get_settings, build_jmcomic_option
 from .validation import safe_dirname as _safe_dirname
@@ -344,7 +345,7 @@ def _download_image_single_attempt(
     try:
         # Existing files need the same error boundary as downloaded files. An
         # invalid/bomb image must be replaced or recorded, never abort a chapter.
-        reusable = pass_num == 1 and ((skip and not (gif and refetch_gif))
+        reusable = pass_num == 1 and ((not getattr(checkpoint, 'isolated', False) and skip and not (gif and refetch_gif))
                                       or (checkpoint is not None and checkpoint.contains(img_path)))
         if not (reusable and _valid_image(img_path)):
             with staged_file(img_path) as staged:
@@ -366,7 +367,13 @@ def _download_image_single_attempt(
                         img_url=img_url, img_save_path=str(staged.path),
                         scramble_id=scramble_id, decode_image=True, **options,
                     )
-                staged.publish(_valid_image, before_replace=check_publish)
+                def verify_page(path):
+                    if not _valid_image(path):
+                        return False
+                    if getattr(checkpoint, 'isolated', False):
+                        checkpoint.remember_digest(img_path, checkpoint.digest(path))
+                    return True
+                staged.publish(verify_page, before_replace=check_publish)
         # 确认下载成功后计数
         with lock:
             if checkpoint is not None:
@@ -377,7 +384,7 @@ def _download_image_single_attempt(
     except Exception as e:
         if (stop_event is not None and stop_event.is_set()) or (checkpoint and _should_stop(job_id, None, stop_event)):
             return  # Runtime owns recovery; a stop is neither a failed page nor a retry.
-        if pass_num == 1 and pending_images is not None:
+        if pass_num == 1 and pending_images is not None and not image_download.local_write_error(e):
             # 首趟：只存位置信息，不存 client（线程退出后 client 会关闭）
             with lock:
                 pending_images.append({
@@ -390,7 +397,7 @@ def _download_image_single_attempt(
             )
         else:
             with lock:
-                err_msg = f"第 {idx+1} 页下载失败: {e}"
+                err_msg = f"第 {idx+1} 页下载失败: {image_download.failure_detail(e)}"
                 log.warning(f"图片下载最终失败 job_id={job_id} error={err_msg}")
                 failed_pages.append(err_msg)
                 db.update_job(job_id, error_message=err_msg[:500])
@@ -431,8 +438,14 @@ def _valid_image(path):
     try:
         with Image.open(path) as image:
             image.verify()
+        # verify() need not decode pixels (including WebP/JPEG). A page whose
+        # header survived a truncated write is not a valid resume point.
+        with Image.open(path) as image:
+            for frame in range(getattr(image, 'n_frames', 1)):
+                image.seek(frame)
+                image.load()
         return True
-    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+    except (OSError, EOFError, ValueError, SyntaxError, Image.DecompressionBombError):
         return False
 
 
@@ -946,37 +959,38 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
             log.warning(f"记录检查新章节的基线失败（不影响下载）album_id={album_id} error={e}")
 
         dl_root = str(DOWNLOAD_ROOT)
-        os.makedirs(dl_root, exist_ok=True)
-
-        album_dir = Path(dl_root) / f"{_safe_dirname(album.name)}_{album_id}"
+        album_dir = None
         organize_mode = get_settings().get("organize_mode", "none")
-        existing = _reusable_album_dir(album_id) if photo_ids or organize_mode == "by_author" else None
-        if checkpoint.directory is not None:
-            album_dir = checkpoint.prepare_directory(Path(dl_root))
-        elif existing is not None:
+        existing = _reusable_album_dir(album_id)
+        if existing is not None and (photo_ids or organize_mode == "by_author"):
             album_dir = existing
+        if checkpoint.directory is not None and not private_path(checkpoint.directory, dl_root):
+            album_dir = checkpoint.directory
+        from .download_layout import album_output_dir
+        album_dir = album_output_dir(dl_root, job_id, album.name, album_id, photos_to_download,
+                                     preferred=album_dir, pack=get_settings().get('auto_pack') == 'true')
+        os.makedirs(dl_root, exist_ok=True)
         if not is_safe_path(album_dir):
             raise ValueError("专辑输出路径越权")
         # 目录不在（被删除了）或只剩没有图片的空壳（例如“打开文件夹”替排队中的重试建出的）：更早完成、写到这里的
         # 任务，它们的文件已经不在了。这次下载会把目录重新建出来——标记那些任务被取代，这次若失败或被取消，
         # 残缺的几页不能让它们重新显示成完整、可离线阅读（core.local_availability）。
         # 只剩能读的压缩包（自动打包后删了原图）不算空壳：那次下载的内容还在
-        recreated = not has_local_pages(album_dir)
-        if recreated:
-            checkpoint.previous_done = 0
-        album_dir.mkdir(parents=True, exist_ok=True)
-        forget_local_state(album_dir)  # 马上要往里写：各页面下次重新判断，不等有效期
+        if not has_local_pages(album_dir):
+            db.mark_completed_jobs_superseded(album_id, str(album_dir), job_id)
+        workspace = Workspace(dl_root, job_id, album_id, album_dir, checkpoint)
+        seeds = workspace.seed(photos_to_download, existing or album_dir,
+                               get_settings().get('skip_existing') == 'true', _valid_image, image_is_gif)
+        album_dir = workspace.work
+        checkpoint.own(album_dir)
+        for seed in seeds:
+            checkpoint.remember_digest(seed, checkpoint.digest(seed))
         written_dirs.append(album_dir)
         checkpoint.directory = album_dir
         output_path = str(album_dir)
 
         db.update_job(job_id, total_pages=total_pages, done_pages=min(checkpoint.previous_done, total_pages),
                       output_path=output_path)
-        if recreated:
-            superseded = db.mark_completed_jobs_superseded(album_id, output_path, job_id)
-            if superseded:
-                log.info(f"下载目录已重新建出，更早完成的任务不再算本地可读 job_id={job_id} album_id={album_id} "
-                         f"count={superseded}")
         tracker.push("progress", {
             "job_id": job_id, "status": "running",
             "done_pages": min(checkpoint.previous_done, total_pages), "total_pages": total_pages,
@@ -1053,23 +1067,13 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
                 if _should_stop(job_id, tracker, stop_event):
                     raise DownloadInterrupted("stopped" if stop_event is not None and stop_event.is_set() else "canceled")
 
-            def path_changed(path):
-                checkpoint.directory = Path(path)
-                written_dirs.append(checkpoint.directory)
-                db.update_job(job_id, output_path=path)
-
-            settings = get_settings()
-            keep_location = existing is not None or album_dir.parent != Path(dl_root)
-            changes_page_locations = (organize_mode == "flat" or (organize_mode == "by_author" and not keep_location)
-                                      or (settings.get("auto_pack") == "true" and settings.get("delete_originals") == "true"))
-            if changes_page_locations and begin_file_finalization is not None and not begin_file_finalization(job_id):
+            if begin_file_finalization is not None and not begin_file_finalization(job_id):
                 return
-            output_path = finalize_files(output_path, organize_mode, album, photos_to_download,
-                                         keep_location=keep_location, settings=settings,
-                                         check_control=check_file_control, path_changed=path_changed,
-                                         archiving=lambda: tracker.push("archiving", {
-                                             "job_id": job_id, "status": "archiving", "message": "正在打包 CBZ...",
-                                         }))
+            manifest = workspace.seal(photos_to_download, check_file_control)
+            view, publication = workspace.project(manifest, album, get_settings(), check_file_control)
+            publication[2]['keep_location'] = existing is not None and workspace.target == existing
+            output_path = str(view)
+            written_dirs.append(view)
 
         if _should_stop(job_id, tracker, stop_event):
             return
@@ -1124,7 +1128,8 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
         else:
             log.info(f"下载任务完成 job_id={job_id} total_pages={total_pages} output_path={output_path}")
             ok = finish_download(job_id, "completed", done_pages=done_val, completed_at=now,
-                                 photo_ids=[str(p.photo_id) for p in photos_to_download])
+                                 photo_ids=[str(p.photo_id) for p in photos_to_download],
+                                 publication=publication, output_path=output_path)
             if not ok:
                 log.warning(f"transition_job_status 失败，状态可能已被取消 job_id={job_id}")
             if ok:
@@ -1133,6 +1138,10 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
                     "output_path": output_path,
                     "done_pages": done_val, "total_pages": total_pages,
                 })
+                try:
+                    workspace.release_pages(manifest)
+                except (OSError, ValueError) as error:
+                    log.warning(f"任务完成，保留未清理的工作副本 job_id={job_id} error={type(error).__name__}")
 
         tracker.close()
 
@@ -1142,7 +1151,7 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
         if stop_event is not None and stop_event.is_set():
             log.info(f"停机期间上游调用结束，保留任务供恢复 job_id={job_id} error={type(e).__name__}")
             return
-        err_msg = str(e)[:1000]
+        err_msg = sanitize(str(e))[:1000]
         log.error(f"下载任务异常 job_id={job_id} error={err_msg}")
         # 异常处理前先检查是否已被取消，防止覆盖 canceled 状态
         try:

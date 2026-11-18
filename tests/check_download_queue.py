@@ -155,7 +155,8 @@ try:
     first, second = db.get_job(bad), db.get_job(good)
     if pause_run:
         assert requests == [slow_path, second_path, next_path, third_path], requests
-        assert hashlib.sha256(saved.read_bytes()).hexdigest() == digest
+        final_page, = Path(first['output_path']).rglob('00001.webp')
+        assert hashlib.sha256(final_page.read_bytes()).hexdigest() == digest
         assert len(db.get_all_jobs()) == 2 and first["done_pages"] == first["total_pages"] == 3
         expected_first = ["00001.webp", "00002.webp", "00003.webp"]
     else:

@@ -224,25 +224,29 @@ def test_download_terminal_state_and_safe_packing(client, album_dir, monkeypatch
     tracker = progress_manager.create_tracker("job_audit")
     def chapter(*args):
         target = args[3]
-        make_image(target / "page.png")
+        directory = service._chapter_output_dir(target, photo)
+        make_image(directory / '00001.webp')
         (target / "notes.txt").write_text("keep", encoding="utf-8")
         if outcome == "canceled":
             db.transition_job_status(
                 "job_audit", ["queued", "running", "paused", "completed", "failed", "canceled"], "canceled",
             )
         elif outcome == "success":
+            args[10].confirm(directory / '00001.webp')
             args[6][0] = 1
         else:
             raise OSError("chapter failed before counting pages")
     monkeypatch.setattr(service, "_download_chapter", chapter)
     try:
         service.download_album_job("job_audit", "123", [])
+        from publication_support import maintenance_tick
+        maintenance_tick()
         job = db.get_job("job_audit")
         assert job["status"] == {"partial": "failed", "canceled": "canceled", "success": "completed"}[outcome]
         output = Path(job["output_path"])
         assert output.is_dir()
-        assert (output / "notes.txt").is_file()
-        assert (output / "page.png").exists() == (outcome != "success")
+        assert list(album_dir.parent.rglob('notes.txt'))  # unknown file is never deleted or published
+        assert bool(list(output.rglob('*.webp'))) == (outcome != 'success')
         assert bool(list(output.glob("*.zip"))) == (outcome == "success")
     finally:
         progress_manager.remove_tracker("job_audit")

@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+from contextlib import closing
 
 from . import database as db
 from .file_tree import is_link
@@ -75,6 +76,11 @@ class DownloadCheckpoint:
         return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
 
     def contains(self, path):
+        if getattr(self, 'isolated', False):
+            if not path.is_file() or is_link(path):
+                return False
+            expected = self.receipts.get(self._key(path))
+            return expected is not None and expected == self.digest(path)
         expected = self.pages.get(self._key(path))
         if expected is None:
             return False
@@ -87,9 +93,28 @@ class DownloadCheckpoint:
         """Called under the page counter lock, after image verification or publication."""
         key = self._key(path)
         signature = self._signature(path)
+        if getattr(self, 'isolated', False) and key not in self.receipts:
+            self.remember_digest(path, self.digest(path))
         if self.pages.get(key) != signature:
             self.pages[key] = signature
             self.dirty = True
+
+    @staticmethod
+    def digest(path):
+        with path.open('rb') as handle:
+            return hashlib.file_digest(handle, 'sha256').hexdigest()
+
+    def own(self, directory):
+        self.directory, self.isolated = directory, True
+        with closing(db.get_db()) as conn:
+            self.receipts = dict(conn.execute('SELECT page,digest FROM task_page_receipts WHERE job_id=?', (self.job_id,)))
+
+    def remember_digest(self, path, digest):
+        key = self._key(path)
+        if self.receipts.get(key) != digest:
+            with db.transaction() as conn:
+                conn.execute('INSERT OR REPLACE INTO task_page_receipts VALUES(?,?,?)', (self.job_id, key, digest))
+            self.receipts[key] = digest
 
     def retire(self, status):
         """Called after all writers drain, under the manager's per-job command lock."""

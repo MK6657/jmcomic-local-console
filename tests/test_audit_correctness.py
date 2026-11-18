@@ -234,12 +234,25 @@ def test_real_completion_path_never_reports_partially_committed_success(client, 
     monkeypatch.setattr(service, "is_readable", lambda _: True)
     monkeypatch.setattr(service, "_reusable_album_dir", lambda _: None)
     monkeypatch.setattr(service, "_mark_chapter_current", lambda *args: None)
-    monkeypatch.setattr(service, "_download_chapter", lambda *args, **kwargs: args[6].__setitem__(0, 1))
+    def chapter(*args):
+        target = service._chapter_output_dir(args[3], args[4]) / '00001.webp'
+        with Image.new('RGB', (3, 3), 'green') as image:
+            image.save(target, 'WEBP')
+        args[10].confirm(target)
+        args[6][0] = 1
+    monkeypatch.setattr(service, "_download_chapter", chapter)
+    terminals = []
+    finish = service.finish_download
+    def observe_finish(job, status, **kwargs):
+        terminals.append(status)
+        return finish(job, status, **kwargs)
+    monkeypatch.setattr(service, 'finish_download', observe_finish)
     update_settings({"photo_threads": 1, "auto_pack": False, "organize_mode": "none"})
     tracker = progress_manager.create_tracker("audit_complete")
     events = tracker.subscribe()
     try:
         service.download_album_job("audit_complete", "123", ["102"])
+        assert terminals[:2] == ['completed', 'failed']
         assert db.get_job("audit_complete")["status"] == ("running" if fault == "both_statuses" else "failed")
         assert not db.resource_records(["123"])
         assert db.get_wishlist("123")["download_status"] != "completed"

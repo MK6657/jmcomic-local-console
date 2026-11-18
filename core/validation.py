@@ -12,6 +12,9 @@
   - 通用参数校验
 """
 
+from functools import lru_cache
+import os
+from pathlib import Path
 import re
 from typing import Optional
 
@@ -48,7 +51,7 @@ def validate_job_id(job_id: str) -> bool:
 
 def require_job_id(job_id: str) -> Optional[str]:
     """校验 job_id，非法时返回错误消息，合法返回 None"""
-    if not _RE_JOB_ID.match(job_id):
+    if not validate_job_id(job_id):
         return "job_id 格式非法"
     return None
 
@@ -91,51 +94,88 @@ def get_image_mime(suffix: str, fallback: str = "application/octet-stream") -> s
 # ============================================================
 
 # 非法文件名字符（Windows 不允许出现在文件名中的字符）
-_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*]')
+_INVALID_FILENAME_CHARS = re.compile(r'[\x00-\x1f\x7f\ud800-\udfff<>:"/\\|?*]')
 
 # Windows 保留名（不区分大小写）
 _WINDOWS_RESERVED: set[str] = {
-    "con", "prn", "aux", "nul",
-    *(f"com{i}" for i in range(1, 10)),
-    *(f"lpt{i}" for i in range(1, 10)),
+    "con", "prn", "aux", "nul", "conin$", "conout$",
+    *(prefix + digit for prefix in ("com", "lpt") for digit in "123456789¹²³"),
 }
 
 
-def safe_filename(name: str, max_len: int = 200) -> str:
-    """清理文件名中的非法字符，返回安全的文件名。
+def _safe_component(name: str, max_len: int) -> str:
+    if max_len < 1:
+        raise ValueError("max_len 必须为正数")
+    limit = min(max_len, 255) * 2
+    def truncate(text):
+        return text.encode("utf-16-le")[:limit].decode("utf-16-le", errors="ignore").rstrip(". ")
+    clean = truncate(_INVALID_FILENAME_CHARS.sub("_", name).strip())
+    if clean.partition(".")[0].rstrip(" ").casefold() in _WINDOWS_RESERVED:
+        clean = truncate("_" + clean)
+    return clean
 
-    不处理 Windows 保留名（适用于文件扩展名后的普通文件名）。
-    若结果为空，返回 "export"。
-    """
-    name = _INVALID_FILENAME_CHARS.sub("_", name)
-    name = name.rstrip(". ")  # Windows 尾部 . 和空格行为不一致
-    if len(name) > max_len:
-        name = name[:max_len].rstrip(". ")
-    name = name.strip()
-    return name or "export"
+
+def safe_filename(name: str, max_len: int = 200) -> str:
+    """清理 Windows 文件名（包括带扩展名的设备名）。"""
+    return _safe_component(name, max_len) or "export"[:max_len]
 
 
 def safe_dirname(name: str, max_len: int = 200) -> str:
-    """清理目录名中的非法字符，处理 Windows 保留名。
-
-    比 safe_filename 更严格：检测 CON / PRN / AUX / NUL / COM1-9 / LPT1-9，
-    并在前缀加 '_' 避免文件系统冲突。
-    若结果为空，生成一个随机名称。
-    """
+    """清理 Windows 目录名；空名称使用随机后缀。"""
     import uuid
+    return _safe_component(name, max_len) or f"untitled_{uuid.uuid4().hex[:8]}"[:max_len]
 
-    name = _INVALID_FILENAME_CHARS.sub("_", name)
-    name = name.rstrip(". ")
-    # 检测 Windows 保留名
-    stem = name.split(".")[0].lower()
-    if stem in _WINDOWS_RESERVED:
-        name = "_" + name
-    if len(name) > max_len:
-        name = name[:max_len].rstrip(". ")
-    name = name.strip()
-    if not name:
-        name = f"untitled_{uuid.uuid4().hex[:8]}"
-    return name
+
+@lru_cache(maxsize=1)
+def legacy_windows_paths() -> bool:
+    """Ask about this process (both its manifest and system policy matter)."""
+    if os.name != 'nt':
+        return False
+    import ctypes
+    try:
+        enabled = ctypes.WinDLL('ntdll').RtlAreLongPathsEnabled
+        enabled.restype = ctypes.c_ubyte  # BOOLEAN, not BOOL
+        return not enabled()
+    except (AttributeError, OSError):  # older Windows has no opt-in
+        return True
+
+
+def path_units(path) -> int:
+    return len(str(path).encode('utf-16-le', errors='surrogatepass')) // 2
+
+
+def directory_budget(parent, *leaves, archive=False) -> int:
+    """Available UTF-16 units for NAME in parent/NAME/<relative file>.
+
+    On legacy Win32 reserve the terminator for files and 8.3 creation headroom
+    for directories. An archive repeats NAME in its own filename.
+    """
+    if not legacy_windows_paths() or (os.name == 'nt' and str(parent).startswith('\\\\?\\')):
+        return 251 if archive else 255
+    slot = Path(parent).absolute() / 'x'
+    budget = min(255, 248 - path_units(slot) + 1)
+    for leaf in leaves:
+        file = slot / leaf
+        budget = min(budget, 259 - path_units(file) + 1, 248 - path_units(file.parent) + 1)
+    if archive:
+        budget = min(budget, (259 - path_units(slot / 'x.cbz') + 2) // 2)
+    return budget
+
+
+def short_root_error():
+    return ValueError(r'下载路径过长，无法保留完整名称标识或创建暂存文件。请将下载根目录 JMCONSOLE_DOWNLOAD_DIR 改为较短的路径（例如 D:\JM）后重试。')
+
+
+def fit_dirname(title, suffix, budget, *, archive=False):
+    """Shorten only the already sanitized display text; preserve the identity suffix."""
+    available = min(budget, 255) - path_units(suffix)
+    if available < 0 or (not suffix and available < 1):
+        raise short_root_error()
+    text = _safe_component(title, available) if available else ''
+    if os.name != 'nt':  # POSIX NAME_MAX counts bytes, including any later archive extension.
+        room = 255 - len(os.fsencode(suffix)) - (4 if archive else 0)
+        text = text.encode('utf-8')[:room].decode('utf-8', errors='ignore').rstrip('. ')
+    return (text or ('' if suffix else '_')) + suffix
 
 
 # ============================================================
