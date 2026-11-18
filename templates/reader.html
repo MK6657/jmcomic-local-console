@@ -7,13 +7,19 @@
 <main class="continuous-reader" data-album-id="{{ album_id }}" data-source="{{ 'online' if online else 'local' }}" tabindex="-1">
     <header class="reader-toolbar">
         <div class="reader-heading">
+            <span class="folio-kicker">ATELIER　/　长卷画廊</span>
             <h1 id="reader-title">{{ title }}</h1>
-            <p class="text-muted small mb-0">{% if online %}在线阅读：页面实时从网络加载，不下载、不保存到资源库。{% endif %}轻触画面或空白处，或按 M 显示阅读工具；Esc 收起。</p>
+            <span class="source-slip">{{ '在线展阅' if online else '本地典藏' }}</span>
+            <p class="folio-note">{% if online %}在线阅读：页面实时从网络加载，不下载、不保存到资源库。{% endif %}轻触画页或按 M 显示阅读工具；← → 翻页，Esc 收起。</p>
         </div>
+        <a class="btn btn-outline-secondary btn-sm" href="{{ '/album/' ~ album_id if online else '/search' }}"{% if not online %} data-nav-memory="/search"{% endif %} id="reader-origin">← 返回</a>
         <button type="button" class="btn btn-outline-secondary btn-sm" id="reader-tools-toggle" aria-controls="reader-tools" aria-expanded="false">阅读工具</button>
     </header>
     <section id="reader-tools" class="reader-tools" aria-label="阅读工具" hidden>
         <span class="reader-progress" id="reader-progress" aria-live="polite">{{ '正在获取在线页面…' if online else '正在读取本地图片…' }}</span>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="reader-prev" aria-label="上一页" disabled>‹</button>
+        <input type="range" id="reader-range" min="1" max="1" value="1" aria-label="阅读进度" disabled>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="reader-next" aria-label="下一页" disabled>›</button>
         <div class="reader-tools-group">
             <a class="btn btn-outline-secondary btn-sm" href="{{ '/album/' ~ album_id if online else '/search' }}"{% if not online %} data-nav-memory="/search"{% endif %} id="reader-back"><i class="bi bi-arrow-left" aria-hidden="true"></i> 返回</a>
             <div class="btn-group btn-group-sm" role="group" aria-label="快速定位">
@@ -47,9 +53,6 @@
         </div>
     </div>
     <div id="reader-pages" aria-label="漫画页面"></div>
-    <div id="reader-more" class="text-center my-3 d-none">
-        <button type="button" class="btn btn-outline-primary" id="reader-load-more">继续加载</button>
-    </div>
     <p class="text-center text-muted my-3 d-none" id="reader-end">已到末页</p>
 </main>
 {% endblock %}

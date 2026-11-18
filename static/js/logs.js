@@ -16,6 +16,7 @@
   var MAX_LIMIT = 500;
   var SEARCH_DELAY_MS = 300;
   var SUMMARY_PREFIX = '↑ 同类消息';
+  var privateField = /^(?:cookie|set-cookie|token|password|secret|authorization|proxy-authorization|proxy_password|apikey|api_key|private_key|access_key|refresh_token|credential|session|jwt|bearer|access_token|x-api-key)$/i;
 
   var LEVEL_LABELS = {
     CRITICAL: '严重',
@@ -70,10 +71,23 @@
 
   // ── DOM 小工具（只用 textContent） ──
 
+  function safeText(value) {
+    return String(value)
+      .replace(/(\b(?:https?|socks5h?):\/\/)([^\s/?#]+)/gi, function (url, scheme, authority) {
+        var at = authority.lastIndexOf('@');
+        if (at >= 0) return scheme + '****@' + authority.slice(at + 1);
+        if (authority.includes(':') && !authority.startsWith('[') && !/:\d+$/.test(authority)) return scheme + '****';
+        return url;
+      })
+      .replace(/(\b(?:(?:set-)?cookie|(?:proxy-)?authorization)\s*:\s*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*/gi, '$1****')
+      .replace(/(\b(?:basic|bearer)\s+)[^\s,;'"]+/gi, '$1****')
+      .replace(/(\b(?:password|proxy_password|secret|token|access_token|refresh_token|api_key|apikey|cookie|authorization)["']?[ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;}]+)/gi, '$1****');
+  }
+
   function el(tag, className, text) {
     var node = document.createElement(tag);
     if (className) node.className = className;
-    if (text !== undefined && text !== null) node.textContent = String(text);
+    if (text !== undefined && text !== null) node.textContent = safeText(text);
     return node;
   }
 
@@ -98,9 +112,13 @@
   function formatExtra(extra) {
     if (!extra || typeof extra !== 'object') return '';
     return Object.keys(extra).map(function (key) {
-      var value = extra[key];
+      var value = privateField.test(key) ? '****' : extra[key];
       if (value !== null && typeof value === 'object') {
-        try { value = JSON.stringify(value); } catch (e) { value = String(value); }
+        value = JSON.stringify(value, function (name, item) {
+          if (privateField.test(name)) return '****';
+          if (Array.isArray(item) && item.length === 2 && typeof item[0] === 'string' && privateField.test(item[0])) return [item[0], '****'];
+          return item;
+        });
       }
       return key + '=' + value;
     }).join('  ');
@@ -121,7 +139,7 @@
     clear(box);
     box.className = 'log-viewer-status' + (kind ? ' log-viewer-status--' + kind : '');
     if (kind === 'loading') {
-      var spinner = el('span', 'spinner-border spinner-border-sm');
+      var spinner = el('i', 'bi bi-hourglass');
       spinner.setAttribute('aria-hidden', 'true');
       box.appendChild(spinner);
     } else if (kind === 'error') {
@@ -150,7 +168,7 @@
   // ── 渲染 ──
 
   function renderSummary(data) {
-    if (els.dir) els.dir.textContent = data.log_dir || '—';
+    if (els.dir) els.dir.textContent = safeText(data.log_dir || '—');
     if (els.totalSize) {
       var files = Array.isArray(data.files) ? data.files.length : 0;
       els.totalSize.textContent = formatSize(data.total_size_mb) + (files ? '（' + files + ' 个文件）' : '');
@@ -161,13 +179,13 @@
   }
 
   function renderEntry(entry) {
-    var level = String(entry.level || '').toUpperCase();
+    var level = safeText(entry.level || '').toUpperCase();
     var kind = levelKind(level);
     var item = el('li', 'log-entry log-entry--' + kind);
 
     var meta = el('div', 'log-entry-meta');
     var time = el('time', 'log-entry-time', entry.time || '时间未知');
-    if (entry.time) time.setAttribute('datetime', String(entry.time).replace(' ', 'T'));
+    if (entry.time) time.setAttribute('datetime', safeText(entry.time).replace(' ', 'T'));
     meta.appendChild(time);
 
     var badge = el('span', 'log-level log-level--' + kind, LEVEL_LABELS[level] || level || '未知');
@@ -182,13 +200,13 @@
       meta.appendChild(rid);
       var trace = el('button', 'log-entry-trace', '只看此请求');
       trace.type = 'button';
-      trace.dataset.requestId = String(entry.request_id);
+      trace.dataset.requestId = safeText(entry.request_id);
       trace.title = '在全部日志中筛选同一请求（或同一下载任务）的记录';
       meta.appendChild(trace);
     }
     item.appendChild(meta);
 
-    var text = String(entry.message || '');
+    var text = safeText(entry.message || '');
     var nl = text.indexOf('\n');
     var firstLine = nl === -1 ? text : text.slice(0, nl);
     var rest = nl === -1 ? '' : text.slice(nl + 1);
@@ -306,11 +324,11 @@
     if (btn) btn.disabled = true;
     window.apiFetch(OPEN_FOLDER_ENDPOINT, { method: 'POST', timeoutMs: 15000 })
       .then(function (data) {
-        showToast((data && data.message) || '已打开日志文件夹', 'success');
+        showToast(safeText((data && data.message) || '已打开日志文件夹'), 'success');
       })
       .catch(function (err) {
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
-        showToast(err.message || '打开日志文件夹失败', err.status === 501 ? 'warning' : 'danger');
+        showToast(safeText(err.message || '打开日志文件夹失败'), err.status === 501 ? 'warning' : 'danger');
       })
       .then(function () {
         if (btn) btn.disabled = false;
@@ -333,7 +351,8 @@
   function applySearch(value) {
     clearTimeout(searchTimer);
     searchTimer = null;
-    var query = String(value || '').trim();
+    var query = safeText(value || '').trim();
+    if (els.search && query !== String(value || '').trim()) els.search.value = query;
     if (query === state.query && state.loaded) return;
     state.query = query;
     state.limit = DEFAULT_LIMIT;

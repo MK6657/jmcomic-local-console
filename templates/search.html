@@ -1,16 +1,18 @@
 {% extends "base.html" %}
-{% block title %}JMComic 下载控制台 - 搜索{% endblock %}
+{% block title %}检索探索 · 藏书阁{% endblock %}
+{% block head_extra %}<link rel="stylesheet" href="{{ asset_url('css/atelier-shelf.css') }}">{% endblock %}
 
 {% block content %}
 
-<!-- ===== 搜索栏 ===== -->
-<div class="card mb-4">
-    <div class="card-body">
+<div class="atelier-collection" data-layout="shelf">
+<header class="shelf-heading"><div><p class="shelf-kicker">ATELIER / 02</p><h1>检索探索</h1></div><span class="shelf-caption">上游书目检索</span></header>
+<div class="shelf-filter-sheet">
         <form id="search-form" class="row g-3 align-items-end">
             <div class="col-12 col-md-5">
                 <label for="search-input" class="form-label">关键词或车号</label>
                 <input type="text"
                        id="search-input"
+                       maxlength="200"
                        class="form-control"
                        placeholder="输入关键词或车号..."
                        value="{{ keyword or '' }}">
@@ -21,6 +23,7 @@
                     <option value="latest" {% if sort == 'latest' %}selected{% endif %}>最新</option>
                     <option value="views" {% if sort == 'views' %}selected{% endif %}>最多观看</option>
                     <option value="likes" {% if sort == 'likes' %}selected{% endif %}>最多点赞</option>
+                    <option value="pictures" {% if sort == 'pictures' %}selected{% endif %}>最多图片</option>
                 </select>
             </div>
             <div class="col-6 col-md-2">
@@ -32,29 +35,29 @@
                 </select>
             </div>
             <div class="col-12 col-md-2">
-                <button type="button" id="search-btn" class="btn btn-primary w-100">
+                <button type="submit" id="search-btn" class="btn btn-primary w-100">
                     <i class="bi bi-search"></i> 搜索
                 </button>
             </div>
         </form>
-        <div class="form-text mt-2">支持 18comic 搜索语法：<code>全彩 人妻</code>（OR）<code>+全彩 +人妻</code>（AND）<code>全彩 -人妻</code>（排除）</div>
-    </div>
+        <div class="form-text mt-2">标签检索：<code>全彩 短篇</code> 任一匹配 · <code>+全彩 +短篇</code> 同时匹配 · <code>全彩 -短篇</code> 排除短篇</div>
 </div>
 
 <!-- ===== 搜索历史 ===== -->
 <div id="search-history-container" class="mb-4 d-none">
-    <div class="card">
-        <div class="card-body">
+    <div class="shelf-history">
             <h6 class="card-subtitle mb-2 text-muted">
                 <i class="bi bi-clock-history"></i> 搜索历史
             </h6>
             <div id="search-history-tags" class="d-flex flex-wrap gap-2"></div>
-        </div>
     </div>
 </div>
 
 <!-- ===== 搜索状态 ===== -->
-<div id="search-status" class="text-muted mb-2 d-none"></div>
+<div class="shelf-subhead"><div><p class="shelf-kicker">SEARCH INDEX</p><h2>检索结果</h2></div>
+    <div id="shelf-view" class="shelf-view" role="group" aria-label="结果展示方式" aria-controls="search-results"></div>
+</div>
+<div id="search-status" class="shelf-caption mb-2 d-none" role="status"></div>
 
 <!-- ===== 搜索结果容器 ===== -->
 <div id="search-results" data-nav-memory-list>
@@ -66,10 +69,12 @@
 
 <!-- ===== 分页容器 ===== -->
 <div id="pagination"></div>
+</div>
 
 {% endblock %}
 
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/home.js') }}"></script>
 <script src="{{ asset_url('js/search.js') }}"></script>
 {% endblock %}

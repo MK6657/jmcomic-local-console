@@ -6,6 +6,8 @@ the real runtime/logs is never touched. App modules are imported inside fixtures
 import builtins
 import json
 import os
+import shutil
+import subprocess
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -554,3 +556,38 @@ def test_settings_page_contains_log_section_outside_form(client):
     for element_id in ("log-search", "log-refresh-btn", "log-open-folder-btn", "log-list", "log-status"):
         assert html.index(f'id="{element_id}"') > section
     assert 'data-log-source="error"' in html and 'data-log-source="app"' in html
+
+
+def test_legacy_log_credentials_are_masked_in_entries_and_search_requests():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('requires Node.js')
+    script = r"""
+const assert = require('node:assert/strict');
+const {readFileSync} = require('node:fs');
+const {runInThisContext} = require('node:vm');
+function element() {
+  return {children:[], dataset:{}, listeners:{}, classList:{add(){}},
+    addEventListener(name, fn){this.listeners[name]=fn}, setAttribute(name,val){this[name]=val},
+    appendChild(child){this.children.push(child)}, querySelectorAll(){return []},
+    get firstChild(){return this.children[0]}, removeChild(){this.children.shift()}};
+}
+const nodes = new Map();
+global.document = {readyState:'complete', createElement:element, createDocumentFragment:element,
+  getElementById(id){if(!nodes.has(id))nodes.set(id, element());return nodes.get(id)}};
+const proxy = 'socks5h://fixture-user:fixture-password@localhost:7890';
+const calls = [];
+global.window = {location:{hash:''}, addEventListener(){}, async apiFetch(url){
+  calls.push(url);return {entries:[{message:'failure '+proxy+'\nAuthorization: Basic fixture-header',
+    request_id:'req_12345678', extra:{nested:[{token:'fixture-token'}], cookie:'fixture-cookie', count:3}}]}}};
+runInThisContext(readFileSync(process.argv[1], 'utf8'));
+setImmediate(()=>{
+  const rendered=JSON.stringify(nodes.get('log-list'));
+  assert.ok(!rendered.includes('fixture-') && rendered.includes('localhost:7890'));
+  assert.ok(rendered.includes('req_12345678') && rendered.includes('count=3'));
+  const search=nodes.get('log-search');search.value=proxy;
+  search.listeners.keydown({key:'Enter', preventDefault(){}});
+  assert.equal(new URL(calls.at(-1),'http://localhost').searchParams.get('q'), 'socks5h://****@localhost:7890');
+});
+"""
+    subprocess.run([node, '-e', script, str(ROOT / 'static/js/logs.js')], check=True, timeout=10)

@@ -1,0 +1,128 @@
+{% extends "classic/base.html" %}
+{% block title %}{{ title }} - JMComic 下载控制台{% endblock %}
+
+{% block content %}
+<!-- 与资源库标题栏一样可以换行：窄屏时按钮组整体换到下一行，标题不被挤得在词中间断开 -->
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h4 class="text-nowrap"><i class="bi bi-bookmark-heart"></i> 收藏清单</h4>
+    <div>
+        <!-- 下载“未下载”里的收藏（整部）：先在确认窗口里列出清单（js/batch-download.js），确认后才加入下载队列 -->
+        <button type="button" class="btn btn-outline-primary btn-sm" id="wishlist-download-undownloaded-btn" aria-haspopup="dialog"
+                title="只下载“未下载”里的收藏（从未下载过的、下载被取消的），每部下载整部：先列出清单，确认后才加入下载队列">
+            <i class="bi bi-cloud-arrow-down" aria-hidden="true"></i> 下载未下载的收藏
+        </button>
+        <button type="button" class="btn btn-outline-info btn-sm" id="wishlist-export-btn" title="导出收藏清单">
+            <i class="bi bi-download"></i> 导出
+        </button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="wishlist-import-file-btn" title="导入收藏清单">
+            <i class="bi bi-upload"></i> 导入
+        </button>
+        <input type="file" id="import-file-input" accept=".json" style="display:none">
+        <button type="button" class="btn btn-outline-primary btn-sm" id="wishlist-batch-import-btn">
+            <i class="bi bi-upload"></i> 批量导入
+        </button>
+        <button type="button" class="btn btn-outline-success btn-sm" id="wishlist-refresh-btn">
+            <i class="bi bi-arrow-clockwise"></i> 刷新
+        </button>
+    </div>
+</div>
+
+<!-- 搜索 / 下载状态筛选 / 排序（条件与页码同步到地址栏，刷新或返回后保留）
+     768–1199px 搜索框独占一行，状态与排序在第二行：带数量的“下载过 · 本地文件不可用（123）”才放得下；≥1200px 四个控件一行 -->
+<div class="row g-2 mb-3">
+    <div class="col-12 col-xl-4">
+        <input type="text" id="wishlist-search" class="form-control" placeholder="搜索标题/作者/车号..."
+               aria-label="搜索收藏" autocomplete="off">
+    </div>
+    <div class="col-md-5 col-xl-3">
+        <!-- 选项顺序与资源库、与“排序：下载状态”相同：可读 → 进行中 → 失败 → 本地文件不可用 → 未下载 -->
+        <select id="wishlist-status" class="form-select" aria-label="按下载状态筛选" autocomplete="off">
+            <option value="">状态：全部</option>
+            <option value="readable">已下载内容 · 可离线阅读</option>
+            <option value="active">排队中 / 下载中</option>
+            <option value="failed">失败</option>
+            <option value="missing">下载过 · 本地文件不可用</option>
+            <option value="none">未下载</option>
+        </select>
+    </div>
+    <div class="col-md-5 col-xl-3">
+        <select id="wishlist-sort" class="form-select" aria-label="排序方式" autocomplete="off">
+            <option value="added_at">排序：最新添加</option>
+            <option value="added_asc">排序：最早添加</option>
+            <option value="title">排序：标题</option>
+            <option value="author">排序：作者</option>
+            <option value="status">排序：下载状态</option>
+        </select>
+    </div>
+    <div class="col-md-2">
+        <button type="button" class="btn btn-primary w-100" id="wishlist-search-btn">
+            <i class="bi bi-search"></i> 搜索
+        </button>
+    </div>
+</div>
+
+<!-- 收藏列表（列宽见 style.css .wishlist-table：长标题/作者在格内换行，窄屏时表格在本容器内横向滚动） -->
+<div class="table-responsive">
+    <table class="table table-hover align-middle wishlist-table" id="wishlist-table" data-nav-memory-list>
+        <thead class="table-dark">
+            <tr>
+                <th class="wishlist-col-check"><input type="checkbox" id="select-all" aria-label="全选本页"></th>
+                <th class="wishlist-col-id">专辑 ID</th>
+                <th class="wishlist-col-title">标题</th>
+                <th class="wishlist-col-author">作者</th>
+                <th class="wishlist-col-status">下载状态</th>
+                <th class="wishlist-col-added">添加时间</th>
+                <th class="wishlist-col-actions">操作</th>
+            </tr>
+        </thead>
+        <tbody id="wishlist-body">
+            <tr><td colspan="7" class="text-center text-muted py-4">加载中...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- 分页 -->
+<nav id="wishlist-pagination" class="d-none" aria-label="收藏清单分页">
+    <ul class="pagination pagination-sm justify-content-center"></ul>
+</nav>
+
+<!-- 批量操作按钮 -->
+<div id="batch-actions" class="d-none mb-3">
+    <!-- 选中的收藏里只下载“未下载”的（整部）；其余的在确认窗口里列出原因 -->
+    <button type="button" class="btn btn-success btn-sm" id="batch-download-btn" aria-haspopup="dialog"
+            title="只下载选中的收藏里“未下载”的（整部）：先列出清单，确认后才加入下载队列">
+        <i class="bi bi-download" aria-hidden="true"></i> 下载选中的收藏
+    </button>
+    <button type="button" class="btn btn-danger btn-sm" id="batch-remove-btn">
+        <i class="bi bi-trash"></i> 批量移除
+    </button>
+    <span class="text-muted ms-2" id="selected-count">已选择 0 项</span>
+</div>
+
+<!-- 批量导入弹窗 -->
+<div class="modal fade" id="importModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">批量导入收藏</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">输入车号，支持逗号、空格、换行分隔，最多 50 个。</p>
+                <textarea class="form-control" id="import-raw" rows="6" placeholder="例如：&#10;123456, 789012&#10;345678"></textarea>
+                <div id="import-result" class="mt-2 d-none"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="import-submit-btn">导入</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts_extra %}
+<script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/batch-download.js') }}"></script>
+<script src="{{ asset_url('js/wishlist.js') }}"></script>
+{% endblock %}

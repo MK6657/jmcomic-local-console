@@ -97,6 +97,7 @@
     if (currentStatus) params.set('status', currentStatus);
     if (currentSort && currentSort !== DEFAULT_SORT) params.set('sort', currentSort);
     if (currentPage > 1) params.set('page', String(currentPage));
+    if (new URLSearchParams(window.location.search).get('view') === 'shelf') params.set('view', 'shelf');
     var qs = params.toString();
     var url = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
     if (url === window.location.pathname + window.location.search + window.location.hash) return;
@@ -226,7 +227,24 @@
     tr.appendChild(cell(idLink, null, 'wishlist-col-id'));
 
     // 标题/作者放进带最小宽度的块里：不带空格的长串在格内任意位置换行，窄屏也不会被挤成一字一行
-    tr.appendChild(cell(el('div', 'wishlist-title', item.title || '-'), null, 'wishlist-col-title'));
+    var title = el('div', 'wishlist-title', item.title || '-');
+    var cover = el('span', 'bound-book shelf-cover');
+    cover.setAttribute('aria-hidden', 'true');
+    cover.appendChild(el('span', 'shelf-ticket', item.title || albumId));
+    if (item.readable || (item.cover_url && item.cover_url !== '/static/images/no-cover.svg')) {
+      var image = el('img');
+      image.loading = 'lazy';
+      image.alt = '';
+      image.src = '/api/cover/' + encodeURIComponent(albumId);
+      cover.appendChild(image);
+    }
+    var book = el('a', 'wish-book');
+    book.href = detailUrl;
+    book.target = '_blank';
+    book.rel = 'noopener';
+    book.appendChild(cover);
+    book.appendChild(title);
+    tr.appendChild(cell(book, null, 'wishlist-col-title'));
     tr.appendChild(cell(el('div', 'wishlist-author', item.author || '-'), null, 'wishlist-col-author'));
     tr.appendChild(cell(statusBadges(item), null, 'wishlist-col-status'));
     tr.appendChild(cell(null, item.added_at ? new Date(item.added_at).toLocaleString() : '-', 'wishlist-col-added'));

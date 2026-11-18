@@ -39,6 +39,7 @@ _preview/
 
 # Local environments, secrets and nested repositories
 .venv/
+node_modules/
 .venv-build/
 venv/
 .worktrees/
@@ -53,3 +54,7 @@ tests/_test_export_data/
 tests/*_report.json
 .playwright-cli/
 output/playwright/
+
+# Atelier demo preview isolated home
+_demo_home/
+_atelier_preview/

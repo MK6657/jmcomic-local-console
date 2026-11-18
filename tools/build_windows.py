@@ -22,7 +22,8 @@ SOURCE_PATTERNS = ("app.py", "desktop.py", "launcher.py", "jmcomic_cli.py", "cor
                    "tools/windows-portable.manifest", "tools/licenses/**/*",
                    "docs/WINDOWS_RELEASE.md", "docs/BACKEND_REVIEW.md", "docs/DATA_MAINTENANCE.md",
                    "docs/AUDIT_FIXES.md", f"docs/{OPTIONAL_REVIEW}",
-                   "LICENSE", "THIRD_PARTY_NOTICES.md")
+                   "frontend/src/**/*", "frontend/package*.json", "frontend/tsconfig.json", "frontend/vite.config.js",
+                   "tools/Preview-Atelier.cmd", "docs/ATELIER_WINDOWS.md", "LICENSE", "THIRD_PARTY_NOTICES.md")
 
 
 def source_fingerprint(root=ROOT):
@@ -121,6 +122,10 @@ def copy_release_docs(root, bundle):
     review = root / "docs" / OPTIONAL_REVIEW
     if review.is_file():
         shutil.copyfile(review, bundle / review.name)
+    for item in ('tools/Preview-Atelier.cmd', 'docs/ATELIER_WINDOWS.md'):
+        source = root / item
+        if source.is_file():
+            shutil.copyfile(source, bundle / source.name)
 
 
 def build(output=None):

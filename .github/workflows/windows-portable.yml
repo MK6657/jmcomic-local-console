@@ -3,9 +3,15 @@ name: Windows portable package
 on:
   workflow_dispatch:
   push:
-    branches: [codex/refactor-windows, codex/windows-vnext]
+    branches: [codex/refactor-windows, codex/windows-vnext, codex/atelier-windows]
     tags: ['windows-v*']
     paths:
+      - 'frontend/**'
+      - 'templates/**'
+      - 'static/**'
+      - 'desktop.py'
+      - 'core/atelier_demo.py'
+      - 'tools/Preview-Atelier.cmd'
       - '.github/workflows/windows-portable.yml'
       - 'build.spec'
       - 'tools/*.py'
@@ -60,6 +66,8 @@ jobs:
         run: python tools/build_windows.py --output releases/ci-windows-x64
       - name: Verify extracted ZIP, busy launcher and v2 backup/restore
         run: python tests/check_windows_release.py releases/ci-windows-x64 --check-launcher --check-restore --check-vnext
+      - name: Verify Atelier EXE pages, exports, theme persistence and classic UI
+        run: python tests/check_atelier_release.py releases/ci-windows-x64/JMComic/JMComic.exe
       - uses: actions/upload-artifact@v4
         with:
           name: JMComic-windows-x64

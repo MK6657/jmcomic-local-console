@@ -1,6 +1,10 @@
-# JMComic Local Console
+# JMComic Local Console · Atelier Edition
 
 [English](README.md) | [简体中文](README.zh-CN.md)
+
+This is the Windows Atelier source edition. See the [Atelier guide](docs/ATELIER_WINDOWS.md).
+In the extracted portable bundle, `Preview-Atelier.cmd` opens the isolated sample library;
+`JMComic.exe` opens a normal instance. Earlier release links and backend acceptance records below identify the baseline.
 
 A Windows-first local browser interface for jmcomic: search, download queues,
 live progress, bookmarks, a downloaded library, image previews, and archive/PDF export.

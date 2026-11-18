@@ -1,12 +1,14 @@
 {% extends "base.html" %}
-{% block title %}资源库 - JMComic 下载控制台{% endblock %}
+{% block title %}私人书阁 · 藏书阁{% endblock %}
 
 {% block content %}
 
 <!-- ===== 标题栏 ===== -->
-<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+<div class="atelier-collection" data-layout="shelf">
+<header class="shelf-heading">
     <div>
-        <h4 class="mb-0"><i class="bi bi-collection"></i> 资源库</h4>
+        <p class="shelf-kicker">ATELIER / 03</p><h1>私人书阁</h1>
+    </div>
         <div class="library-stats mt-1" id="library-stats">
             <span class="stat-item"><i class="bi bi-book"></i> 共 <strong id="stat-total">-</strong> 条</span>
             <span class="stat-item"><i class="bi bi-bookmark"></i> 收藏 <strong id="stat-wishlist">-</strong></span>
@@ -14,8 +16,8 @@
             <span class="stat-item" title="本地有已下载内容、可以离线阅读的漫画（不一定是整部）"><i class="bi bi-book-half"></i> 可离线阅读 <strong id="stat-readable">-</strong></span>
             <span class="stat-item"><i class="bi bi-tags"></i> 标签 <strong id="stat-tags">-</strong></span>
         </div>
-    </div>
-    <div class="d-flex gap-2 flex-wrap">
+</header>
+    <div class="shelf-tools">
         <!-- 下载检查确认过的新章节：先在确认窗口里列出清单（js/batch-download.js），确认后才加入下载队列 -->
         <button type="button" class="btn btn-outline-primary btn-sm" id="library-download-new-btn" aria-haspopup="dialog"
                 title="只下载检查确认过的新章节：先列出要下载的漫画和章节，确认后才加入下载队列">
@@ -28,11 +30,9 @@
             <i class="bi bi-arrow-clockwise"></i> 刷新
         </button>
     </div>
-</div>
 
 <!-- ===== 标签云（可折叠） ===== -->
-<div class="card mb-3">
-    <div class="card-body py-2 px-3">
+<div class="shelf-filter-sheet">
         <div class="tag-cloud-header" id="tag-cloud-toggle" role="button" tabindex="0"
              aria-controls="tag-cloud-container" aria-expanded="true">
             <i class="bi bi-chevron-down"></i>
@@ -40,18 +40,18 @@
             <span class="text-muted small ms-2" id="tag-filter-hint"></span>
         </div>
         <div id="tag-cloud-container">
+            <label class="visually-hidden" for="library-tag-search">查找标签</label>
+            <input id="library-tag-search" type="search" class="form-control shelf-tag-search" placeholder="在标签索引中查找…" autocomplete="off" aria-controls="tag-cloud">
             <div class="tag-cloud" id="tag-cloud"></div>
         </div>
-    </div>
-</div>
 
 <!-- ===== 筛选栏（条件同步到地址栏，刷新/返回后保留） ===== -->
 <div class="library-filters">
-    <div class="flex-fill" style="min-width:180px;">
+    <div class="flex-fill">
         <input type="text" id="library-search" class="form-control" placeholder="搜索标题/作者/车号/标签..."
                aria-label="搜索资源库" autocomplete="off">
     </div>
-    <div style="min-width:130px;">
+    <div>
         <select id="library-status" class="form-select" aria-label="按下载状态筛选" autocomplete="off">
             <!-- 五档互不重叠、合起来就是全部，与收藏清单同一套分组；每档就是卡片上的状态徽章 -->
             <option value="">状态：全部</option>
@@ -62,7 +62,7 @@
             <option value="undownloaded">未下载</option>
         </select>
     </div>
-    <div style="min-width:130px;">
+    <div>
         <select id="library-sort" class="form-select" aria-label="排序方式" autocomplete="off">
             <option value="updated_at">排序：更新时间</option>
             <option value="title">排序：标题</option>
@@ -74,9 +74,13 @@
         <i class="bi bi-x-circle"></i> 清除筛选
     </button>
 </div>
+</div>
 
 <!-- ===== 当前作者筛选（点卡片上的作者名进入） ===== -->
 <div id="library-active-filters" class="library-active-filters" hidden></div>
+<div class="shelf-subhead"><div><p class="shelf-kicker">PRIVATE COLLECTION</p><h2>馆藏书目</h2></div>
+    <div id="shelf-view" class="shelf-view" role="group" aria-label="馆藏展示方式" aria-controls="library-grid"></div>
+</div>
 
 <!-- ===== 漫画网格列表 ===== -->
 <!-- data-card-click：卡片正文空白处点一下是否打开详情（设置“点击资源库卡片空白处打开详情”，library.js 读取） -->
@@ -85,13 +89,15 @@
 
 <!-- ===== 分页 ===== -->
 <div id="library-pagination" class="pagination-container"></div>
+</div>
 
 {% endblock %}
 
-{% block head_extra %}{% endblock %}
+{% block head_extra %}<link rel="stylesheet" href="{{ asset_url('css/atelier-shelf.css') }}">{% endblock %}
 
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
+<script src="{{ asset_url('js/home.js') }}"></script>
 <script src="{{ asset_url('js/export.js') }}"></script>
 <script src="{{ asset_url('js/batch-download.js') }}"></script>
 <script src="{{ asset_url('js/library.js') }}"></script>

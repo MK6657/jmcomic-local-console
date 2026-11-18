@@ -5,7 +5,7 @@ name: Tests
 
 on:
   push:
-    branches: [main, codex/refactor-windows, codex/windows-vnext]
+    branches: [main, codex/refactor-windows, codex/windows-vnext, codex/atelier-windows]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -59,10 +59,17 @@ jobs:
         run: |
           node --version
           status=0
-          for file in static/js/*.js; do
+          for file in static/js/*.js static/classic/js/*.js static/atelier-ui/*.js; do
             if ! node --check "$file"; then
               echo "::error file=$file::node --check failed"
               status=1
             fi
           done
           exit $status
+
+      - name: Rebuild local Vue assets and verify the shipped files
+        run: |
+          cd frontend
+          npm ci --no-audit --no-fund
+          npm run build
+          git diff --exit-code -- ../static/atelier-ui

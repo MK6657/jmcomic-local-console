@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="{{ ui_theme }}" data-bs-theme="{{ 'dark' if ui_theme == 'night' else 'light' }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}JMComic 下载控制台{% endblock %}</title>
+    <meta name="color-scheme" content="{{ 'dark' if ui_theme == 'night' else 'light' }}">
+    <title>{% block title %}藏书阁 · JMComic 下载控制台{% endblock %}</title>
 
     <!-- Favicon -->
     <link rel="icon" type="image/svg+xml" href="{{ asset_url('favicon.svg') }}">
@@ -15,59 +16,54 @@
     <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css">
     <!-- 自定义样式（Eye-care 护眼主题） -->
     <link rel="stylesheet" href="{{ asset_url('css/style.css') }}">
+    <link rel="stylesheet" href="{{ asset_url('css/atelier.css') }}">
 
     {% block head_extra %}{% endblock %}
 </head>
 <body>
 
-<!-- ===== 顶部导航栏（Eye-care 护眼风格） ===== -->
-<nav class="navbar navbar-expand-lg navbar-eye-care">
-    <div class="container">
-        <a class="navbar-brand" href="/">
-            <i class="bi bi-download"></i> JMComic 下载控制台
-        </a>
-        <button class="navbar-toggler" type="button"
-                data-bs-toggle="collapse" data-bs-target="#mainNav"
-                aria-controls="mainNav" aria-expanded="false"
-                aria-label="切换导航">
-            <span class="navbar-toggler-icon"></span>
-        </button>
-        <div class="collapse navbar-collapse" id="mainNav">
-            <ul class="navbar-nav ms-auto">
-                <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="/">
-                        <i class="bi bi-house-door"></i> 首页
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/search' %}active{% endif %}" href="/search" data-nav-memory="/search">
-                        <i class="bi bi-search"></i> 搜索
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/downloads' %}active{% endif %}" href="/downloads">
-                        <i class="bi bi-list-ul"></i> 下载管理
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/wishlist' %}active{% endif %}" href="/wishlist" data-nav-memory="/wishlist">
-                        <i class="bi bi-bookmark-heart"></i> 收藏
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/library' %}active{% endif %}" href="/library" data-nav-memory="/library">
-                        <i class="bi bi-collection"></i> 资源库
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/settings' %}active{% endif %}" href="/settings">
-                        <i class="bi bi-gear"></i> 设置
-                    </a>
-                </li>
-            </ul>
+{% set reading = request.endpoint in ('page.continuous_reader', 'page.online_reader_page', 'page.preview_page', 'page.preview_by_job') %}
+{% set destinations = [
+    ('/', 'house-door', '书斋总览', '总览'), ('/search', 'search', '检索探索', '检索'),
+    ('/library', 'collection', '私人书阁', '书阁'), ('/wishlist', 'bookmark-heart', '心愿典藏', '心愿'),
+    ('/downloads', 'list-ul', '传输中心', '传输'), ('/settings', 'gear', '偏好与色谱', '偏好')
+] %}
+{% set minerals = [('paper', '宣纸 · 古籍暖米'), ('sage', '青瓷 · 宋韵粉青'), ('linen', '白麻 · 画册晨光'), ('night', '玄墨 · 暗房夜读')] %}
+<a class="atelier-skip" href="#atelier-content">跳至正文</a>
+<div class="atelier-shell{% if reading %} atelier-reading{% endif %}">
+<aside class="atelier-sidebar navbar" aria-label="书斋">
+    <a class="atelier-brand" href="/" aria-label="藏书阁 · 书斋总览" title="藏书阁 · 书斋总览">
+        <span class="seal-stamp" aria-hidden="true">藏</span>
+        <span class="brand-type"><strong>藏书阁</strong><small>JM · ATELIER</small></span>
+    </a>
+    {% if atelier_demo %}<span class="atelier-demo">离线样书 · 演示实例</span>{% endif %}
+    <nav class="sidebar-nav" aria-label="书斋导航">
+        <ul>
+            {% for path, icon, label, short in destinations %}
+            <li title="{{ label }}"{% if request.path == path %} aria-current="page"{% endif %}>
+                <a class="nav-link{% if request.path == path %} active{% endif %}" href="{{ path }}"{% if path in ('/search', '/library', '/wishlist') %} data-nav-memory="{{ path }}"{% endif %}>
+                    <i class="bi bi-{{ icon }}" aria-hidden="true"></i><span class="snav-label">{{ label }}</span><span class="snav-short" aria-hidden="true">{{ short }}</span>
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+    </nav>
+    {% if not reading %}
+    <a class="sidebar-pulse" href="/downloads" title="查看传输中心" aria-label="查看传输中心">
+        <i class="bi bi-activity" aria-hidden="true"></i><span><strong>传输动态</strong><small id="atelier-activity">查看任务队列</small></span>
+    </a>
+    {% endif %}
+    <div class="mineral-dock" role="group" aria-label="矿物纸墨色谱">
+        <div class="mineral-caption"><span>纸墨色调</span><span class="mineral-name" aria-hidden="true"></span></div>
+        <div class="mineral-stones">
+        {% for key, name in minerals %}
+            <button type="button" class="stone-btn" data-set-theme="{{ key }}" aria-pressed="{{ 'true' if ui_theme == key else 'false' }}" title="{{ name }}" aria-label="切换主题：{{ name }}"></button>
+        {% endfor %}
         </div>
     </div>
-</nav>
+    <a class="atelier-classic" href="/ui/classic" title="切换经典界面"><i class="bi bi-window" aria-hidden="true"></i><span>切换经典界面</span></a>
+</aside>
+<div class="atelier-main" id="atelier-content" tabindex="-1">
 
 <!-- ===== 全局提示容器 ===== -->
 <div id="global-alert-container" class="container mt-3" style="display:none;"></div>
@@ -82,9 +78,11 @@
 <!-- ===== 页脚 ===== -->
 <footer class="footer">
     <div class="container text-center">
-        <small>&copy; 2024 JMComic 下载控制台 · 仅供学习交流使用</small>
+        <small>藏书阁 <span aria-hidden="true">/</span> JMComic 本地控制台</small>
     </div>
 </footer>
+</div>
+</div>
 
 <!-- ===== 快捷导航（右下角，static/js/quick-nav.js）：阅读页、单页预览有自己的底部工具，覆盖这个块不显示 ===== -->
 {% block quick_nav %}
@@ -209,8 +207,14 @@ window.showToast = function (message, type) {
   });
 };
 </script>
+<script src="{{ asset_url('js/atelier-shell.js') }}"></script>
 
 <!-- 页面自定义 JS (在子模板中按需追加) -->
 {% block scripts_extra %}{% endblock %}
+{% if atelier_demo and demo_stop_token %}
+<form class="text-center mb-3" action="/demo/close" method="post">
+    <input type="hidden" name="token" value="{{ demo_stop_token }}"><button class="btn btn-sm btn-link" type="submit">退出样书预览</button>
+</form>
+{% endif %}
 </body>
 </html>

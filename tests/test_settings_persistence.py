@@ -1,6 +1,7 @@
 """Settings drafts, response races and persistence across independent processes."""
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,7 +27,7 @@ function element(name,type,value){
   parentElement:{querySelector:()=>null,appendChild(){}},setAttribute(){}};
 }
 for(const [name,type,value] of [
- ['download_root','text','C:/isolated/downloads'],['proxy','text',''],['timeout','number','30'],
+ ['download_root','text','C:/isolated/downloads'],['proxy','password',''],['timeout','number','30'],
  ['retry_times','number','2'],['max_running_jobs','number','1'],['image_threads','number','20'],
  ['photo_threads','number','1'],['schedule_start','select-one','23'],['schedule_end','select-one','7'],
  ['client_type','select-one','api'],['auto_pack','checkbox','true'],['delete_originals','checkbox','true'],
@@ -39,10 +40,11 @@ form.elements=Object.values(controls);
 form.querySelector=s=>{const m=s.match(/^\[name="([^"]+)"\]$/);return m?controls[m[1]]||null:null};
 form.querySelectorAll=s=>s==='input[type="checkbox"]'?Object.values(controls).filter(c=>c.type==='checkbox'):[];
 const save=element('save'), importFile=element('','file'), importButton=element('');
-const ids={'settings-form':form,'save-settings-btn':save,'import-settings-btn':importButton,'import-settings-file':importFile,...controls};
+const visibility=element('');
+const ids={'settings-form':form,'save-settings-btn':save,'import-settings-btn':importButton,'import-settings-file':importFile,'proxy-visibility':visibility,...controls};
 global.document={readyState:'complete',getElementById:id=>ids[id]||null,
  addEventListener:(n,f)=>(events[n]??=[]).push(f),createElement:()=>element('created')};
-global.window={apiFetch:(url,options={})=>new Promise((resolve,reject)=>pending.push({url,options,resolve,reject}))};
+global.window={addEventListener:(n,f)=>(events[n]??=[]).push(f),apiFetch:(url,options={})=>new Promise((resolve,reject)=>pending.push({url,options,resolve,reject}))};
 global.showToast=(message,type)=>toasts.push({message,type});
 const confirmations=[];
 global.confirm=message=>{confirmations.push(message);return true};
@@ -165,6 +167,13 @@ const scenario=process.argv[2];
    if(saving){const request=posts()[0];body=JSON.parse(request.options.body);request.resolve(answer({...imported,...body}));await saving}
    else body=await saveAndReply(imported);
    console.log(JSON.stringify({fields,body,beforeLoad,gets:get().length,again:await saveAndReply()}));
+ } else if(scenario==='masked-proxy'){
+   const loaded={proxy:'socks5h://test-user:test-pass@localhost:7890'};
+   get()[0].resolve(answer(loaded));await flush();
+   await visibility.fire('click');const revealed=controls.proxy.type==='text'&&controls.proxy.value===loaded.proxy;
+   for(const fn of events.pagehide)fn();
+   await edit('retry_times','0');const body=await saveAndReply(loaded);
+   await edit('proxy','');console.log(JSON.stringify({revealed,masked:controls.proxy.type==='password',body,direct:await saveAndReply()}));
  } else if(scenario==='socks-warning'){
    const loaded={proxy:'socks5h://127.0.0.1:7890'};get()[0].resolve(answer(loaded));await flush();
    await edit('retry_times','0');const other=await saveAndReply(loaded);
@@ -267,6 +276,23 @@ def test_existing_socks_proxy_does_not_block_saving_and_apply_warning_is_visible
     assert result["other"] == {"retry_times": "0"}
     assert result["body"] == {"proxy": "socks5h://127.0.0.1:7900"}
     assert result["toasts"][-1]["type"] == "warning"
+
+
+def test_password_visibility_does_not_submit_a_mask_or_erase_the_saved_proxy():
+    assert ui('masked-proxy') == {'revealed': True, 'masked': True, 'body': {'retry_times': '0'}, 'direct': {'proxy': ''}}
+
+
+@pytest.mark.parametrize('theme', ('paper', 'sage', 'linen', 'night'))
+def test_preferences_render_saved_palette_and_zero_without_embedding_proxy(client, theme):
+    from core.settings import update_settings
+    update_settings({'ui_theme': theme, 'retry_times': 0, 'proxy': 'socks5h://fixture-user:fixture-secret@localhost'})
+    html = client.get('/settings').get_data(as_text=True)
+    assert 'fixture-secret' not in html and 'fixture-user' not in html
+    assert 'type="password" id="proxy"' in html and re.search(r'id="retry_times"[^>]*value="0"', html)
+    cards = dict(re.findall(r'data-pref-theme="(\w+)" aria-pressed="(true|false)"', html))
+    assert cards == {key: str(key == theme).lower() for key in ('paper', 'sage', 'linen', 'night')}
+    for anchor in re.findall(r'href="#([\w-]+)"', html.split('<nav class="pref-index"')[1].split('</nav>')[0]):
+        assert html.count(f'id="{anchor}"') == 1
 
 
 CHILD = r"""

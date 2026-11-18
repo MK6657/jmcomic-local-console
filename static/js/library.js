@@ -35,6 +35,7 @@
     var grid = document.getElementById('library-grid');
     var pagination = document.getElementById('library-pagination');
     var tagCloud = document.getElementById('tag-cloud');
+    var tagSearch = document.getElementById('library-tag-search');
     var activeFilters = document.getElementById('library-active-filters');
     var searchInput = document.getElementById('library-search');
     var statusSelect = document.getElementById('library-status');
@@ -123,6 +124,7 @@
         if (selectedTags.length > 0) params.set('tag', selectedTags.join(','));
         if (currentAuthor) params.set('author', currentAuthor);
         if (currentPage > 1) params.set('page', String(currentPage));
+        if (new URLSearchParams(window.location.search).get('view') === 'catalog') params.set('view', 'catalog');
         var qs = params.toString();
         var url = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
         if (url === window.location.pathname + window.location.search + window.location.hash) return;
@@ -268,26 +270,26 @@
         var card = el('div', 'library-card');
         card.dataset.albumId = albumId;
 
-        // 封面（加载失败换成缺省封面：见 grid 上捕获阶段的 error 委托）
-        var coverLink = newTabLink(detailUrl, 'card-cover-link');
-        if (item.cover_url) {
-            coverLink.title = title;
+        var coverLink = newTabLink(detailUrl, 'card-cover-link bound-book shelf-cover');
+        coverLink.setAttribute('aria-label', title);
+        var ticket = el('span', 'shelf-ticket', title);
+        ticket.setAttribute('aria-hidden', 'true');
+        coverLink.appendChild(ticket);
+        var coverUrl = item.cover_url === '/static/images/no-cover.svg' ? '' : item.cover_url;
+        if (coverUrl || item.readable) {
             var img = el('img', 'card-cover thumb-img');
             img.loading = 'lazy';
-            img.alt = title;
-            img.src = item.cover_url;
+            img.alt = '';
+            img.src = coverUrl || '/api/cover/' + encodeURIComponent(albumId);
             coverLink.appendChild(img);
-        } else {
-            var placeholder = el('div', 'placeholder-cover');
-            var placeholderIcon = icon('bi-image');
-            placeholderIcon.style.fontSize = '2.5rem';
-            placeholder.appendChild(placeholderIcon);
-            coverLink.appendChild(placeholder);
         }
-        card.appendChild(coverLink);
+        var pedestal = el('div', 'shelf-pedestal');
+        pedestal.appendChild(coverLink);
+        card.appendChild(pedestal);
 
         // 正文：设置开启时点空白处在新标签页打开详情（委托处理，链接/按钮不会重复打开）
         var body = el('div', 'card-body');
+        body.appendChild(el('small', 'shelf-number', 'JM / ' + albumId));
 
         // 标题
         var titleBox = el('div', 'card-title');
@@ -473,32 +475,34 @@
         if (active && tagCloud.contains(active) && active.dataset.tag !== undefined) focusedTag = active.dataset.tag;
 
         tagCloud.textContent = '';
-        var allBtn = el('button', 'tag-cloud-item tag-all' + (selectedTags.length === 0 ? ' active' : ''), '全部标签 ✕');
+        var allBtn = el('button', 'tag-cloud-item tag-all' + (selectedTags.length === 0 ? ' active' : ''), '全部标签');
         allBtn.type = 'button';
-        allBtn.dataset.action = 'clear-filters';
-        allBtn.title = '清除全部筛选';
+        allBtn.dataset.action = 'clear-tags';
+        allBtn.title = '清除标签条件';
+        allBtn.setAttribute('aria-pressed', String(!selectedTags.length));
         tagCloud.appendChild(allBtn);
 
-        var maxCount = 1;
-        for (var j = 0; j < allTags.length; j++) {
-            if (allTags[j].count > maxCount) maxCount = allTags[j].count;
-        }
-        for (var i = 0; i < allTags.length; i++) {
-            var t = allTags[i];
-            var count = t.count || 1;
-            var ratio = maxCount > 1 ? Math.log(count) / Math.log(maxCount) : 0.5;
+        var term = tagSearch.value.trim().toLowerCase();
+        var available = new Set(allTags.map(function (tag) { return tag.tag; }));
+        var tags = selectedTags.filter(function (tag) { return !available.has(tag); })
+            .map(function (tag) { return { tag: tag }; }).concat(allTags);
+        var matches = 0;
+        for (var i = 0; i < tags.length; i++) {
+            var t = tags[i];
             var isActive = selectedTags.indexOf(t.tag) !== -1;
+            if (t.tag.toLowerCase().includes(term)) matches++;
+            else if (!isActive) continue;
             var item = el('button', 'tag-cloud-item' + (isActive ? ' active' : ''));
             item.type = 'button';
-            item.style.fontSize = (0.8 + ratio * 0.5).toFixed(2) + 'rem';
             item.dataset.tag = t.tag;
             item.setAttribute('aria-pressed', isActive ? 'true' : 'false');
             item.appendChild(document.createTextNode(t.tag + ' '));
-            item.appendChild(el('small', null, '(' + count + ')'));
+            if (t.count != null) item.appendChild(el('small', null, '(' + t.count + ')'));
             tagCloud.appendChild(item);
             // 重建后把键盘焦点还给刚才操作的标签
             if (focusedTag !== null && t.tag === focusedTag) item.dataset.refocus = '1';
         }
+        if (term && !matches) tagCloud.appendChild(el('span', 'shelf-caption', '没有匹配的标签'));
         var refocus = tagCloud.querySelector('[data-refocus]');
         if (refocus) {
             delete refocus.dataset.refocus;
@@ -525,7 +529,7 @@
         if (selectedTags.length > 0) {
             hint.textContent = '已选 ' + selectedTags.length + ' 个标签: ' + selectedTags.join(', ');
         } else {
-            hint.textContent = '点击标签多选筛选';
+            hint.textContent = '多选时同时匹配所有标签';
         }
     }
 
@@ -536,6 +540,7 @@
 
     function clearFilters() {
         selectedTags = [];
+        tagSearch.value = '';
         currentAuthor = '';
         searchInput.value = '';
         statusSelect.value = '';
@@ -897,19 +902,17 @@
         }
     });
 
-    // 封面加载失败 → 缺省封面（error 不冒泡，用捕获阶段）
-    grid.addEventListener('error', function (e) {
-        var img = e.target;
-        if (!img || img.tagName !== 'IMG' || img.dataset.fallback) return;
-        img.dataset.fallback = '1';
-        img.src = '/static/images/no-cover.svg';
-    }, true);
-
+    tagSearch.addEventListener('input', renderTagCloud);
     tagCloud.addEventListener('click', function (e) {
         var btn = e.target.closest('button');
         if (!btn || !tagCloud.contains(btn)) return;
-        if (btn.dataset.action === 'clear-filters') {
-            clearFilters();
+        if (btn.dataset.action === 'clear-tags') {
+            var changed = selectedTags.length > 0;
+            selectedTags = [];
+            tagSearch.value = '';
+            renderTagCloud();
+            if (changed) loadLibrary(1);
+            if (e.detail === 0) tagSearch.focus();
         } else if (btn.dataset.tag !== undefined) {
             toggleTag(btn.dataset.tag);
         }

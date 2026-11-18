@@ -14,6 +14,62 @@
   }
 
   window.readingNav = {
+    imageUrl: function (value, prefixes) {
+      try {
+        var url = new URL(value, location.origin);
+        if (url.origin === location.origin && prefixes.some(function (prefix) { return url.pathname.startsWith(prefix); })) return url.href;
+      } catch (_) {}
+      return null;
+    },
+
+    loadImage: function (image, url, failed) {
+      var controller = new AbortController();
+      var objectUrl;
+      var signal = controller.signal;
+      if (url) fetch(url, { signal: signal }).then(function (response) {
+        if (signal.aborted) return;
+        if (!response.ok) { failed(response, signal); return; }
+        return response.blob().then(function (blob) {
+          if (signal.aborted) return;
+          objectUrl = URL.createObjectURL(blob);
+          image.src = objectUrl;
+        });
+      }).catch(function () { if (!signal.aborted) failed(null, signal); });
+      else Promise.resolve().then(function () { if (!signal.aborted) failed(null, signal); });
+      return function () {
+        controller.abort();
+        image.removeAttribute('src');
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      };
+    },
+
+    manifest: function (url, timeout) {
+      var controller = new AbortController();
+      var expired = false;
+      var timer = setTimeout(function () { expired = true; controller.abort(); }, timeout);
+      return {
+        cancel: function () { clearTimeout(timer); controller.abort(); },
+        result: window.apiFetch(url, { signal: controller.signal }).catch(function (error) {
+          if (expired) throw new Error('请求超时，请稍后重试');
+          throw error;
+        }).finally(function () { clearTimeout(timer); })
+      };
+    },
+
+    bindLifecycle: function (suspend, resume) {
+      var active = false;
+      function hide() { if (active) { active = false; suspend(); } }
+      function show() { if (!active && !document.hidden) { active = true; resume(); } }
+      window.addEventListener('pagehide', hide);
+      window.addEventListener('pageshow', show);
+      document.addEventListener('visibilitychange', function () { if (document.hidden) hide(); else show(); });
+      show();
+    },
+
+    plainKey: function (event) {
+      return !(event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing ||
+        event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
+    },
     /** 起始页：地址栏 ?page= 优先，其次本标签页记住的页码，默认 1（由调用方夹到有效范围） */
     initialPage: function (albumId) {
       var requested = Math.floor(Number(new URLSearchParams(location.search).get('page')));
@@ -54,6 +110,10 @@
       link.addEventListener('click', function (event) {
         if (!isPlainClick(event)) return;
         try {
+          if (window.navigation && window.navigation.currentEntry && window.quickNav) {
+            if (window.navigation.canGoBack && window.quickNav.goBack(event)) event.preventDefault();
+            return;
+          }
           var canGoBack = (window.navigation && typeof window.navigation.canGoBack === 'boolean')
             ? window.navigation.canGoBack
             : history.length > 1;
@@ -75,12 +135,18 @@
     archivePageProblem: function (url) {
       var archive;
       try {
-        var path = new URL(url, location.origin).pathname;
+        var path = new URL(url.url || url, location.origin).pathname;
         archive = path.indexOf('/api/preview-archive/') === 0;
         // 散图：只看 409（阅读页打开后这一页被打包进了压缩包）；真的不在了（404）照常给“重试”
         if (!archive && path.indexOf('/api/preview-img/') !== 0) return Promise.resolve(null);
       } catch (_) { return Promise.resolve(null); }
       return fetch(url, { cache: 'no-store' }).then(function (response) {
+        return window.readingNav.archiveResponse(archive, response);
+      }).catch(function () { return null; });
+    },
+
+    archiveResponse: function (archive, response) {
+      return Promise.resolve().then(function () {
         if (response.ok || !((archive && (response.status === 422 || response.status === 503)) || response.status === 409)) return null;
         return response.json().then(function (data) {
           if (!data || ['archive_corrupt', 'archive_changed', 'archive_busy'].indexOf(data.reason) < 0) return null;

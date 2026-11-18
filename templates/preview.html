@@ -2,19 +2,23 @@
 {% block title %}JMComic 下载控制台 - 图片预览{% endblock %}
 
 {% block head_extra %}
+<link rel="stylesheet" href="{{ asset_url('css/reader.css') }}">
 <link rel="stylesheet" href="{{ asset_url('css/preview.css') }}">
 {% endblock %}
 
 {% block content %}
 
-<div class="preview-container" data-album-id="{{ album_id }}">
+<main class="preview-container" data-album-id="{{ album_id }}" tabindex="-1">
     <!-- 标题栏：与连续阅读共用 .reader-toolbar，不吸顶 -->
     <header class="reader-toolbar">
         <a class="btn btn-outline-secondary btn-sm" href="/downloads" id="preview-back"><i class="bi bi-arrow-left" aria-hidden="true"></i> 返回</a>
         <div class="reader-heading">
+            <span class="folio-kicker">ATELIER　/　单页展阅</span>
             <h1 id="album-title">加载中...</h1>
-            <p class="text-muted small mb-0 d-none d-md-block">方向键 ← → 翻页，Home / End 到首页、末页。</p>
+            <span class="source-slip">本地典藏</span>
+            <p class="folio-note">点击画页左右两侧或按 ← → 翻页；轻触中央或按 M 显隐工具。</p>
         </div>
+        <button class="btn btn-outline-secondary btn-sm" type="button" id="preview-tools-toggle" aria-controls="reader-tools" aria-expanded="true">阅读工具</button>
         <div class="btn-group btn-group-sm preview-mode-switch" role="group" aria-label="阅读方式">
             <span class="btn btn-primary" aria-current="page">单页翻页</span>
             <a class="btn btn-outline-primary" id="preview-continuous" href="/read/{{ album_id }}">连续滚动</a>
@@ -42,7 +46,6 @@
 
     <!-- 加载中 -->
     <div class="text-center py-5" id="preview-loading" role="status">
-        <div class="spinner-border text-primary" aria-hidden="true"></div>
         <p class="mt-2 text-muted">正在扫描本地图片...</p>
     </div>
 
@@ -52,16 +55,14 @@
         <!-- 图片显示区 -->
         <div class="preview-image-wrapper" id="image-wrapper">
             <div class="loading-spinner d-none" id="img-spinner">
-                <div class="spinner-border text-primary" role="status">
-                    <span class="visually-hidden">加载中...</span>
-                </div>
+                <span role="status">正在展页…</span>
             </div>
             <img id="preview-image" class="d-none" alt="">
             <div id="no-image-hint" class="preview-image-hint d-none" role="status"></div>
         </div>
 
         <!-- 翻页导航 -->
-        <nav class="preview-nav" aria-label="翻页">
+        <nav class="preview-nav reader-tools" id="reader-tools" aria-label="翻页">
             <button type="button" class="btn btn-outline-secondary btn-nav btn-nav-icon" id="btn-first" title="首页" aria-label="首页">
                 <i class="bi bi-chevron-double-left" aria-hidden="true"></i>
             </button>
@@ -70,6 +71,7 @@
             </button>
 
             <div class="page-info">
+                <input type="range" id="preview-range" min="1" max="1" value="1" aria-label="阅读进度">
                 <span><span id="page-current">0</span> / <span id="page-total">0</span></span>
                 <form class="page-jump" id="page-jump">
                     <label class="visually-hidden" for="page-jump-input">跳转页码</label>
@@ -86,11 +88,12 @@
             <button type="button" class="btn btn-outline-secondary btn-nav btn-nav-icon" id="btn-last" title="末页" aria-label="末页">
                 <i class="bi bi-chevron-double-right" aria-hidden="true"></i>
             </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="preview-tools-close">收起</button>
         </nav>
 
         <!-- 缩略图导航 -->
         <section class="thumbnail-bar" id="thumbnail-bar" aria-label="缩略图">
-            <p class="small text-muted mb-2">缩略图 · 左右滑动查看，点击页码定位</p>
+            <p class="folio-kicker">FILMSTRIP　/　页影索引</p>
             <div class="preview-thumbnails-row">
                 <button type="button" class="btn btn-outline-secondary btn-sm" id="thumb-prev" aria-label="向前浏览缩略图"><i class="bi bi-chevron-left" aria-hidden="true"></i></button>
                 <div class="thumb-container" id="thumb-container">
@@ -100,7 +103,7 @@
             </div>
         </section>
     </div>
-</div>
+</main>
 
 {% endblock %}
 

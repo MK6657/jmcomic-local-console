@@ -237,6 +237,22 @@ const cardIds = p => p.grid.children.filter(k => k.classList && k.classList.cont
 (async () => {
   const out = {};
 
+  {
+    const p = page({search: '?status=readable&tag=coast&view=catalog'});
+    p.respond('/api/library/tags', {status: 'ok', tags: ['coast', 'paper', 'ink'].map(tag => ({tag, count: 1}))});
+    await flush();
+    const before = p.fetches.length;
+    const field = p.doc.getElementById('library-tag-search');
+    field.value = 'PAP';
+    field.handlers.input[0]();
+    const visible = p.doc.getElementById('tag-cloud').children.filter(node => node.dataset.tag);
+    out.tagIndex = {visible: visible.map(node => [node.dataset.tag, node.getAttribute('aria-pressed')]),
+                    typingRequests: p.fetches.length - before};
+    p.win.toggleTag('paper');
+    out.tagIndex.page = p.win.location.search;
+    out.tagIndex.request = p.fetches.at(-1).url;
+  }
+
   // the setting as rendered into the page (data-card-click on #library-grid)
   out.initial = {};
   for (const [name, value] of [['true', 'true'], ['false', 'false'], ['missing', undefined], ['empty', '']]) {
@@ -419,6 +435,16 @@ CONTROLS = ["titleLink", "coverLink", "coverImg", "info", "infoIcon", "read", "p
 def _query(url):
     parts = urlsplit(url)
     return parts.path, parse_qs(parts.query)
+
+
+def test_tag_index_keeps_selected_tags_and_filters_combined_on_the_server(harness):
+    state = harness['tagIndex']
+    assert state['visible'] == [['coast', 'true'], ['paper', 'false']]
+    assert state['typingRequests'] == 0
+    assert _query(state['page'])[1] == {'tag': ['coast,paper'], 'status': ['readable'], 'view': ['catalog']}
+    path, params = _query(state['request'])
+    assert path == '/api/library' and params['tag'] == ['coast,paper'] and params['page'] == ['1']
+    assert 'view' not in params
 
 
 def test_the_initial_state_comes_from_data_card_click(harness):

@@ -1,7 +1,8 @@
 """
 页面路由 —— 返回 Jinja2 模板，传入必要数据
 """
-from flask import Blueprint, render_template, request, abort, redirect
+from flask import Blueprint, request, abort, redirect
+from core.interface import render_page as render_template
 from core import local_availability
 from core.database import get_all_jobs, get_job
 from core.logger import log
@@ -9,6 +10,16 @@ from core.settings import get_settings
 from core.validation import validate_numeric, validate_job_id
 
 page_bp = Blueprint("page", __name__)
+
+
+@page_bp.get('/ui/<edition>')
+def select_edition(edition):
+    if edition not in ('classic', 'atelier'):
+        abort(404)
+    response = redirect('/downloads', code=303)
+    response.set_cookie('jmconsole_edition', edition, max_age=365 * 86400, httponly=True, samesite='Strict')
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @page_bp.get("/")

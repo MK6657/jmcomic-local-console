@@ -1,6 +1,8 @@
-# JMComic 本地下载控制台
+# 藏书阁 · Atelier Edition
 
 [English](README.md) | [简体中文](README.zh-CN.md)
+
+本目录是 Windows 藏书阁版的独立源码。**先看[本版使用说明](docs/ATELIER_WINDOWS.md)**：Windows 包的 `Preview-Atelier.cmd` 打开隔离样书，`JMComic.exe` 打开普通实例；在源码目录可运行 `start-demo-preview.bat` 或 `start.bat`。下文提到的旧版 ZIP、GitHub 分支和验收记录属于后端基线，不是本版下载地址。
 
 面向 Windows 的 jmcomic 本地浏览器控制台，提供搜索、下载队列、实时进度、
 收藏、资源库、本地图片阅读和压缩包/PDF 导出。程序界面目前为中文，说明文档提供中英文。

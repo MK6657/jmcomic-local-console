@@ -118,7 +118,7 @@ function load(opts) {
       const button = { disabled: false, getAttribute: () => String(n) };
       els.pagination.fire('click', { target: { closest: sel => (sel === 'button[data-page]' ? button : null) } });
     },
-    newSearch(q) { els['search-input'].value = q; els['search-btn'].fire('click'); },
+    newSearch(q) { els['search-input'].value = q; els['search-form'].fire('submit', {preventDefault() {}}); },
     sortBy(v) { els['sort-select'].value = v; els['sort-select'].fire('change'); },
     leave() { (winOn.pagehide || []).forEach(fn => fn({})); },
     expectReturn(back) { pending = back; startedAt = now; },
@@ -144,6 +144,11 @@ const snapStore = (search, extra) => new Map([[KEY, JSON.stringify(Object.assign
 }, extra))]]);
 
 (async () => {
+  const pictureUrl = '?keyword=abc&sort=pictures&page_size=50&page=3&view=catalog';
+  const sorted = load({search: pictureUrl, back: RET});
+  await sorted.respond(0, OK);
+  sorted.leave();
+  out.pictureReturn = {requests: sorted.searches(), url: sorted.saved()[0], scrolls: sorted.scrolls};
   // (a) a snapshot for this address + 返回: redrawn from it (no upstream request), lands at the 返回 place
   let p = load({ search: HERE, store: snapStore(HERE), back: RET });
   out.snapshotReturn = { searches: p.searches(), drawn: p.drawn('Snapshot result'), scrolls: p.scrolls.slice(),
@@ -290,6 +295,14 @@ def harness():
 
 
 SEARCH_HERE = "/api/search?q=abc&page=1&page_size=20&sort=latest"
+
+
+def test_picture_sort_and_view_survive_restoring_page_three(harness):
+    assert harness['pictureReturn'] == {
+        'requests': ['/api/search?q=abc&page=3&page_size=50&sort=pictures'],
+        'url': '/search?keyword=abc&sort=pictures&page_size=50&page=3&view=catalog',
+        'scrolls': [[2600, 300]],
+    }
 
 
 def test_unknown_total_navigation_works_from_results_and_empty_pages(harness):

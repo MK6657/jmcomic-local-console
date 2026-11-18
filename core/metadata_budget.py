@@ -20,7 +20,12 @@ class MetadataStopped(RuntimeError):
 
 
 def deadline_after(timeout):
-    value = _clock() + timeout
+    now = _clock()
+    value = now + timeout
+    # Adding a fractional limit to a large Windows uptime can round upward.
+    # A first request on the same clock tick must still fit its configured limit.
+    if value - now > timeout:
+        value = math.nextafter(value, now)
     operation = getattr(_context, "operation", None)
     return min(value, operation[0]) if operation is not None else value
 

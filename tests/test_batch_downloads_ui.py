@@ -1210,7 +1210,7 @@ def test_detail_refreshes_the_chapter_table_after_a_check():
     # the rebuilt row has the same markup as before (checkbox, index, title, pages, 在线观看本章)
     html = checked["lastRowHtml"]
     assert html.startswith('<tr><td class="chapter-checkbox"><input class="form-check-input chapter-checkbox-item" '
-                           'type="checkbox" name="chapters"></input></td><td>6</td><td>第6话')
+                           'type="checkbox" name="chapters" aria-label="选择第 6 话"></input></td><td>6</td><td>第6话')
     assert ('<td>20</td><td class="chapter-online"><a class="btn btn-sm btn-outline-primary" '
             'href="/online/3001?chapter=76" title="在线观看本章" aria-label="在线观看第 6 章">'
             '<i class="bi bi-globe2" aria-hidden="true"></i></a></td></tr>') in html
@@ -1279,7 +1279,7 @@ def test_detail_table_is_built_from_dom_and_wired_by_delegation():
                  "function missingNewChapterIds(", "function refreshChapterTable("):
         assert name in block, name
     render = flat[flat.index("function renderAlbum"):flat.index("function bindBackLink")]
-    assert '<span class="badge bg-secondary" id="chapter-count">' in render
+    assert '<span id="chapter-count">' in render
     assert '<span id="chapter-refresh-status" class="chapter-refresh-status" role="status" aria-live="polite"></span>' in render
     assert "<tbody id=\"chapter-rows\"></tbody></table>" in render and "chapter-checkbox-item" not in render
     assert render.index("container.innerHTML = html;") < render.index("fillChapterRows(album.photos || [], {});")
@@ -1320,7 +1320,7 @@ def test_batch_css_tokens_only_no_animation():
 # 60
 def test_templates_buttons_scripts_and_settings_copy(client):
     library = client.get("/library").get_data(as_text=True)
-    group = library[library.index('<div class="d-flex gap-2 flex-wrap">'):]
+    group = library[library.index('<div class="shelf-tools">'):]
     group = group[:group.index("</div>")]
     first = re.search(r"<button([^>]*)>(.*?)</button>", group, re.S)
     assert 'id="library-download-new-btn"' in first.group(1)
@@ -1330,7 +1330,7 @@ def test_templates_buttons_scripts_and_settings_copy(client):
     assert first.group(2).split() == ['<i', 'class="bi', 'bi-bell"', 'aria-hidden="true"></i>', '下载新章节']
 
     wishlist = client.get("/wishlist").get_data(as_text=True)
-    header = wishlist[wishlist.index('<h4 class="text-nowrap">'):wishlist.index("<!-- 搜索 / 下载状态筛选")]
+    header = wishlist[wishlist.index('<div class="shelf-tools d-flex">'):wishlist.index("<!-- 搜索 / 下载状态筛选")]
     first = re.search(r"<button([^>]*)>(.*?)</button>", header, re.S)
     assert 'id="wishlist-download-undownloaded-btn"' in first.group(1)
     for attr in ('type="button"', 'class="btn btn-outline-primary btn-sm"', 'aria-haspopup="dialog"',

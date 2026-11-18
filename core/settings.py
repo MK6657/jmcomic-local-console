@@ -16,9 +16,12 @@ _settings_cache_time: float = 0
 _SETTINGS_CACHE_TTL = 5.0
 _settings_lock = threading.Lock()
 
+UI_THEMES = {"paper", "sage", "linen", "night"}
+
 # 第一版支持的设置项及默认值
 DEFAULT_SETTINGS = {
     "download_root": str(DOWNLOAD_ROOT),
+    "ui_theme": "paper",
     "max_running_jobs": "1",
     "timeout": "30",
     "retry_times": "2",
@@ -56,6 +59,8 @@ def get_settings() -> dict:
         merged.update(stored)
         # A legacy database/import cannot relocate the process's storage roots.
         merged["download_root"] = str(DOWNLOAD_ROOT)
+        if merged.get("ui_theme") not in UI_THEMES:
+            merged["ui_theme"] = "paper"
         _settings_cache = merged
         _settings_cache_time = now
         return dict(merged)
@@ -80,6 +85,7 @@ def update_settings(settings: dict):
     enums = {
         "client_type": {"api", "html"}, "pack_format": {"cbz", "zip"},
         "organize_mode": {"none", "by_author", "flat"},
+        "ui_theme": UI_THEMES,
     }
     bounds = {
         "timeout": (5, 120), "retry_times": (0, 20), "max_running_jobs": (1, 5),
@@ -130,16 +136,17 @@ def update_settings(settings: dict):
             except ValueError:
                 raise ValueError("proxy 地址无效（认证信息已隐藏）") from None
             normalized[key] = value
-    conn = db.get_db()
-    try:
-        with conn:
-            conn.executemany(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                list(normalized.items()),
-            )
-    finally:
-        conn.close()
-    invalidate_settings_cache()
+    if normalized:
+        conn = db.get_db()
+        try:
+            with conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                    list(normalized.items()),
+                )
+        finally:
+            conn.close()
+        invalidate_settings_cache()
 
 
 def build_jmcomic_option() -> dict:

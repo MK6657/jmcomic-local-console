@@ -70,7 +70,7 @@
     }
 
     // 无封面或封面加载失败（CDN 不可达）时显示的占位，尺寸与封面一致
-    var COVER_PLACEHOLDER = '<div class="detail-cover detail-cover-placeholder" role="img" aria-label="暂无封面"><i class="bi bi-image" aria-hidden="true"></i></div>';
+    var COVER_PLACEHOLDER = '<div class="detail-cover detail-cover-placeholder" role="img" aria-label="暂无封面"><span>藏書</span><small>藏书阁书票</small></div>';
 
     function renderAlbum(album) {
         spinner.classList.add('d-none');
@@ -80,36 +80,24 @@
         var localReadUrl = '/read/' + encodeURIComponent(album.album_id);
         var html = '';
 
-        // 封面 + 信息：同一个 .row 内的两列，垂直居中对齐——封面比信息卡片矮时封面居中，高时信息卡片居中
-        html += '<div class="row g-4 mb-4 align-items-center">';
-
-        // 左侧封面
-        html += '<div class="col-12 col-md-4 col-lg-3">';
-        if (album.cover) {
-            html += '<img src="' + window.escapeHtmlAttr(album.cover) + '" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title) + '" decoding="async">';
-        } else {
-            html += COVER_PLACEHOLDER;
-        }
+        html += '<div class="monograph-front"><div class="monograph-plate"><div class="bound-book monograph-cover">';
+        html += '<img src="/api/cover/' + encodeURIComponent(album.album_id) + '" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title) + ' 封面" decoding="async">';
+        html += '</div><span class="monograph-seal">藏书阁</span></div><div class="monograph-imprint">';
+        html += '<p class="folio-kicker">MONOGRAPH <b>书目扉页</b></p><h1 class="card-title">' + window.escapeHtml(album.title) + '</h1>';
+        html += '<p class="monograph-byline">' + window.escapeHtml(album.author || '作者未署名') + '</p>';
+        html += '<div class="monograph-meta"><span class="album-id-seal">JM ' + window.escapeHtml(album.album_id) + '</span>';
+        if (album.views != null && album.views !== '') html += '<span>浏览 ' + window.escapeHtml(String(album.views)) + '</span>';
+        if (album.likes != null && album.likes !== '') html += '<span>点赞 ' + window.escapeHtml(String(album.likes)) + '</span>';
         html += '</div>';
-
-        // 右侧信息
-        html += '<div class="col-12 col-md-8 col-lg-9">';
-        html += '<div class="card"><div class="card-body">';
-        html += '<h3 class="card-title">' + window.escapeHtml(album.title) + ' <button type="button" id="wishlist-toggle-btn" class="btn btn-sm wishlist-btn btn-outline-warning ms-2" title="收藏" aria-label="收藏" aria-pressed="false"><i class="bi bi-star" aria-hidden="true"></i></button></h3>';
         // 已下载标记（+ 压缩包标记）或本地文件不可用的原因：由 refreshOfflineStatus 显示（放在标题外，收藏时取的标题文字不受影响）
         html += '<div id="album-offline-status" class="local-status-row" hidden><span class="offline-badge" title="本地有已下载的内容，可以离线阅读；不一定是整部漫画" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i> 已下载内容 · 可离线阅读</span></div>';
         // 检查新章节的状态行（“部分章节已下载 · M/N 话”正下方）：只在本地有已下载内容时由 refreshUpdateStatus 显示
         html += '<div id="album-update-status" class="update-status" role="status" aria-live="polite" hidden></div>';
-        html += '<div class="row mt-3">';
-        html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-person"></i> 作者：</strong> ' + window.escapeHtml(album.author || '-') + '</div>';
-        html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-hash"></i> 车号：</strong> <code>' + window.escapeHtml(album.album_id) + '</code></div>';
-        if (album.views !== undefined) {
-            html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-eye"></i> 观看：</strong> ' + window.escapeHtml(String(album.views)) + '</div>';
-        }
-        if (album.likes !== undefined) {
-            html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-heart"></i> 点赞：</strong> ' + window.escapeHtml(String(album.likes)) + '</div>';
-        }
-        html += '</div>';
+        if (album.description) html += '<p class="monograph-description">' + window.escapeHtml(album.description) + '</p>';
+        html += '<div class="monograph-actions"><a href="' + localReadUrl + '" id="local-read-btn" class="btn btn-primary" title="已下载内容：打开本地文件连续阅读，无需联网" hidden><i class="bi bi-book"></i> 阅读</a>';
+        html += '<a href="' + onlineUrl + '" id="online-read-btn" class="btn btn-outline-primary" title="页面实时从网络加载，不下载、不保存"><i class="bi bi-globe2"></i> 在线观看</a>';
+        html += '<button type="button" id="wishlist-toggle-btn" class="btn btn-sm wishlist-btn btn-outline-warning" title="收藏" aria-label="收藏" aria-pressed="false"><i class="bi bi-star" aria-hidden="true"></i> 收藏</button>';
+        html += '<a href="/search" id="detail-back" class="btn btn-outline-secondary">返回</a></div>';
 
         // 标签
         if (album.tags && album.tags.length > 0) {
@@ -121,7 +109,6 @@
         }
 
         // 标签管理区（由 JS 动态加载）
-        html += '<div id="album-tags-manager" class="mt-2"></div>';
 
         // 角色
         if (album.actors && album.actors.length > 0) {
@@ -141,21 +128,20 @@
             html += '</div>';
         }
 
-        html += '</div></div>'; // 信息卡片结束
-        html += '</div>';       // 右侧列结束
-        html += '</div>';       // 封面 + 信息行结束
+        html += '</div></div>';
+        html += '<details class="monograph-workshop"><summary>标签工坊 <small>管理本地标签</small></summary><div id="album-tags-manager"></div></details>';
 
         // 章节列表（整行）
-        html += '<div class="card">';
-        html += '<div class="card-header d-flex justify-content-between align-items-center">';
+        html += '<section class="monograph-contents"><div class="folio-kicker">CONTENTS / 章回</div>';
+        html += '<div class="monograph-contents-head">';
         // 章节数与刷新说明：“立即检查”发现章节表里还没有的新章节时，refreshChapterTable 只重建表格行并更新这两处
-        html += '<span><i class="bi bi-list-ol"></i> 章节列表 <span class="badge bg-secondary" id="chapter-count">' + (album.photos ? album.photos.length : 0) + '</span><span id="chapter-refresh-status" class="chapter-refresh-status" role="status" aria-live="polite"></span></span>';
+        html += '<h2>章节卷目 <span id="chapter-count">' + (album.photos ? album.photos.length : 0) + '</span><span id="chapter-refresh-status" class="chapter-refresh-status" role="status" aria-live="polite"></span></h2>';
         html += '<div class="form-check"><input type="checkbox" id="select-all-chapters" class="form-check-input"><label class="form-check-label" for="select-all-chapters">全选</label></div>';
         html += '</div>';
 
         html += '<div class="card-body p-0">';
         if (album.photos && album.photos.length > 0) {
-            html += '<table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" title="全选"></th><th style="width:60px">序号</th><th>章节名</th><th style="width:80px">页数</th><th class="chapter-online"><span class="visually-hidden">在线观看</span></th></tr></thead>';
+            html += '<table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" aria-label="全选章节"></th><th>序号</th><th>章节名</th><th>页数</th><th class="chapter-online"><span class="visually-hidden">在线观看</span></th></tr></thead>';
             // 章节行由 fillChapterRows 用 DOM 建（章节更新块里的 chapterRow），刷新章节表时只重建这些行
             html += '<tbody id="chapter-rows"></tbody></table>';
         } else {
@@ -164,16 +150,10 @@
         html += '</div>';
 
         // 底部按钮（窄屏自动换行）；“阅读”只在本地可读时显示（refreshOfflineStatus）
-        html += '<div class="card-footer"><div class="d-flex flex-wrap gap-2">';
+        html += '<div class="monograph-actions chapter-downloads">';
         html += '<button type="button" id="download-selected-btn" class="btn btn-primary"><i class="bi bi-download"></i> 下载选中章节</button>';
         html += '<button type="button" id="download-all-btn" class="btn btn-success"><i class="bi bi-download"></i> 下载全部</button>';
-        html += '<a href="' + localReadUrl + '" id="local-read-btn" class="btn btn-primary" title="已下载内容：打开本地文件连续阅读，无需联网" hidden><i class="bi bi-book" aria-hidden="true"></i> 阅读</a>';
-        html += '<a href="' + onlineUrl + '" id="online-read-btn" class="btn btn-outline-primary" title="页面实时从网络加载，不下载、不保存"><i class="bi bi-globe2"></i> 在线观看</a>';
-        // 从搜索/资源库/收藏等站内页面进入时后退（保留原页面的结果与滚动位置），否则跟随 href
-        html += '<a href="/search" id="detail-back" class="btn btn-outline-secondary ms-auto"><i class="bi bi-arrow-left" aria-hidden="true"></i> 返回</a>';
-        html += '</div></div>';
-
-        html += '</div>'; // 章节卡片结束
+        html += '<a href="/downloads#album-' + encodeURIComponent(album.album_id) + '" class="folio-history">本册传输记录 →</a></div></section>';
 
         container.innerHTML = html;
         fillChapterRows(album.photos || [], {});
@@ -375,12 +355,13 @@
         cb.type = 'checkbox';
         cb.setAttribute('name', 'chapters');
         cb.value = pid;
+        cb.setAttribute('aria-label', '选择第 ' + (idx + 1) + ' 话');
         cb.checked = !!checked;
         pick.appendChild(cb);
         tr.appendChild(pick);
         tr.appendChild(updateNode('td', null, String(idx + 1)));
         tr.appendChild(updateNode('td', null, (photo && photo.title) || '-'));
-        tr.appendChild(updateNode('td', null, String((photo && photo.page_count) || '?')));
+        tr.appendChild(updateNode('td', null, photo && photo.page_count != null && photo.page_count_known !== false ? String(photo.page_count) : '—'));
         var online = updateNode('td', 'chapter-online');
         var link = updateNode('a', 'btn btn-sm btn-outline-primary');
         link.href = '/online/' + encodeURIComponent(String(albumId)) + '?chapter=' + encodeURIComponent(pid);

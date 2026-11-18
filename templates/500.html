@@ -1,14 +1,12 @@
 {% extends "base.html" %}
-{% block title %}服务器错误 - JMComic 下载控制台{% endblock %}
+{% block title %}服务器错误 · 藏书阁{% endblock %}
 
 {% block content %}
-<div class="text-center py-5">
-    <div class="mb-4" style="font-size: 5rem; color: var(--error);">
-        <i class="bi bi-exclamation-triangle"></i>
-    </div>
-    <h3 class="mb-3">服务器内部错误</h3>
-    <p class="text-muted mb-4">服务遇到了问题，请稍后重试。如问题持续，请查看应用日志。</p>
-    <div class="d-flex justify-content-center gap-3">
+<section class="atelier-error" aria-labelledby="error-title">
+    <p class="err-code">500 / 服务异常</p>
+    <h1 id="error-title">服务器内部错误</h1>
+    <p>服务遇到了问题，请稍后重试。如果问题持续，可以在<a href="/settings#logs">日志与诊断</a>中查看记录。</p>
+    <div class="err-actions">
         <a href="/" class="btn btn-primary">
             <i class="bi bi-house-door"></i> 返回首页
         </a>
@@ -16,5 +14,5 @@
             <i class="bi bi-list-ul"></i> 查看下载管理
         </a>
     </div>
-</div>
+</section>
 {% endblock %}

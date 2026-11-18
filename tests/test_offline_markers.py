@@ -263,7 +263,7 @@ def test_downloads_completed_cards_show_the_shared_marker():
     assert "status-badge-muted" in utils and "文件已删除" in utils
     # 预览 reads the same local files as 阅读: offered only when the album is readable
     preview = card.index("href=\"/preview/' + albumPath")
-    assert re.search(r"readable && job\._path \? '<a[^']*$", card[:preview])
+    assert re.search(r"readable && job\.output_path \? '<a[^']*$", card[:preview])
     # the status badges sit with the title, so they don't shift sideways with the number of buttons
     assert card.index("job-card-status") < card.index("job-card-actions")
 
@@ -362,7 +362,9 @@ def test_downloads_offer_read_on_completed_and_failed_cards():
     assert "\n      + window.readLink.html(job.album_id, readableState(job.album_id), 'btn-sm')\n" in failed.replace("\r\n", "\n")
     # failed albums are checked too (an earlier download may still be readable) and re-rendered with the result
     assert "refreshReadable(lastCompleted.concat(lastFailed));" in source
-    assert "renderSection('failed', lastFailed, renderFailedCard);" in source
+    refresh = source[source.index('function refreshReadable'):source.index('function refreshJobs')]
+    assert 'readableAlbums = next;' in refresh and 'renderFolios();' in refresh
+    assert 'return renderFailedCard(job)' in source
 
 
 # Runs the real helper from utils.js in Node with a tiny DOM stand-in and checks what it renders.

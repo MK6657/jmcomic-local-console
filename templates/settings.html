@@ -1,17 +1,45 @@
 {% extends "base.html" %}
-{% block title %}JMComic 下载控制台 - 设置{% endblock %}
+{% block title %}偏好与色谱 · 藏书阁{% endblock %}
+{% block head_extra %}
+<link rel="stylesheet" href="{{ asset_url('css/atelier-settings.css') }}">
+{% endblock %}
 
 {% block content %}
 
-<h4 class="mb-4"><i class="bi bi-gear"></i> 设置</h4>
+{% set chapters = [('palette','矿物色谱'), ('general','基础设置'), ('network','网络设置'), ('download','下载设置'), ('archive','下载后处理'), ('schedule','定时下载'), ('update-check','检查新章节'), ('interface','界面操作'), ('logs','日志与诊断')] %}
+<header class="pref-head">
+    <p class="pref-kicker" lang="en">Atelier Preferences &amp; Colophon</p>
+    <h1>偏好与矿物色谱</h1>
+</header>
+
+<div class="pref-layout">
+<nav class="pref-index" aria-label="设置章节目录">
+    <p class="pref-kicker">卷内目录</p>
+    <ol>{% for anchor, label in chapters %}
+        <li><a href="#{{ anchor }}"><span aria-hidden="true">{{ '%02d'|format(loop.index) }}</span>{{ label }}</a></li>
+    {% endfor %}</ol>
+</nav>
+<div class="pref-pages">
+<section class="settings-section" id="palette" aria-labelledby="palette-heading">
+    <h2 id="palette-heading">矿物色谱</h2>
+    <p class="pref-note">选一组纸色与墨色。选定后即刻应用，重新打开书阁时沿用。</p>
+    <div id="pref-palettes" class="pref-palettes" role="group" aria-label="全站主题">
+        {% for key, title, subtitle in [('paper','宣纸','古籍暖米'), ('sage','青瓷','宋韵粉青'), ('linen','白麻','画册晨光'), ('night','玄墨','暗房夜读')] %}
+        <button type="button" class="pref-palette" data-pref-theme="{{ key }}" aria-pressed="{{ 'true' if key == ui_theme else 'false' }}">
+            <span class="pref-swatches" aria-hidden="true"><i></i><i></i><i></i></span>
+            <strong>{{ title }}</strong><span>{{ subtitle }}</span>
+        </button>
+        {% endfor %}
+    </div>
+</section>
 
 <div id="settings-alert" class="d-none"></div>
 
 <form id="settings-form" novalidate>
 
     <!-- ===== A. 基础设置 ===== -->
-    <div class="settings-section">
-        <h5><i class="bi bi-sliders"></i> 基础设置</h5>
+    <section class="settings-section" id="general">
+        <h2>基础设置</h2>
         <div class="row g-3">
             <div class="col-12" data-setting-key="download_root">
                 <label for="download_root" class="form-label">下载目录</label>
@@ -19,7 +47,7 @@
                     <input type="text" id="download_root" name="download_root"
                            class="form-control" value="{{ settings.download_root or '' }}" readonly>
                 </div>
-                <div class="form-text">第一版下载目录固定为项目根目录下的 <code>downloads/</code> 文件夹</div>
+                <div class="form-text">当前实例的下载位置，由启动配置决定。</div>
             </div>
             <div class="col-12" data-setting-key="skip_existing">
                 <div class="form-check">
@@ -31,24 +59,21 @@
                 <div class="form-text">启用后，已下载的图片将自动跳过，避免重复下载</div>
             </div>
         </div>
-    </div>
+    </section>
 
     <!-- ===== B. 网络设置 ===== -->
-    <div class="settings-section">
-        <h5><i class="bi bi-globe"></i> 网络设置</h5>
+    <section class="settings-section" id="network">
+        <h2>网络设置</h2>
         <div class="row g-3">
             <div class="col-12 col-md-6" data-setting-key="proxy">
                 <label for="proxy" class="form-label">代理地址</label>
-                <input type="text" id="proxy" name="proxy" class="form-control"
-                       placeholder="例如: http://127.0.0.1:7890"
-                       value="{{ settings.proxy or '' }}">
-                <div class="form-text">
-                    HTTP 代理（留空则不使用代理）<br>
-                    <strong>格式示例：</strong>
-                    <code>http://127.0.0.1:7890</code>、
-                    <code>http://user:pass@proxy.example.com:8080</code>
+                <div class="input-group has-validation">
+                    <input type="password" id="proxy" name="proxy" class="form-control"
+                           autocomplete="off" spellcheck="false" placeholder="留空表示直连" aria-describedby="proxy-help">
+                    <button type="button" id="proxy-visibility" class="btn btn-outline-secondary" aria-controls="proxy" aria-label="显示代理地址" aria-pressed="false">显示</button>
+                    <div class="invalid-feedback"></div>
                 </div>
-                <div class="invalid-feedback"></div>
+                <div class="form-text" id="proxy-help">支持 HTTP(S) 和 SOCKS5。清空并保存即可恢复直连；日志会隐藏认证信息。</div>
             </div>
             <div class="col-6 col-md-3" data-setting-key="timeout">
                 <label for="timeout" class="form-label">超时（秒）</label>
@@ -60,27 +85,26 @@
             <div class="col-6 col-md-3" data-setting-key="retry_times">
                 <label for="retry_times" class="form-label">重试次数</label>
                 <input type="number" id="retry_times" name="retry_times" class="form-control"
-                       min="0" max="20" value="{{ settings.retry_times or 3 }}">
+                       min="0" max="20" value="{{ settings.retry_times|default(2) }}">
                 <div class="form-text">建议范围：<strong>1-5</strong> 次。设为 0 表示不重试</div>
                 <div class="invalid-feedback"></div>
             </div>
             <div class="col-12 col-md-6" data-setting-key="client_type">
                 <label for="client_type" class="form-label">客户端类型</label>
                 <select id="client_type" name="client_type" class="form-select">
-                    <option value="html" {% if settings.client_type == 'html' %}selected{% endif %}>HTML（网页端，推荐）</option>
+                    <option value="html" {% if settings.client_type == 'html' %}selected{% endif %}>HTML（网页端）</option>
                     <option value="api"  {% if settings.client_type == 'api' %}selected{% endif %}>API（接口端）</option>
                 </select>
                 <div class="form-text">
-                    <strong>HTML</strong>（网页端）兼容性更好，推荐使用；
-                    <strong>API</strong>（接口端）速度更快但可能不稳定
+                    两种客户端各自使用对应的上游域名。
                 </div>
             </div>
         </div>
-    </div>
+    </section>
 
     <!-- ===== C. 下载设置 ===== -->
-    <div class="settings-section">
-        <h5><i class="bi bi-download"></i> 下载设置</h5>
+    <section class="settings-section" id="download">
+        <h2>下载设置</h2>
         <div class="row g-3">
             <div class="col-12 col-md-6" data-setting-key="max_running_jobs">
                 <label for="max_running_jobs" class="form-label">最大同时任务数</label>
@@ -129,11 +153,11 @@
                 </div>
             </div>
         </div>
-    </div>
+    </section>
 
     <!-- ===== D. 下载后处理 ===== -->
-    <div class="settings-section">
-        <h5><i class="bi bi-archive"></i> 下载后处理</h5>
+    <section class="settings-section" id="archive">
+        <h2>下载后处理</h2>
         <div class="row g-3">
             <div class="col-12" data-setting-key="auto_pack">
                 <div class="form-text mb-3">下载完成后自动将漫画打包为 .cbz 格式</div>
@@ -157,11 +181,11 @@
                 </div>
             </div>
         </div>
-    </div>
+    </section>
 
     <!-- ===== E. 定时下载设置 ===== -->
-    <div class="settings-section">
-        <h5><i class="bi bi-clock-history"></i> 定时下载</h5>
+    <section class="settings-section" id="schedule">
+        <h2>定时下载</h2>
         <div class="row g-3">
             <div class="col-12" data-setting-key="schedule_enabled">
                 <div class="form-check form-switch">
@@ -208,11 +232,11 @@
                 </div>
             </div>
         </div>
-    </div>
+    </section>
 
     <!-- ===== 检查新章节（core/update_checker.py：只取章节列表，从不下载；状态由 js/settings.js loadUpdateSummary 读取） ===== -->
-    <div class="settings-section" id="update-check">
-        <h5><i class="bi bi-bell"></i> 检查新章节</h5>
+    <section class="settings-section" id="update-check">
+        <h2>检查新章节</h2>
         <div class="row g-3">
             <div class="col-12" data-setting-key="auto_update_check">
                 <div class="form-check form-switch">
@@ -230,11 +254,11 @@
                 <div class="form-text" id="update-check-status" role="status" aria-live="polite">正在读取检查状态…</div>
             </div>
         </div>
-    </div>
+    </section>
 
     <!-- ===== 界面操作 ===== -->
-    <div class="settings-section">
-        <h5><i class="bi bi-hand-index"></i> 界面操作</h5>
+    <section class="settings-section" id="interface">
+        <h2>界面操作</h2>
         <div class="row g-3">
             <div class="col-12" data-setting-key="library_card_click">
                 <div class="form-check form-switch">
@@ -251,10 +275,11 @@
                 </div>
             </div>
         </div>
-    </div>
+    </section>
 
     <!-- ===== 操作按钮 ===== -->
-    <div class="d-grid gap-2 d-md-flex justify-content-md-end mb-4">
+    <p class="pref-note">保存只更新修改过的设置。导出文件不包含代理地址。</p>
+    <div class="d-grid gap-2 d-md-flex flex-wrap mb-4">
         <button type="button" id="export-settings-btn" class="btn btn-outline-secondary btn-lg px-4">
             <i class="bi bi-download"></i> 导出设置
         </button>
@@ -271,7 +296,8 @@
 
 <!-- ===== F. 日志与诊断（放在表单之外，永远不会随设置一起提交；由 js/logs.js 驱动） ===== -->
 <section class="settings-section log-viewer" id="logs" aria-labelledby="logs-heading">
-    <h5 id="logs-heading"><i class="bi bi-journal-text" aria-hidden="true"></i> 日志与诊断</h5>
+    <p class="pref-kicker" lang="en">System Journal</p>
+    <h2 id="logs-heading">日志与诊断</h2>
     <p class="log-viewer-summary" id="log-summary">
         日志位置：<code id="log-dir">—</code>
         <span class="log-viewer-summary-sep" aria-hidden="true">·</span>
@@ -301,6 +327,8 @@
         <button type="button" id="log-more-btn" class="btn btn-outline-secondary btn-sm">显示更多（最多 500 条）</button>
     </div>
 </section>
+</div>
+</div>
 
 {% endblock %}
 

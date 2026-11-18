@@ -16,7 +16,7 @@ global.location = {search: ''}; global.confirm = () => true;
 global.showToast = (message, type) => toasts.push({message, type});
 eval(fs.readFileSync(utilsPath, 'utf8'));
 window.apiFetch = (url, opts = {}) => {
-  if (url.startsWith('/api/jobs?')) return Promise.resolve({status: 'ok', jobs: [], page: 1});
+  if (url.startsWith('/api/jobs?')) return new Promise(() => {});
   if (opts.method !== 'POST' || !scenario.responses.length) throw Error('unexpected request: ' + url);
   posts.push({url, body: opts.body ? JSON.parse(opts.body) : null});
   peak = Math.max(peak, ++active);
@@ -28,7 +28,7 @@ window.apiFetch = (url, opts = {}) => {
 let click, batchButton;
 if (scenario.page === 'downloads') {
   mount('div', 'downloadTabs');
-  const content = mount('div', 'downloadTabsContent'), failed = mount('div', 'failed-section', content);
+  const content = mount('div', 'downloadTabsContent'), failed = mount('div', 'folio-list', content);
   const single = mount('button', 'single', content); single.setAttribute('data-action', 'retry');
   batchButton = mount('button', 'batch', content); batchButton.setAttribute('data-action', 'batch-retry');
   for (const id of scenario.cards) {

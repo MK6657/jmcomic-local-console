@@ -241,6 +241,7 @@ function el(tag) {
 }
 const body = el('body');
 const docHandlers = {}, winHandlers = {};
+global.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init.detail; } };
 global.window = global;
 window.addEventListener = (t, fn) => { (winHandlers[t] = winHandlers[t] || []).push(fn); };
 global.document = {
@@ -251,6 +252,7 @@ global.document = {
   querySelectorAll: sel => body.querySelectorAll(sel),
   querySelector: sel => body.querySelector(sel),
   addEventListener: (t, fn) => { (docHandlers[t] = docHandlers[t] || []).push(fn); },
+  dispatchEvent: event => (docHandlers[event.type] || []).forEach(fn => fn(event)),
 };
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)); };
 function makeError(spec) {
@@ -727,7 +729,7 @@ def test_detail_block_is_wired_outside_the_offline_slice():
     render = source[source.index("function renderAlbum"):source.index("function bindBackLink")]
     offline_div = render.index('id="album-offline-status"')
     update_div = render.index('<div id="album-update-status" class="update-status" role="status" aria-live="polite" hidden></div>')
-    assert offline_div < update_div < render.index('<div class="row mt-3">')
+    assert offline_div < update_div < render.index('<div class="monograph-actions">')
 
 
 # ─── utils.js window.updateBadges ─────────────────────────────────────────────
@@ -952,8 +954,7 @@ const [utilsPath, downloadsPath] = process.argv.slice(1);
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 fixClock(input.now);
 (0, eval)(fs.readFileSync(utilsPath, 'utf8'));
-for (const id of ['downloadTabs', 'downloadTabsContent', 'running-section', 'queued-section', 'completed-section',
-                  'failed-section', 'running-count', 'queued-count', 'completed-count', 'failed-count']) {
+for (const id of ['downloadTabs', 'downloadTabsContent', 'folio-list']) {
   const n = el('div'); n.id = id; body.appendChild(n);
 }
 const calls = [];
@@ -983,14 +984,15 @@ window.apiFetch = global.apiFetch = (url, opts) => {
 (async () => {
   (docHandlers.DOMContentLoaded || []).forEach(fn => fn());
   await flush();
-  const html = document.getElementById('completed-section').innerHTML;
+  const html = document.getElementById('folio-list').innerHTML;
+  let failed = '';
   const cards = {};
   html.split('<div class="card job-card').slice(1).forEach(part => {
+    if (part.includes('data-status="failed"')) { failed += part; return; }
     const id = part.match(/data-job-id="([^"]+)"/)[1];
     const status = part.match(/<div class="job-card-status">([\s\S]*?)<\/div>/)[1];
     cards[id] = status;
   });
-  const failed = document.getElementById('failed-section').innerHTML;
   process.stdout.write(JSON.stringify({ calls, cards, failed }));
 })().catch(err => { console.error(err && err.stack || err); process.exit(1); });
 """
@@ -1043,9 +1045,8 @@ def test_downloads_update_states_are_chunked_like_readable():
 
 def test_settings_template_switch_and_copy(client):
     html = client.get("/settings").get_data(as_text=True)
-    section = html[html.index('<div class="settings-section" id="update-check">'):]
-    section = section[:section.index("<!-- ===== 界面操作 ===== -->")]
-    assert html.index("定时下载") < html.index('id="update-check"') < html.index("界面操作")
+    section = html[html.index('<section class="settings-section" id="update-check">'):].split('</section>', 1)[0]
+    assert html.index('id="schedule"') < html.index('id="update-check"') < html.index('id="interface"')
     switch = re.search(r'<input type="checkbox" id="auto_update_check" name="auto_update_check"[^>]*>', section).group(0)
     assert 'role="switch"' in switch and 'value="true"' in switch and 'aria-describedby="auto_update_check_help"' in switch
     assert "checked" in switch                               # on by default
@@ -1053,7 +1054,7 @@ def test_settings_template_switch_and_copy(client):
     assert "<strong>从不下载任何内容</strong>" in section and "关闭后仍可在漫画详情页点「立即检查」" in section
     assert "下载时没选的章节不算" in section and "只收藏、没有下载的不查" in section
     assert '<div class="form-text" id="update-check-status" role="status" aria-live="polite">正在读取检查状态…</div>' in section
-    assert "<h5><i class=\"bi bi-bell\"></i> 检查新章节</h5>" in section
+    assert '<h2>检查新章节</h2>' in section
     client.post("/api/settings", json={"auto_update_check": "false"})
     off = re.search(r'<input type="checkbox" id="auto_update_check"[^>]*>', client.get("/settings").get_data(as_text=True))
     assert "checked" not in off.group(0)
@@ -1162,7 +1163,7 @@ def test_settings_summary_is_written_as_three_text_lines(settings_out):
 def test_settings_summary_is_reloaded_with_the_settings():
     source = _read("settings.js").replace("\r\n", "\n")
     load = source[source.index("async function loadSettings"):source.index("// ── 事件绑定")]
-    assert load.rstrip().endswith("loadUpdateSummary();\n  }")
+    assert load.index('populateForm(settings,') < load.index('loadUpdateSummary();')
     save = source[source.index("async function handleSave"):source.index("// ── 检查新章节状态 ──")]
     assert "showToast('设置已保存', 'success');" in save and "loadUpdateSummary();" in save
     block = source[source.index("// ── 检查新章节状态 ──"):source.index("// ── 检查新章节状态结束 ──")]
@@ -1291,8 +1292,7 @@ const [utilsPath, downloadsPath] = process.argv.slice(1);
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 fixClock(input.now);
 (0, eval)(fs.readFileSync(utilsPath, 'utf8'));
-for (const id of ['downloadTabs', 'downloadTabsContent', 'running-section', 'queued-section', 'completed-section',
-                  'failed-section', 'running-count', 'queued-count', 'completed-count', 'failed-count']) {
+for (const id of ['downloadTabs', 'downloadTabsContent', 'folio-list']) {
   const n = el('div'); n.id = id; body.appendChild(n);
 }
 let phase = 0;
@@ -1319,7 +1319,8 @@ window.apiFetch = global.apiFetch = (url, opts) => {
 (0, eval)(fs.readFileSync(downloadsPath, 'utf8'));
 function chips() {
   const out = {};
-  document.getElementById('completed-section').innerHTML.split('<div class="card job-card').slice(1).forEach(part => {
+  document.getElementById('folio-list').innerHTML.split('<div class="card job-card').slice(1).forEach(part => {
+    if (!part.includes('data-status="completed"')) return;
     const id = part.match(/data-job-id="([^"]+)"/)[1];
     out[id] = /有新章节/.test(part.match(/<div class="job-card-status">([\s\S]*?)<\/div>/)[1]);
   });

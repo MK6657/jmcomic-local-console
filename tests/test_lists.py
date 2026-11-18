@@ -692,5 +692,8 @@ def test_focused_and_pressed_buttons_and_table_text_stay_in_the_palette():
 def test_wishlist_header_wraps_instead_of_breaking_the_title():
     # at 390px the button group squeezed the heading until it broke inside the word: 收藏清 / 单
     template = (TEMPLATES / "wishlist.html").read_text(encoding="utf-8")
-    assert re.search(r'<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">\s*'
-                     r'<h4 class="text-nowrap"><i class="bi bi-bookmark-heart"></i> 收藏清单</h4>', template)
+    heading = re.search(r'<header class="shelf-heading">(.*?)</header>', template, re.S)
+    assert heading and '<h1>心愿典藏</h1>' in heading[1]
+    assert 'wishlist-download-undownloaded-btn' in template[heading.end():]
+    css = (ROOT / 'static/css/atelier-shelf.css').read_text(encoding='utf-8')
+    assert re.search(r'\.shelf-tools\b[^{}]*\{[^}]*flex-wrap:\s*wrap', css)

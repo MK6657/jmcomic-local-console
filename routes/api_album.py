@@ -1,14 +1,18 @@
 """
 专辑详情 API & 封面重定向
 """
+import io
 import re
 from pathlib import Path
 
 from flask import Blueprint, jsonify, make_response, redirect, send_file
 
+from core import archive_pages
 from core.database import get_db, get_all_jobs, get_job, get_completed_job_by_album_id
+from core.file_tree import is_link
 from core.logger import log
 from core.path_guard import is_safe_path
+from core.path_utils import get_cache_dir
 from core.validation import validate_numeric, require_numeric, ALLOWED_EXTENSIONS, is_allowed_image, get_image_mime
 from core.jm_service import get_album_detail_cached
 from core.upstream import known_failure
@@ -44,9 +48,9 @@ def cover_redirect(album_id: str):
         return jsonify({"status": "error", "message": "album_id 必须是纯数字"}), 400
     log.info(f"API封面重定向 album_id={album_id}")
     try:
-        # -- 本地封面查找 --
+        # -- 本地封面查找（散图优先 → CBZ/ZIP 首张可读页 → 本地封面缓存）--
         job = get_completed_job_by_album_id(album_id)
-        if job and job.get("output_path"):
+        if job and job.get("output_path") and not job.get("superseded_at"):
             album_dir = Path(job["output_path"])
             if album_dir.exists() and is_safe_path(album_dir):
                 first_img = first_page_image(album_dir)
@@ -58,6 +62,25 @@ def cover_redirect(album_id: str):
                         log.info(f"API封面返回本地文件 album_id={album_id}")
                         # max_age=0：本地封面可能随重新下载变化，走 ETag 协商缓存
                         return send_file(str(first_img), mimetype=mime, max_age=0)
+                index = archive_pages.select(album_dir)
+                if index is not None and index.status == "ok" and index.reader_pages:
+                    try:
+                        first_page = index.reader_pages[0]
+                        raw = archive_pages.read_page(index, first_page)
+                        mime = get_image_mime(first_page.suffix)
+                        log.info(f"API封面返回本地归档首页 album_id={album_id}")
+                        return send_file(io.BytesIO(raw), mimetype=mime, max_age=0)
+                    except archive_pages.ArchiveError:
+                        pass
+
+        covers_dir = get_cache_dir() / "covers"
+        if covers_dir.is_dir() and not is_link(covers_dir):
+            for ext in (".webp", ".png", ".jpg"):
+                cached_cover = covers_dir / f"{album_id}{ext}"
+                if cached_cover.is_file() and not is_link(cached_cover):
+                    mime = get_image_mime(ext)
+                    log.info(f"API封面返回本地缓存封面 album_id={album_id}")
+                    return send_file(str(cached_cover), mimetype=mime, max_age=0)
 
         # -- CDN 回退（本地没有封面）--
         url = JmcomicText.get_album_cover_url(album_id)

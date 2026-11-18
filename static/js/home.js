@@ -3,10 +3,43 @@
  *
  * 首页只需要 SSE 连接功能，不需要轮询/渲染。
  * 按钮不用内联 onclick：job_id 只放在 data-job-id（模板自动转义），由一个委托监听器读取。
- * 依赖: connectSSE / connectAllSSE (sse-client.js), openFolder (utils.js)
+ * 列表页只初始化展示方式和书封回退；首页依赖 sse-client.js、utils.js。
  */
 (function () {
   'use strict';
+
+  var switcher = document.getElementById('shelf-view');
+  if (switcher) {
+    var collection = switcher.closest('.atelier-collection');
+    var defaultView = collection.dataset.layout;
+    var requested = new URLSearchParams(window.location.search).get('view');
+    var modes = {shelf: '书架', catalog: '名录'};
+    collection.dataset.layout = Object.hasOwn(modes, requested) ? requested : defaultView;
+    Object.keys(modes).forEach(function (mode) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = modes[mode];
+      button.dataset.mode = mode;
+      button.setAttribute('aria-controls', switcher.getAttribute('aria-controls'));
+      button.setAttribute('aria-pressed', String(mode === collection.dataset.layout));
+      button.addEventListener('click', function () {
+        collection.dataset.layout = mode;
+        switcher.querySelectorAll('button').forEach(function (other) {
+          other.setAttribute('aria-pressed', String(other === button));
+        });
+        var url = new URL(window.location.href);
+        if (mode === defaultView) url.searchParams.delete('view');
+        else url.searchParams.set('view', mode);
+        window.history.replaceState(window.history.state, '', url);
+      });
+      switcher.appendChild(button);
+    });
+    collection.addEventListener('error', function (event) {
+      var image = event.target;
+      if (image.tagName === 'IMG' && image.closest('.shelf-cover')) image.hidden = true;
+    }, true);
+    return;
+  }
 
   document.addEventListener('DOMContentLoaded', function () {
     // 如果页面上有 #downloadTabs，说明是下载管理页，不做处理
@@ -36,12 +69,16 @@
     window.addEventListener('pageshow', function (event) { if (event.persisted) syncVisible(); });
     syncVisible();
 
-    // 车号下载：带着输入框里的车号打开搜索页
     var heroDownload = document.getElementById('hero-download-btn');
     var heroKeyword = document.getElementById('hero-keyword');
     if (heroDownload && heroKeyword) {
       heroDownload.addEventListener('click', function () {
-        window.location.href = '/search?keyword=' + encodeURIComponent(heroKeyword.value.trim());
+        var id = heroKeyword.value.trim().replace(/^JM\s*/i, '');
+        if (/^\d{1,20}$/.test(id)) window.location.href = '/album/' + id;
+        else {
+          heroKeyword.focus();
+          showToast('请输入数字车号，例如 JM123456', 'warning');
+        }
       });
     }
 

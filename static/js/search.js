@@ -9,7 +9,6 @@
 
   var searchForm = document.getElementById('search-form');
   var searchInput = document.getElementById('search-input');
-  var searchBtn = document.getElementById('search-btn');
   var sortSelect = document.getElementById('sort-select');
   var pageSizeSelect = document.getElementById('page-size-select');
   var resultsDiv = document.getElementById('search-results');
@@ -89,7 +88,7 @@
   function restoreSearchState(fromCache) {
     var params = new URLSearchParams(window.location.search);
     currentQuery = params.get('keyword') || '';
-    currentSort = ['latest', 'views', 'likes'].indexOf(params.get('sort')) >= 0 ? params.get('sort') : 'latest';
+    currentSort = ['latest', 'views', 'likes', 'pictures'].indexOf(params.get('sort')) >= 0 ? params.get('sort') : 'latest';
     currentPage = Math.max(1, Math.min(MAX_PAGE, parseInt(params.get('page'), 10) || 1));
     currentPageSize = [20, 50, 100].indexOf(Number(params.get('page_size'))) >= 0 ? Number(params.get('page_size')) : 20;
     if (!currentQuery) return false;
@@ -325,32 +324,30 @@
     }
 
     // 渲染卡片（网格布局，每行4个）——整个卡片可点击；封面链接与标题同址，移出 Tab 顺序避免重复
-    var html = '<div class="row row-cols-1 row-cols-sm-2 row-cols-lg-3 row-cols-xl-4 g-3 mb-4">';
+    var html = '<div class="shelf-results">';
     items.forEach(function (item) {
       var albumUrl = '/album/' + encodeURIComponent(item.album_id);
-      html += '<div class="col">';
-      html += '<div class="card album-card h-100" data-album-url="' + albumUrl + '" data-album-id="' + escapeHtmlAttr(item.album_id) + '">';
+      var title = item.title || '未命名';
+      html += '<article class="album-card" data-album-url="' + albumUrl + '" data-album-id="' + escapeHtmlAttr(item.album_id) + '">';
       // 已下载标记（+ 压缩包标记）或本地文件不可用的原因：盖在封面左上角，由 refreshReadable 按 /api/preview/available 的结果显示
-      html += '<div class="cover-badges"><span class="offline-badge offline-badge--cover" title="本地有已下载的内容，可以离线阅读；不一定是整部漫画" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载内容 · 可离线阅读</span></div>';
-      html += '<a href="' + albumUrl + '" class="card-cover-link" tabindex="-1" aria-hidden="true">';
+      html += '<div class="shelf-pedestal"><a href="' + albumUrl + '" class="card-cover-link bound-book shelf-cover" tabindex="-1" aria-hidden="true"><span class="shelf-ticket">' + escapeHtml(title) + '</span>';
 
       // 封面
-      if (item.cover_url) {
+      if (item.cover_url && item.cover_url !== '/static/images/no-cover.svg') {
         html += '<img src="' + escapeHtmlAttr(item.cover_url) + '" class="card-img-top" alt="" loading="lazy" decoding="async">';
-      } else {
-        html += '<div class="cover-placeholder"><i class="bi bi-image"></i></div>';
       }
 
-      html += '</a><div class="card-body d-flex flex-column">';
-      html += '<h6 class="card-title" title="' + escapeHtmlAttr(item.title) + '"><a class="text-decoration-none text-reset" href="' + albumUrl + '">' + escapeHtml(item.title) + '</a></h6>';
-      html += '<div class="mb-2 small text-muted">';
+      html += '</a></div><div class="card-body d-flex flex-column">';
+      html += '<div class="cover-badges"><span class="offline-badge offline-badge--cover" title="本地有已下载的内容，可以离线阅读；不一定是整部漫画" hidden><i class="bi bi-check-circle-fill" aria-hidden="true"></i>已下载内容 · 可离线阅读</span></div>';
+      html += '<h3 class="card-title" title="' + escapeHtmlAttr(title) + '"><a class="text-decoration-none text-reset" href="' + albumUrl + '">' + escapeHtml(title) + '</a></h3>';
+      html += '<div class="shelf-meta mb-2 small text-muted">';
       if (item.author) html += '<div><i class="bi bi-person"></i> ' + escapeHtml(item.author) + '</div>';
-      if (item.album_id) html += '<div><i class="bi bi-hash"></i> ' + escapeHtml(item.album_id) + '</div>';
+      if (item.album_id) html += '<div class="shelf-number">JM / ' + escapeHtml(item.album_id) + '</div>';
       html += '</div>';
 
       // 标签
       if (item.tags && item.tags.length > 0) {
-        html += '<div class="mb-2">';
+        html += '<div class="shelf-tags mb-2">';
         item.tags.slice(0, 5).forEach(function (tag) {
           html += '<span class="badge bg-light text-dark me-1">' + escapeHtml(tag) + '</span>';
         });
@@ -363,11 +360,11 @@
       // 阅读：已下载打开本地文件，否则在线阅读；判断结果回来前是中性样式（refreshReadable → setCardReadable）
       html += window.readLink.html(item.album_id, undefined, 'btn-sm flex-fill reader-link');
       html += '</div><div class="d-flex gap-2">';
-      html += '<button type="button" class="btn btn-success btn-sm flex-fill" data-action="download" data-album-id="' + escapeHtmlAttr(item.album_id) + '"><i class="bi bi-download"></i> 下载</button>';
-      html += '<button type="button" class="btn btn-sm wishlist-btn btn-outline-warning" data-action="wishlist" data-album-id="' + escapeHtmlAttr(item.album_id) + '" data-title="' + escapeHtmlAttr(item.title) + '" data-author="' + escapeHtmlAttr(item.author) + '" data-cover="' + escapeHtmlAttr(item.cover_url) + '" title="收藏" aria-label="收藏"><i class="bi bi-star"></i></button>';
+      html += '<button type="button" class="btn btn-outline-secondary btn-sm flex-fill" data-action="download" data-album-id="' + escapeHtmlAttr(item.album_id) + '"><i class="bi bi-download"></i> 下载</button>';
+      html += '<button type="button" class="btn btn-sm wishlist-btn btn-outline-warning" data-action="wishlist" data-album-id="' + escapeHtmlAttr(item.album_id) + '" data-title="' + escapeHtmlAttr(title) + '" data-author="' + escapeHtmlAttr(item.author) + '" data-cover="' + escapeHtmlAttr(item.cover_url) + '" title="收藏" aria-label="收藏" aria-pressed="false"><i class="bi bi-star"></i></button>';
       html += '</div></div>';
 
-      html += '</div></div></div>';
+      html += '</div></article>';
     });
     html += '</div>';
     resultsDiv.innerHTML = html;
@@ -520,7 +517,8 @@
     btn.classList.toggle('btn-warning', starred);
     btn.classList.toggle('btn-outline-warning', !starred);
     btn.title = starred ? '取消收藏' : '收藏';
-    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-label', '收藏');
+    btn.setAttribute('aria-pressed', String(starred));
   }
 
   function toggleWishlist(btn) {
@@ -580,18 +578,9 @@
 
   // ── 事件绑定 ──
 
-  if (searchBtn) searchBtn.addEventListener('click', doSearch);
-
-  // 拦截表单提交（Enter 键），防止页面重载
-  if (searchForm) {
-    searchForm.addEventListener('submit', function (e) { e.preventDefault(); });
-  }
-
-  if (searchInput) searchInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      doSearch();
-    }
+  searchForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    doSearch();
   });
   if (sortSelect) sortSelect.addEventListener('change', function () {
     if (currentQuery) fetchResults(1);

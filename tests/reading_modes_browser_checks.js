@@ -25,7 +25,7 @@ async (page) => {
   await page.waitForURL('**/preview/900001?page=1');
   await page.waitForFunction(() => document.getElementById('page-total').textContent === '430');
   await page.waitForFunction(() => document.getElementById('preview-image').naturalWidth > 0);
-  check(await page.locator('.thumb-item').count() === 100, 'Initial thumbnails must be batched');
+  check(await page.locator('.thumb-item').count() === 9, 'Initial thumbnails exceed the filmstrip window');
   const layout = await page.locator('.thumb-item img').first().evaluate(img => ({
     fit: getComputedStyle(img).objectFit,
     width: img.getBoundingClientRect().width,
@@ -35,7 +35,8 @@ async (page) => {
   }));
   check(layout.fit === 'contain' && layout.width <= layout.frame && layout.bar > layout.rail, 'Thumbnails are still clipped');
   await page.getByRole('button', { name: '向后浏览缩略图', exact: true }).click();
-  check(await page.locator('#thumb-container').evaluate(el => el.scrollLeft) > 0, 'Thumbnail next arrow did not scroll');
+  check(await page.locator('.thumb-item').first().getAttribute('data-page') === '10', 'Thumbnail next arrow did not advance');
+  await page.getByRole('button', { name: '向后浏览缩略图', exact: true }).click();
   await page.locator('.thumb-item[data-page="25"]').click();
   await page.waitForFunction(() => document.getElementById('page-current').textContent === '25');
   await page.screenshot({ path: 'output/playwright/paged-full-thumbnails.png', animations: 'disabled' });
@@ -51,7 +52,7 @@ async (page) => {
   await page.waitForFunction(() => document.getElementById('page-current').textContent === '25');
   await page.locator('#btn-last').click();
   await page.waitForFunction(() => document.getElementById('page-current').textContent === '430');
-  check(await page.locator('.thumb-item').count() === 430, 'Late-page thumbnails were not loaded');
+  check(await page.locator('.thumb-item').count() === 9, 'Far jump mounted intermediate thumbnails');
   check(await page.locator('.thumb-item[aria-current="page"]').getAttribute('data-page') === '430', 'Last-page thumbnail not selected');
   check(await page.locator('#btn-next').isDisabled(), 'Next should be disabled on last page');
   await page.getByRole('button', { name: '上一页', exact: false }).click();

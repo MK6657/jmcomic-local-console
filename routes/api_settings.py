@@ -43,7 +43,7 @@ def list_settings():
 def save_settings():
     """保存设置项（download_root 为只读，不接受修改）"""
     body = request.get_json(force=True)
-    if not body or not isinstance(body, dict):
+    if not isinstance(body, dict):
         return jsonify({"status": "error", "message": "请求体需为 JSON 对象"}), 400
 
     # 拒绝修改 download_root
@@ -54,7 +54,8 @@ def save_settings():
         update_settings(body)
     except ValueError as exc:
         return jsonify(status="error", message=str(exc)), 400
-    warnings = _apply_saved_settings()
+    ui_only = set(body).issubset({"ui_theme", "library_card_click"})
+    warnings = [] if ui_only else _apply_saved_settings()
     updated = get_settings()
     log.info(f"API保存设置 keys_updated={list(body.keys())}")
     return jsonify({"status": "ok", "saved": True, "settings": updated, "warnings": warnings})

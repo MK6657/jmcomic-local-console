@@ -12,9 +12,6 @@
     saveBtnId: 'save-settings-btn',
     resetBtnId: 'settings-reset-btn',
     apiEndpoint: '/api/settings',
-    toastContainerId: 'toast-container',
-    // 敏感设置字段名（当前版本无敏感字段，预留）
-    sensitiveFields: [],
   };
 
   // ── DOM 缓存 ──
@@ -27,6 +24,7 @@
   var baseline = null;
   var pendingLoad = null;
   var loadEditsAfter = 0;
+  var themeVersion = 0;
 
   function cacheElements() {
     els.form = document.getElementById(CONFIG.formId);
@@ -234,6 +232,7 @@
     if (!file || importing || saving) return;
     importing = true;
     var importedVersion = editVersion;
+    var importedThemeVersion = themeVersion;
     var formData = new FormData();
     formData.append('file', file);
 
@@ -241,7 +240,7 @@
     var importBtn = document.getElementById('import-settings-btn');
     if (importBtn) {
       importBtn.disabled = true;
-      importBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span> 导入中...';
+      importBtn.textContent = '正在导入…';
     }
 
     try {
@@ -259,7 +258,10 @@
           showToast(msg, 'success');
         }
         // 刷新页面显示最新设置
-        await refreshSettings(importedVersion);
+        var refreshed = await refreshSettings(importedVersion);
+        if (refreshed && themeVersion === importedThemeVersion && ['paper', 'sage', 'linen', 'night'].includes(refreshed.ui_theme)) {
+          document.dispatchEvent(new CustomEvent('atelier-theme', { detail: { theme: refreshed.ui_theme } }));
+        }
       } else {
         showToast('导入失败: ' + (data.message || '未知错误'), 'danger');
       }
@@ -306,7 +308,7 @@
     // 禁用提交按钮 + 加载状态
     if (els.saveBtn) {
       els.saveBtn.disabled = true;
-      els.saveBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span> 保存中...';
+      els.saveBtn.textContent = '正在保存…';
     }
 
     try {
@@ -449,7 +451,6 @@
       var settings = await fetchSettings();
       if (requestVersion !== loadVersion) return;
       populateForm(settings, function (key) { return fieldEdits[key] > preserveEditsAfter; });
-      initSensitiveFields();
     } catch (err) {
       if (requestVersion !== loadVersion) return;
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默
@@ -458,6 +459,7 @@
       if (requestVersion === loadVersion) pendingLoad = null;
     }
     loadUpdateSummary();
+    return settings;
   }
 
 
@@ -538,50 +540,47 @@
     }
   }
 
-  // ── 敏感字段 —— 显示切换（预留） ──
+  function bindProxyVisibility() {
+    var input = document.getElementById('proxy');
+    var toggle = document.getElementById('proxy-visibility');
+    if (!input || !toggle) return;
+    function reveal(visible) {
+      input.type = visible ? 'text' : 'password';
+      toggle.setAttribute('aria-pressed', String(visible));
+      toggle.textContent = visible ? '隐藏' : '显示';
+    }
+    toggle.addEventListener('click', function () { reveal(input.type === 'password'); });
+    window.addEventListener('pagehide', function () { reveal(false); });
+  }
 
-  function initSensitiveFields() {
-    if (!CONFIG.sensitiveFields || CONFIG.sensitiveFields.length === 0) return;
-
-    CONFIG.sensitiveFields.forEach(function (fieldName) {
-      var input = els.form.querySelector('[name="' + fieldName + '"]');
-      if (!input) return;
-
-      // 确保 input 是 password 类型
-      if (input.type !== 'password') {
-        input.type = 'password';
-      }
-
-      // 查找或创建切换按钮
-      var parent = input.closest('.input-group') || input.parentElement;
-      var toggleBtn = parent.querySelector('.toggle-sensitive-btn');
-
-      if (!toggleBtn) {
-        toggleBtn = document.createElement('button');
-        toggleBtn.type = 'button';
-        toggleBtn.className = 'btn btn-outline-secondary toggle-sensitive-btn';
-        toggleBtn.setAttribute('data-field', fieldName);
-        toggleBtn.innerHTML = '<i class="bi bi-eye"></i>';
-        toggleBtn.title = '显示/隐藏';
-
-        if (parent.classList.contains('input-group')) {
-          parent.appendChild(toggleBtn);
-        } else {
-          var wrapper = document.createElement('div');
-          wrapper.className = 'input-group';
-          input.parentNode.insertBefore(wrapper, input);
-          wrapper.appendChild(input);
-          wrapper.appendChild(toggleBtn);
-        }
-      }
-
-      toggleBtn.addEventListener('click', function () {
-        var isPassword = input.type === 'password';
-        input.type = isPassword ? 'text' : 'password';
-        this.innerHTML = isPassword ? '<i class="bi bi-eye-slash"></i>' : '<i class="bi bi-eye"></i>';
-        this.title = isPassword ? '隐藏' : '显示';
+  function bindPalettes() {
+    var group = document.getElementById('pref-palettes');
+    if (!group) return;
+    var cards = group.querySelectorAll('[data-pref-theme]');
+    function markSelected(theme) {
+      cards.forEach(function (card) {
+        card.setAttribute('aria-pressed', String(card.dataset.prefTheme === theme));
+      });
+    }
+    cards.forEach(function (card) {
+      card.addEventListener('click', function () {
+        var stone = document.querySelector('.mineral-dock [data-set-theme="' + card.dataset.prefTheme + '"]');
+        if (stone) stone.click();
       });
     });
+    document.querySelectorAll('.mineral-dock [data-set-theme]').forEach(function (stone) {
+      stone.addEventListener('click', function () {
+        themeVersion++;
+        markSelected(document.documentElement.dataset.theme);
+      });
+    });
+    document.addEventListener('atelier-theme', function (event) {
+      if (event.detail && ['paper', 'sage', 'linen', 'night'].includes(event.detail.theme)) {
+        themeVersion++;
+        markSelected(event.detail.theme);
+      }
+    });
+    markSelected(document.documentElement.dataset.theme);
   }
 
   // ── 初始化 ──
@@ -594,6 +593,8 @@
 
     // 绑定事件
     bindEvents();
+    bindProxyVisibility();
+    bindPalettes();
 
     // Bind edits before starting the asynchronous refresh of the server-rendered form.
     refreshSettings(0);

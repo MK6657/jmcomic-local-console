@@ -1,130 +1,45 @@
 {% extends "base.html" %}
-{% block title %}JMComic 下载控制台 - 下载管理{% endblock %}
-
-{% block content %}
-
-<h4 class="mb-4"><i class="bi bi-list-ul"></i> 下载管理</h4>
-
-<!-- ===== 选项卡导航 ===== -->
-<ul class="nav nav-tabs mb-4" id="downloadTabs" role="tablist">
-    <li class="nav-item" role="presentation">
-        <button class="nav-link active" id="running-tab"
-                data-bs-toggle="tab" data-bs-target="#running"
-                type="button" role="tab" aria-controls="running" aria-selected="true">
-            <i class="bi bi-arrow-repeat"></i> 进行中
-            <span id="running-count" class="badge bg-primary ms-1">0</span>
-        </button>
-    </li>
-    <li class="nav-item" role="presentation">
-        <button class="nav-link" id="queued-tab"
-                data-bs-toggle="tab" data-bs-target="#queued"
-                type="button" role="tab" aria-controls="queued" aria-selected="false">
-            <i class="bi bi-clock"></i> 排队中
-            <span id="queued-count" class="badge bg-secondary ms-1">0</span>
-        </button>
-    </li>
-    <li class="nav-item" role="presentation">
-        <button class="nav-link" id="completed-tab"
-                data-bs-toggle="tab" data-bs-target="#completed"
-                type="button" role="tab" aria-controls="completed" aria-selected="false">
-            <i class="bi bi-check-circle"></i> 已完成
-            <span id="completed-count" class="badge bg-success ms-1">0</span>
-        </button>
-    </li>
-    <li class="nav-item" role="presentation">
-        <button class="nav-link" id="failed-tab"
-                data-bs-toggle="tab" data-bs-target="#failed"
-                type="button" role="tab" aria-controls="failed" aria-selected="false">
-            <i class="bi bi-exclamation-triangle"></i> 失败
-            <span id="failed-count" class="badge bg-danger ms-1">0</span>
-        </button>
-    </li>
-</ul>
-
-<!-- ===== 选项卡内容 ===== -->
-<div class="tab-content" id="downloadTabsContent">
-
-    <!-- 进行中 -->
-    <div class="tab-pane fade show active" id="running" role="tabpanel" aria-labelledby="running-tab">
-        <div id="running-section">
-            <div class="text-center text-muted py-4">
-                <i class="bi bi-emoji-neutral" style="font-size: 2rem;"></i>
-                <p class="mt-2 mb-0">加载中...</p>
-            </div>
-        </div>
-        <div id="running-pagination" class="pagination-container"></div>
-    </div>
-
-    <!-- 排队中 -->
-    <div class="tab-pane fade" id="queued" role="tabpanel" aria-labelledby="queued-tab">
-        <div id="queued-section">
-            <div class="text-center text-muted py-4">
-                <i class="bi bi-emoji-neutral" style="font-size: 2rem;"></i>
-                <p class="mt-2 mb-0">加载中...</p>
-            </div>
-        </div>
-        <div id="queued-pagination" class="pagination-container"></div>
-    </div>
-
-    <!-- 已完成 -->
-    <div class="tab-pane fade" id="completed" role="tabpanel" aria-labelledby="completed-tab">
-        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-            <span class="fw-semibold text-success"><i class="bi bi-check-circle"></i> 已完成</span>
-            <div class="d-flex flex-wrap gap-2">
-                <button type="button" class="btn btn-sm btn-outline-warning" data-action="clear" data-status="canceled"
-                        title="只删除记录，不删除文件">
-                    <i class="bi bi-trash"></i> 清空已取消
-                </button>
-                <button type="button" class="btn btn-sm btn-outline-success" data-action="clear" data-status="completed"
-                        title="只删除记录，不删除文件">
-                    <i class="bi bi-trash"></i> 清空已完成
-                </button>
-                <button type="button" class="btn btn-sm btn-outline-secondary" data-action="clear-finished"
-                        title="只删除记录，不删除文件">
-                    <i class="bi bi-trash-fill"></i> 清空全部已完成记录
-                </button>
-            </div>
-        </div>
-        <div id="completed-section">
-            <div class="text-center text-muted py-4">
-                <i class="bi bi-emoji-neutral" style="font-size: 2rem;"></i>
-                <p class="mt-2 mb-0">加载中...</p>
-            </div>
-        </div>
-        <div id="completed-pagination" class="pagination-container"></div>
-    </div>
-
-    <!-- 失败 -->
-    <div class="tab-pane fade" id="failed" role="tabpanel" aria-labelledby="failed-tab">
-        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-            <span class="fw-semibold text-danger"><i class="bi bi-exclamation-triangle"></i> 失败</span>
-            <div class="d-flex flex-wrap gap-2">
-                <button type="button" class="btn btn-sm btn-outline-warning" data-action="batch-retry"
-                        title="只重试当前页显示的失败任务">
-                    <i class="bi bi-arrow-counterclockwise"></i> 重试本页
-                </button>
-                <button type="button" class="btn btn-sm btn-outline-danger" data-action="clear" data-status="failed"
-                        title="只删除记录，不删除文件">
-                    <i class="bi bi-trash"></i> 清空失败
-                </button>
-            </div>
-        </div>
-        <div id="failed-section">
-            <div class="text-center text-muted py-4">
-                <i class="bi bi-emoji-neutral" style="font-size: 2rem;"></i>
-                <p class="mt-2 mb-0">加载中...</p>
-            </div>
-        </div>
-        <div id="failed-pagination" class="pagination-container"></div>
-    </div>
-
-</div>
-
+{% block title %}传输中心 · 藏书阁{% endblock %}
+{% block head_extra %}
+<link rel="stylesheet" href="{{ asset_url('css/atelier-downloads.css') }}">
+<link rel="stylesheet" href="{{ asset_url('atelier-ui/transfer.css') }}">
 {% endblock %}
-
+{% block content %}
+<section class="transfer-desk" aria-labelledby="transfer-title">
+    <header class="transfer-mast">
+        <div><p class="folio-kicker">TRANSMISSION &amp; ARCHIVE</p><h1 id="transfer-title">传输中心</h1></div>
+        <div id="atelier-transfer-summary" class="quiet-ledger"></div>
+    </header>
+    <div id="downloadTabsContent">
+        <div class="folio-tools">
+            <nav class="folio-filters" id="downloadTabs" aria-label="筛选下载任务">
+                {% for key, label in [('all','同册全景'),('running','进行中'),('paused','已暂停'),('queued','排队'),('completed','已完成'),('failed','失败'),('canceled','已取消')] %}
+                <a href="#{{ key }}" data-filter="{{ key }}"{% if key == 'all' %} aria-current="page"{% endif %}>{{ label }}{% if key in ('failed','canceled') %}<span class="folio-filter-count" data-filter-count="{{ key }}"></span>{% endif %}</a>
+                {% endfor %}
+            </nav>
+            <details class="record-cleanup"><summary>清理记录</summary><div>
+                <p>仅移除任务记录，保留藏书文件。</p>
+                {% for key, label in [('completed','已完成'),('failed','失败'),('canceled','已取消')] %}
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-action="clear" data-status="{{ key }}">清空{{ label }}</button>
+                {% endfor %}
+                <button type="button" class="btn btn-sm btn-outline-danger" data-action="clear-finished">清空所有已结束记录</button>
+            </div></details>
+        </div>
+        <div class="folio-caption"><h2 id="folio-caption">同册传输卷宗</h2>
+            <a id="folio-back" href="#all" hidden>返回同册全景</a>
+            <button id="batch-retry" class="btn btn-sm btn-outline-warning" type="button" data-action="batch-retry" hidden>重试本页失败任务</button>
+        </div>
+        <div id="transfer-error" class="folio-notice" role="status" hidden></div>
+        <div id="maintenance-failures" class="folio-notice" hidden></div>
+        <div id="folio-list" class="folio-stack"><p class="folio-empty" role="status">正在读取本地传输记录…</p></div>
+        <nav id="folio-pagination" class="folio-pagination" aria-label="传输记录分页"></nav>
+    </div>
+</section>
+{% endblock %}
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
 <script src="{{ asset_url('js/export.js') }}"></script>
 <script src="{{ asset_url('js/sse-client.js') }}"></script>
+<script src="{{ asset_url('atelier-ui/transfer.js') }}"></script>
 <script src="{{ asset_url('js/downloads.js') }}"></script>
 {% endblock %}

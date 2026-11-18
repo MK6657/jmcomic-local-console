@@ -1,32 +1,131 @@
 ---
-name: JMComic 下载控制台 — 项目设计系统
-version: 1.1
-description: 基于母模板 eye-care 护眼风格，锁定本项目的 UI 规范
+name: 藏书阁 · JMComic 本地控制台（Atelier Edition）— 项目设计系统
+version: 2.0
+description: Apple Books × Linear × 茑屋书店（Tsutaya）装帧级书籍阅读与传输桌面界面规范，内置 4 套可持久化矿物手工纸护眼色谱
 
 project_theme:
   theme_mode: eye-care
-  fallback_theme: eye-care
+  default_theme: paper
+  available_themes: [paper, sage, linen, night]
+  fallback_theme: paper
   locked: true
   selected_by: user
-  rule: "全站使用护眼暖色风格，暖灰/浅米色背景，降低蓝光刺激，所有 UI 修改必须遵守此规范"
+  persistence_key: ui_theme
+  rule: "全站采用装帧级书籍美学，提供 paper（宣纸·古籍暖米，默认）、sage（青瓷·宋韵粉青）、linen（白麻·画册晨光）、night（玄墨·暗房夜读）四套矿物/手工纸护眼主题；严禁同屏混用未定义色值，严禁使用纯白 #FFFFFF 或纯黑 #000000 背景，全表面正文对比度 >= 10:1 (AAA)、次要/语义色 >= 4.5:1 (AA)"
 
 # ============================================
-# Eye-care 护眼风格 Token
+# Atelier 四套矿物手工纸护眼色谱 Token（实心预混表面，零半透明底色衰减）
 # ============================================
 
-theme-eye-care:
-  bg-primary: "#F3F0E8"
-  bg-secondary: "#FAF8F2"
-  bg-tertiary: "#E8E2D6"
-  text-primary: "#2B2A27"
-  text-secondary: "#686256"
-  text-tertiary: "#918A7D"
-  border: "#D8D0C0"
-  primary: "#3B82F6"
-  success: "#2F855A"
-  warning: "#B7791F"
-  error: "#C53030"
-  info: "#2B6CB0"
+themes:
+  paper:
+    title: "宣纸 · 古籍暖米"
+    color-scheme: light
+    bg-canvas: "#F3EFE6"
+    bg-sidebar: "#ECE6D9"
+    bg-card: "#FAF7F0"
+    bg-subtle: "#E7E0D2"
+    bg-elevated: "#FCF9F3"
+    bg-tint: "#E8EFF1"
+    ink: "#24201B"
+    ink-2: "#4F493F"
+    ink-3: "#5C5549"
+    line: "rgba(36, 32, 27, 0.10)"
+    line-strong: "rgba(36, 32, 27, 0.18)"
+    accent: "#215266"
+    accent-hover: "#194152"
+    accent-fg: "#FAF7F0"
+    ok: "#1B5B3A"
+    ok-bg: "#E8F1EC"
+    ok-line: "rgba(27, 91, 58, 0.24)"
+    warn: "#78460B"
+    warn-bg: "#F5EEE2"
+    warn-line: "rgba(120, 70, 11, 0.24)"
+    danger: "#962121"
+    danger-bg: "#F6EBEB"
+    danger-line: "rgba(150, 33, 33, 0.24)"
+    seal: "#8F2D22"
+  sage:
+    title: "青瓷 · 宋韵粉青"
+    color-scheme: light
+    bg-canvas: "#EBF0EC"
+    bg-sidebar: "#E2EAE4"
+    bg-card: "#F5F8F5"
+    bg-subtle: "#DCE5DE"
+    bg-elevated: "#F8FAF8"
+    bg-tint: "#E3EFEA"
+    ink: "#1E2621"
+    ink-2: "#435047"
+    ink-3: "#4E5C52"
+    line: "rgba(30, 38, 33, 0.10)"
+    line-strong: "rgba(30, 38, 33, 0.18)"
+    accent: "#1F5647"
+    accent-hover: "#174337"
+    accent-fg: "#F5F8F5"
+    ok: "#1B593C"
+    ok-bg: "#E3F0E8"
+    ok-line: "rgba(27, 89, 60, 0.24)"
+    warn: "#75460E"
+    warn-bg: "#F1ECE2"
+    warn-line: "rgba(117, 70, 14, 0.24)"
+    danger: "#942323"
+    danger-bg: "#F3EAEA"
+    danger-line: "rgba(148, 35, 35, 0.24)"
+    seal: "#2A5E4E"
+  linen:
+    title: "白麻 · 画册晨光"
+    color-scheme: light
+    bg-canvas: "#F6F5F1"
+    bg-sidebar: "#EFECE6"
+    bg-card: "#FCFBF8"
+    bg-subtle: "#EAE7DF"
+    bg-elevated: "#FDFCF9"
+    bg-tint: "#EBF0F6"
+    ink: "#21211F"
+    ink-2: "#4A4944"
+    ink-3: "#57554F"
+    line: "rgba(33, 33, 31, 0.09)"
+    line-strong: "rgba(33, 33, 31, 0.17)"
+    accent: "#284D7A"
+    accent-hover: "#1E3B5E"
+    accent-fg: "#FCFBF8"
+    ok: "#1D5D3E"
+    ok-bg: "#EBF3EF"
+    ok-line: "rgba(29, 93, 62, 0.24)"
+    warn: "#7A480E"
+    warn-bg: "#F7F0E5"
+    warn-line: "rgba(122, 72, 14, 0.24)"
+    danger: "#982222"
+    danger-bg: "#F8EDED"
+    danger-line: "rgba(152, 34, 34, 0.24)"
+    seal: "#7D3028"
+  night:
+    title: "玄墨 · 暗房夜读"
+    color-scheme: dark
+    bg-canvas: "#171614"
+    bg-sidebar: "#1D1C19"
+    bg-card: "#21201D"
+    bg-subtle: "#2B2925"
+    bg-elevated: "#272521"
+    bg-tint: "#1E292D"
+    ink: "#E6E1D6"
+    ink-2: "#BFB8AB"
+    ink-3: "#ACA598"
+    line: "rgba(230, 225, 214, 0.09)"
+    line-strong: "rgba(230, 225, 214, 0.17)"
+    accent: "#84C0D4"
+    accent-hover: "#98CCE0"
+    accent-fg: "#171614"
+    ok: "#82D1A8"
+    ok-bg: "#1D2922"
+    ok-line: "rgba(130, 209, 168, 0.24)"
+    warn: "#ECC074"
+    warn-bg: "#2B251C"
+    warn-line: "rgba(236, 192, 116, 0.24)"
+    danger: "#F59898"
+    danger-bg: "#2C2020"
+    danger-line: "rgba(245, 152, 152, 0.24)"
+    seal: "#D67A6B"
 
 # ============================================
 # 全局设计 Token（跨主题共享）
@@ -39,43 +138,45 @@ spacing:
   lg: 24px
   xl: 32px
   2xl: 48px
+  # 布局与卡片内边距记录例外：紧凑控件内距 6px/10px/12px/14px/20px，侧边栏定宽 236px（折叠态 76px）
 
 rounded:
   none: 0px
-  sm: 4px
-  md: 6px
-  lg: 8px
-  xl: 12px
+  sm: 6px
+  md: 10px
+  lg: 14px
+  xl: 18px
   full: 9999px
 
 shadow:
-  sm: "0 1px 2px 0 rgba(0, 0, 0, 0.1)"
-  md: "0 4px 6px -1px rgba(0, 0, 0, 0.12)"
-  lg: "0 10px 15px -3px rgba(0, 0, 0, 0.15)"
-  xl: "0 20px 25px -5px rgba(0, 0, 0, 0.18)"
+  sm: "0 1px 3px rgba(36, 32, 27, 0.06)"
+  card: "0 2px 6px rgba(36, 32, 27, 0.04), 0 12px 32px rgba(36, 32, 27, 0.06)"
+  book: "-2px 6px 14px rgba(36, 32, 27, 0.16), 0 2px 4px rgba(36, 32, 27, 0.08)"
+  float: "0 18px 44px rgba(36, 32, 27, 0.16), 0 2px 8px rgba(36, 32, 27, 0.08)"
 
 typography:
-  font-sans: "'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, 'Segoe UI', sans-serif"
-  font-mono: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace"
+  font-serif: "'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', 'STSong', '华文中宋', Georgia, serif"
+  font-sans: "'Source Han Sans SC', 'Noto Sans SC', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', system-ui, -apple-system, 'Segoe UI', sans-serif"
+  font-mono: "'JetBrains Mono', 'Cascadia Code', 'SFMono-Regular', Consolas, ui-monospace, monospace"
   font-size-xs: 12px
   font-size-sm: 14px
   font-size-base: 16px
   font-size-lg: 20px
   font-size-xl: 24px
-  font-size-2xl: 32px
+  font-size-2xl: 30px
   font-weight-normal: 400
   font-weight-medium: 500
   font-weight-semibold: 600
-  line-height-tight: 1.25
-  line-height-normal: 1.5
+  line-height-tight: 1.28
+  line-height-normal: 1.6
   line-height-relaxed: 1.75
 
 ---
 
-# JMComic 本地下载控制台 — 设计文档
+# 藏书阁 · JMComic 本地控制台（Atelier Edition）— 设计文档
 
-> Windows 本地控制台，Flask + Bootstrap 5；运行版本见 `requirements.txt`，便携包的实装版本见其 `release.json`。
-> theme_mode: eye-care（护眼风格，已锁定）
+> Windows 本地控制台，Flask + 本地静态资产（零外部 CDN）；运行版本见 `requirements.txt`，便携包的实装版本见其 `release.json`。
+> 主题体系：`ui_theme` 支持 `paper | sage | linen | night` 四套矿物纸本护眼主题（服务端持久化 + `<html data-theme="{{ ui_theme }}">` 零闪屏直出）。
 
 ---
 
@@ -727,16 +828,37 @@ Primary(蓝色) / Secondary(暖灰+边框) / Ghost(全透明) / Danger(红色)
 - 收藏的状态选项顺序与资源库、与“排序：下载状态”相同（2026-09-27）：全部 → 已下载内容·可离线阅读 → 排队中/下载中 → 失败 → 下载过·文件已删除 → 未下载；筛选键、数量和已收藏的链接不变。（“下载过·文件已删除”后改名为“下载过·本地文件不可用”，见“只剩压缩包也能离线阅读”）
 - 收藏筛选栏（2026-09-27）：≥1200px 搜索框、状态、排序、搜索按钮一行（4/3/3/2 列）；768–1199px 搜索框独占一行，状态、排序、按钮在第二行（5/5/2 列）；手机宽度每个控件一行。原来 768–991px 状态框只有约 166px，“下载过 · 文件已删除 / 已下载内容 · 可离线阅读 / 排队中 / 下载中”带上数量后显示不全，992–1199px 数量到三位数时也会截断。只改栅格列，不改文案、颜色、间距。
 
+### 藏书阁 · Atelier Edition 装帧美学升级规范（2026-11-18）
+
+- **四套可持久化矿物纸本护眼主题（`ui_theme`）**：
+  - 服务端 `core/settings.py` 原生支持 `ui_theme`（枚举 `paper | sage | linen | night`，默认 `paper`），由 `app.py` 上下文处理器注入模板根标签 `<html lang="zh-CN" data-theme="{{ ui_theme }}">`，配合 `<head>` 同步水合脚本实现零闪屏（Zero-FOUC）渲染。
+  - 全站统一采用实心预混表面色变量（`--bg-canvas`, `--bg-sidebar`, `--bg-card`, `--bg-subtle`, `--bg-elevated`, `--bg-tint`, `--ok-bg`, `--warn-bg`, `--danger-bg`）与墨色/语义色变量（`--ink`, `--ink-2`, `--ink-3`, `--line`, `--line-strong`, `--accent`, `--accent-hover`, `--accent-fg`, `--ok`, `--ok-line`, `--warn`, `--warn-line`, `--danger`, `--danger-line`, `--seal`），并将 Bootstrap 5 组件变量（`--bs-body-*`, `--bs-card-*`, `--bs-table-*`, `--bs-modal-*`, `--bs-btn-*`）完整映射至当前矿物色谱，严禁出现纯白 `#FFFFFF`、纯黑 `#000000` 或夜间亮白残块。
+- **建筑感左侧书斋边栏（`.atelier-shell` / `.atelier-sidebar`）**：
+  - 桌面端采用 `236px` 宣纸质感左侧导航栏：顶部篆刻章标 `藏 · 藏书阁 · JM · ATELIER`；中部六项胶囊导航（书斋总览 `/`、检索探索 `/search`、私人书阁 `/library`、心愿典藏 `/wishlist`、传输中心 `/downloads`、偏好与色谱 `/settings`），完整保留 `data-nav-memory` 导航记忆契约；下方内嵌活跃下载脉搏微卡与 4 枚温润矿物色石切换器（即时切换 `data-theme`、同步 `localStorage` 并静默 `POST /api/settings`）。
+  - 响应式断点：`<=992px` 自动收窄为 `76px` 窄图标轨，`<=640px` 切换为紧凑移动顶栏；阅读页与单页预览页支持全幅沉浸展阅。
+- **书籍装帧排版韵律与 3D 立体书封（`.serif-display` / `.bound-book` / `.paper-grain`）**：
+  - 三层字体分工：书名、专著大标题与章回标题使用人文宋刻衬线栈 `--font-serif`（字重 600，字距 `-0.02em`）；界面操作控件使用现代无衬线 `--font-sans`；车号、页码、卷标、速率与日志使用 `tabular-nums` 等宽字体 `--font-mono`。
+  - 全局叠加 `opacity: 0.022` 的内联 SVG `<feTurbulence>` 微宣纸纤维肌理（`pointer-events: none`）；所有交互过渡严格控制在 `150ms–180ms` 并遵循 `prefers-reduced-motion`，禁止循环条纹动画。
+  - `.bound-book` 立体书封：具备左侧书脊压槽高光/暗部渐变、右侧书口纸页层叠切边与漫射书影；无封面或加载失败时回退为压凹布面藏书票占位。
+- **同书聚合传输中心（`/downloads` · `.folio-card`）**：
+  - 顶部采用编辑风标题与单行细竖线等宽态势铭文（`.quiet-ledger`：`进行中` · `排队` · `已暂停` · `已完成` · `失败` · `已取消`），搭配胶囊筛选（含全景同屏与新增「已取消」筛选视图）。
+  - 同一 `album_id` 的多个章节下载任务聚合在同一张书目典藏卡（`.folio-card`）下：书目头展示 `.bound-book` 立体封面、宋刻书名与整册 `album_maintenance` 归档合卷状态签条及「重新整理整册」入口；子行分列各话进度与操作（暂停、继续、取消、重试、删除、打开目录、阅读、预览、单任务 ZIP/PDF 导出），直观呈现“单话完成立即可读”与“整册后台合卷整理”解耦机制。
+- **博物馆专著详情页与无框沉浸画廊阅读器（`/album/<id>` · `/read` · `/online` · `/preview`）**：
+  - 详情页采用左书封右专著扉页布局，集成车号钤印、本地状态/CBZ/`M/N 话` 徽章、`#album-update-status` 新章节检查条、交互式标签工坊与无框章节卷目表。
+  - 阅读器与单页预览适配全部 4 套矿物主题，底部 `#reader-tools` 升级为毛玻璃纸感悬浮控制舱 Dock，单页模式支持点击画面左/右 1/3 区域翻页，并在 `pagehide` 释放未完成图片连接、`pageshow` 自动恢复。
+- **双栏粘性偏好与矿物印谱台（`/settings` + `#logs`）**：
+  - 左侧粘性章节目录 + 右侧无框纸面分区；首节提供四色矿物护眼印谱可视化选卡，代理输入框提供密码遮罩/明文切换按钮（避免掩码回写），底部 `section#logs` 提供契合四主题的等宽系统诊断日志台。
+
 本项目已锁定 `project_theme.locked = true`，后续所有 UI 修改必须遵守：
 
-1. **颜色**必须使用 eye-care token 中的色值
-2. **不可混用** light / dark 色值
-3. **间距**必须遵循 8 点网格
-4. **字体**层级必须遵守 typography token
-5. **圆角/阴影**必须遵守对应 token
+1. **颜色**必须使用本文档 `themes`（`paper | sage | linen | night`）定义的矿物护眼 Token，严禁硬编码 `#FFF`/`#000`
+2. **表面对比度**必须保证正文 `>= 10:1` (AAA)，辅助文字与语义色在全部表面上 `>= 4.5:1` (AA)
+3. **间距**优先遵循标准尺度（4/8/16/24/32/48px）及已记录的紧凑布局尺度
+4. **字体**层级必须遵守 `typography` 三层字体栈规范（衬线标题 / 无衬线界面 / 等宽指标）
+5. **圆角/阴影/动效**必须遵守对应 Token，过渡时长 `150ms–180ms`，禁止持续循环动画
 6. 如需覆盖上述规则，必须**先更新本 DESIGN.md**，再改代码
 7. 开发时同时遵守本项目 [AGENTS.md](AGENTS.md)。
 
 ---
 
-*初版生成于 2026-07-02。带日期的交互记录说明当时的决策；Windows 发行证据按包分别记录。*
+*初版生成于 2026-07-02；Atelier Edition v2.0 装帧美学规范升级于 2026-11-18。*

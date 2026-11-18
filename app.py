@@ -13,6 +13,7 @@ _MUTEX_NAME = "Local\\JMComicDownloader_AppInstance"
 # 打包后：sys._MEIPASS，开发时：项目根目录
 from core.path_utils import get_resource_root, get_data_dir, get_download_root, ensure_dirs
 from core.instance_lock import acquire_instance_lock, InstanceBusyError
+from core.interface import classic_ui, render_page
 
 
 def _instance_lease():
@@ -181,11 +182,25 @@ def create_app() -> Flask:
         本地应用 stat() 开销微秒级，每次请求实时取 mtime，
         保证开发/热替换 JS 后浏览器立即生效，同时享受一年强缓存。
         """
+        if classic_ui() and filename.startswith(('js/', 'css/')):
+            filename = 'classic/' + filename
         try:
             version = int((_static_root / filename).stat().st_mtime)
         except OSError:
             version = 0
         return f"/static/{filename}?v={version}"
+
+    @app.context_processor
+    def _inject_ui_theme() -> dict:
+        """直出当前持久化的矿物护眼主题（从设置内存缓存读取，异常兜底 paper），实现零闪屏渲染。"""
+        try:
+            from core.settings import UI_THEMES, get_settings
+            theme = get_settings().get("ui_theme", "paper")
+            if theme not in UI_THEMES:
+                theme = "paper"
+        except Exception:
+            theme = "paper"
+        return {"ui_theme": theme}
 
     # ── 请求 ID + 计时初始化（每个请求执行一次） ──
     from core.logger import set_request_id, clear_request_id
@@ -263,14 +278,14 @@ def create_app() -> Flask:
         log.warning(f"拒绝访问 path={request.path}")
         if request.path.startswith('/api/'):
             return jsonify({"status": "error", "message": "拒绝访问"}), 403
-        return render_template("403.html", title="拒绝访问"), 403
+        return render_page("403.html", title="拒绝访问"), 403
 
     @app.errorhandler(404)
     def _handle_404(e):
         from flask import request, jsonify, render_template
         if request.path.startswith('/api/'):
             return jsonify({"status": "error", "message": "接口不存在"}), 404
-        return render_template("404.html", title="页面未找到"), 404
+        return render_page("404.html", title="页面未找到"), 404
 
     @app.errorhandler(500)
     def _handle_500(e):
@@ -278,7 +293,7 @@ def create_app() -> Flask:
         log.error(f"服务器内部错误 path={request.path} error={e}")
         if request.path.startswith('/api/'):
             return jsonify({"status": "error", "message": "服务器内部错误"}), 500
-        return render_template("500.html", title="服务器错误"), 500
+        return render_page("500.html", title="服务器错误"), 500
 
     # ── 请求日志中间件 ──────────────────────────────────
     # 成功（2xx / 304）的静态资源与 launcher 的健康检查不写访问日志，否则每次打开页面都会刷出几十行；
@@ -288,6 +303,11 @@ def create_app() -> Flask:
         # Separate from logging so quiet paths and early error responses are covered.
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        if app.config.get('ATELIER_DEMO'):
+            response.headers['Content-Security-Policy'] += "; img-src 'self' blob: data:; connect-src 'self'"
+        if response.mimetype == 'text/html':
+            response.vary.add('Cookie')
+            response.headers['Cache-Control'] = 'no-cache'
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 

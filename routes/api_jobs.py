@@ -18,7 +18,7 @@ from core.progress import progress_manager, StreamCapacityError
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.validation import validate_numeric, validate_job_id, require_job_id
 from core.packer import CbzPacker
-from core import album_maintenance, archive_pages
+from core import album_maintenance, archive_pages, download_folios
 from core import desktop_platform
 # ── 模块级压缩包检查缓存（避免 N+1 文件系统扫描）：值是压缩包格式 'cbz' / 'zip'，没有为 None ──
 _cbz_cache: dict[str, tuple[str | None, float]] = {}
@@ -140,8 +140,14 @@ def list_jobs():
             return jsonify(status="error", message=f"{key} 必须是正整数"), 400
         numbers[key] = int(raw)
     status = request.args.get("status") or "all"
+    view = request.args.get('view', 'jobs')
+    album_id = request.args.get('album_id')
+    if (view not in ('jobs', 'folios', 'album') or (view == 'album' and not validate_numeric(album_id or ''))
+            or (view != 'jobs' and status != 'all')):
+        return jsonify(status='error', message='任务视图或车号无效'), 400
     try:
-        result = db.get_jobs_page(status=status, **numbers)
+        result = (db.get_jobs_page(status=status, **numbers) if view == 'jobs' else
+                  download_folios.transfer_page(**numbers, album_id=album_id if view == 'album' else None))
     except ValueError as error:
         return jsonify(status="error", message=str(error)), 400
     jobs = result["jobs"]
@@ -153,6 +159,9 @@ def list_jobs():
                 job["selected_photo_ids"] = json.loads(job["selected_photo_ids"])
             except (json.JSONDecodeError, TypeError):
                 job["selected_photo_ids"] = []
+    if 'view' in request.args:
+        result['view'] = view
+        result['books'] = download_folios.book_metadata(jobs)
     # 批量检查 CBZ 存在性（避免 N+1 文件系统扫描，利用 TTL 缓存）
     output_paths = list({j.get("output_path", "") for j in jobs if j.get("output_path")})
     cbz_map = {p: _check_cbz_path(p) for p in output_paths}

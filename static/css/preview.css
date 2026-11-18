@@ -1,88 +1,36 @@
-/* Paged reader (单页翻页): every paged-only rule lives here, using the locked eye-care tokens.
-   The page header (.reader-toolbar) is shared with the continuous reader and lives in style.css. */
-.preview-container { max-width: 1200px; margin: 0 auto; padding: 16px 0; }
-.preview-mode-switch .btn[aria-current="page"] { pointer-events: none; }
-
-/* ── Page canvas: header, the whole page and the page controls fit one desktop screen ── */
+.preview-container { padding-bottom: 7rem; }
+.preview-mode-switch [aria-current] { pointer-events: none; }
 .preview-image-wrapper {
-  position: relative;
-  display: flex; align-items: center; justify-content: center;
-  min-height: 60vh; margin-bottom: 16px; padding: 8px;
-  background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-lg);
-  text-align: center;
+  display: grid; place-items: center; position: relative; width: 100%; min-width: 0;
+  height: clamp(240px, 61vh, 56rem); padding: 8px; background: var(--bg-card);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-card); touch-action: manipulation;
 }
-.preview-image-wrapper img {
-  display: block; max-width: 100%; max-height: calc(100vh - 256px);
-  object-fit: contain; border-radius: var(--radius-sm);
+.preview-image-wrapper img { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
+.preview-image-wrapper .loading-spinner { position: absolute; color: var(--ink-3); pointer-events: none; }
+.preview-image-hint, .preview-error {
+  max-width: 40rem; margin: auto; padding: 24px; text-align: center;
+  background: var(--warn-bg); color: var(--warn); border-radius: var(--r-lg);
 }
-.preview-image-wrapper .loading-spinner {
-  position: absolute; top: 50%; left: 50%; z-index: 1; transform: translate(-50%, -50%);
-}
-.preview-image-hint { color: var(--text-secondary); }
-/* 只放大提示图标本身，“重试”“在线阅读这一页”按钮里的图标保持按钮大小 */
-.preview-image-hint > i { font-size: 3rem; }
-
-/* ── Page controls ── */
-.preview-nav {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
-  gap: 8px 16px; margin-bottom: 24px;
-}
-.preview-nav .btn-nav { min-width: 120px; padding: 8px 16px; font-weight: 500; }
-.preview-nav .page-info {
-  display: flex; align-items: center; gap: 8px; min-width: 100px;
-  color: var(--text-secondary); font-size: 16px; font-weight: 500;
-}
-.page-jump { display: inline-flex; align-items: center; gap: 8px; }
-.page-jump input { width: 64px; padding: 4px 8px; text-align: center; }
-
-/* ── Thumbnails: complete images (contain) in 80×128 cells; only the rail scrolls, horizontally ── */
-.thumbnail-bar {
-  padding: 16px; margin-bottom: 16px;
-  background: var(--bg-tertiary); border-radius: var(--radius-lg);
-}
-.preview-thumbnails-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.thumb-container {
-  display: flex; flex: 1; gap: 8px; min-width: 0;
-  overflow-x: auto; overflow-y: hidden; padding: 4px 0 8px;
-}
-.thumb-container::-webkit-scrollbar { height: 6px; }
-.thumb-container::-webkit-scrollbar-track { background: transparent; }
-.thumb-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius-sm); }
-.thumb-item,
-.load-more-item {
-  flex: 0 0 auto; width: 80px; height: 128px;
-  background: var(--bg-secondary); color: var(--text-secondary);
-  border-radius: var(--radius-md); cursor: pointer;
-  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
-}
+.preview-error > i { display: block; font-size: 32px; }
+.preview-image-hint > i { font-size: 24px; }
+.preview-error-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.preview-nav .page-info, .page-jump { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.preview-nav .page-info { font: 500 14px/1.6 var(--font-mono); font-variant-numeric: tabular-nums; }
+.thumbnail-bar { max-width: 48rem; margin: 24px auto 0; }
+.preview-thumbnails-row, .thumb-container { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.thumb-container { flex: 1; overflow-x: auto; padding: 4px; scrollbar-width: thin; scrollbar-color: var(--line-strong) var(--bg-canvas); }
 .thumb-item {
-  display: flex; flex-direction: column; align-items: center;
-  padding: 4px; overflow: hidden; border: 2px solid transparent;
+  flex: 0 0 64px; display: grid; place-items: center; gap: 4px; padding: 4px;
+  border-radius: var(--r-md); border: 2px solid transparent; background: var(--bg-subtle); color: var(--ink-2);
+  font: 500 12px/1.3 var(--font-mono); font-variant-numeric: tabular-nums;
 }
-.thumb-item:hover { border-color: var(--border); }
-.thumb-item.active { border-color: var(--primary); color: var(--primary); }
-.thumb-item img { display: block; width: 100%; height: 96px; object-fit: contain; }
-.thumb-number { display: block; font-size: 12px; line-height: 16px; }
-.load-more-item {
-  display: flex; align-items: center; justify-content: center;
-  padding: 8px; border: 2px dashed var(--border); font-size: 12px;
-}
-.load-more-item:hover { border-color: var(--primary); background: var(--primary-bg); color: var(--primary); }
-.thumb-item:focus-visible,
-.load-more-item:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-
-/* ── Empty / error ── */
-.preview-error { padding: 48px 16px; text-align: center; }
-/* 只放大提示图标本身（原来的 .preview-error i 连按钮里的小图标也放大成 4rem） */
-.preview-error > i { display: block; margin-bottom: 16px; font-size: 4rem; color: var(--text-tertiary); }
-.preview-error-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
-.preview-error h2 { color: var(--text-secondary); }
-
-@media (max-width: 768px) {
-  .preview-image-wrapper { min-height: 40vh; }
-  .preview-nav { column-gap: 8px; }
-  .preview-nav .btn-nav { min-width: 88px; padding: 8px; font-size: 14px; }
-  .preview-nav .btn-nav-icon { min-width: 48px; }
-  /* The page counter takes its own row so the four page buttons share the next one */
+.thumb-item img { width: 100%; height: 64px; object-fit: contain; }
+.thumb-item.active { border-color: var(--accent); background: var(--bg-tint); color: var(--accent); }
+.thumb-item:hover { border-color: var(--line-strong); }
+.thumb-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 640px) {
+  .preview-container { padding-bottom: 10rem; }
   .preview-nav .page-info { order: -1; flex-basis: 100%; justify-content: center; }
+  .preview-image-wrapper { height: clamp(240px, 52svh, 36rem); }
+  .preview-nav .btn { padding: 4px 8px; }
 }

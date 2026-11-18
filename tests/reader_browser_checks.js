@@ -72,7 +72,7 @@ async (page) => {
   await page.getByLabel('跳转页码', { exact: true }).fill('39');
   await page.getByRole('button', { name: '跳转', exact: true }).click();
   await page.locator('#reader-page-39').waitFor();
-  check(await page.locator('.reader-page').count() >= 39, 'Jump did not load later pages');
+  check(await page.locator('.reader-page').count() <= 8, 'Jump mounted intermediate pages');
   check(!(await page.locator('#reader-tools').isVisible()), 'Jump should hide controls again');
   await page.waitForFunction(() => document.querySelector('.reader-toolbar').getBoundingClientRect().bottom < 0);
   await page.waitForFunction(() => {
@@ -89,8 +89,8 @@ async (page) => {
     return last && last.querySelector('img').complete && last.querySelector('img').naturalWidth > 0
       && Math.abs(last.getBoundingClientRect().bottom - innerHeight) < 4;
   });
-  check(await page.locator('.reader-page').count() === 45, 'Bottom button did not render the final batch');
-  check(await page.locator('.reader-page figcaption').count() === 1, 'Later batches must not repeat captions');
+  check(await page.locator('.reader-page').count() <= 8, 'Bottom button mounted the whole book');
+  check(await page.locator('.reader-page figcaption').count() === 0, 'Later batches must not repeat captions');
   check(!(await page.locator('#reader-tools').isVisible()), 'Bottom button should hide the tools');
   await page.screenshot({ path: 'output/playwright/reader-bottom.png', animations: 'disabled' });
   await page.keyboard.press('m');
@@ -104,9 +104,9 @@ async (page) => {
   check(await metrics() === requestsBeforeReader, 'Reader back refetched search results');
 
   // 未下载的漫画：阅读按钮是在线样式，点击后 /read 转到在线阅读（fixture 的在线接口是离线桩，只回错误）
-  await page.locator('a.reader-link[href="/read/900002"][data-read-state="online"]').waitFor();
-  await page.locator('a.reader-link[href="/read/900002"]').click();
-  await page.waitForURL('**/online/900002');
+  await page.locator('a.reader-link[href="/read/900008"][data-read-state="online"]').waitFor();
+  await page.locator('a.reader-link[href="/read/900008"]').click();
+  await page.waitForURL('**/online/900008');
   await page.locator('#reader-empty:not(.d-none)').waitFor();
   check(await page.locator('[data-source="online"]').count() > 0, 'Undownloaded album did not open online reading');
   await page.goBack();

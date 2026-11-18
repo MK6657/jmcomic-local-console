@@ -1,0 +1,100 @@
+.transfer-desk, .album-monograph { max-width: 1180px; margin-inline: auto; color: var(--ink); }
+.transfer-desk [hidden], .album-monograph [hidden] { display: none !important; }
+.folio-kicker, .folio-job-id, .folio-pages, .folio-state, .folio-history, .folio-pagination, .monograph-meta, .monograph-running-head { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.folio-kicker { margin: 0 0 4px; color: var(--ink-3); font-size: 12px; font-weight: 500; letter-spacing: .14em; }
+.folio-kicker b { margin-inline-start: 8px; font-weight: 600; letter-spacing: .04em; }
+.transfer-mast { display: flex; align-items: end; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin: 0 0 24px; }
+.transfer-mast h1 { margin: 0; font: 600 clamp(30px,4vw,48px)/1.28 var(--font-serif); letter-spacing: -.02em; }
+.folio-tools, .folio-caption, .monograph-running-head, .monograph-contents-head { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+.folio-tools { border-block: 1px solid var(--line-strong); padding-block: 8px; }
+.folio-filters { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.folio-filters a, .record-cleanup summary { border-radius: var(--r-pill); padding: 6px 12px; color: var(--ink-2); text-decoration: none; font-size: 14px; }
+.folio-filters a:hover, .record-cleanup summary:hover { background: var(--bg-subtle); color: var(--ink); }
+.folio-filters a[aria-current] { background: var(--accent); color: var(--accent-fg); }
+.folio-filter-count { font: 12px var(--font-mono); font-variant-numeric: tabular-nums; }
+.record-cleanup { position: relative; }
+.record-cleanup > div { z-index: 3; position: absolute; right: 0; width: min(260px,80vw); padding: 16px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--bg-elevated); box-shadow: var(--shadow-float); }
+.record-cleanup p { font-size: 14px; color: var(--ink-2); margin: 0 0 8px; }
+.record-cleanup button { margin: 0 4px 4px 0; }
+.folio-caption { margin: 16px 0 8px; color: var(--ink-2); }
+.folio-caption h2 { font: 600 16px var(--font-serif); margin: 0; }
+.folio-stack { display: grid; gap: 16px; }
+.folio-card { min-width: 0; border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--bg-card); box-shadow: var(--shadow-card); overflow: hidden; }
+.folio-book-head { display: flex; align-items: center; gap: 16px; padding: 12px 20px; }
+.folio-cover { flex: 0 0 48px; width: 48px; aspect-ratio: 3/4; display: grid; place-items: center; text-decoration: none; color: var(--seal); }
+.folio-cover span { border: 1px solid var(--seal); padding: 4px; font: 600 14px var(--font-serif); }
+.folio-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: var(--bg-subtle); }
+.folio-book-caption { min-width: 0; flex: 1; }
+.folio-book-caption h3 { font: 600 22px/1.28 var(--font-serif); letter-spacing: -.02em; overflow-wrap: anywhere; margin: 0; }
+.folio-book-caption h3 a { color: var(--ink); text-decoration: none; }
+.folio-book-caption h3 a:hover, .folio-history:hover { text-decoration: underline; }
+.folio-author, .folio-job-id, .folio-pages { color: var(--ink-3); font-size: 12px; margin: 4px 0 0; }
+.folio-history { color: var(--accent); font-size: 12px; white-space: nowrap; text-decoration: none; }
+.folio-ribbon { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; overflow-wrap: anywhere; padding: 4px 20px; font-size: 12px; background: var(--bg-tint); color: var(--accent); }
+.folio-ribbon[data-state="failed"], .folio-notice { background: var(--warn-bg); color: var(--warn); }
+.folio-ribbon[data-state="completed"] { color: var(--ok); background: var(--ok-bg); }
+.folio-ribbon strong { letter-spacing: .12em; border-inline-end: 1px solid var(--line-strong); padding-inline-end: 8px; }
+.folio-notice { border: 1px solid var(--warn-line); border-radius: var(--r-md); padding: 12px 16px; margin: 8px 0; }
+.folio-card .chapter-item { display: flex; flex-direction: row; gap: 16px; align-items: center; flex-wrap: wrap; box-shadow: none; border: 0 !important; border-top: 1px solid var(--line) !important; border-radius: 0 !important; background: var(--bg-card) !important; padding: 10px 20px; }
+.folio-task-info { flex: 1 1 240px; min-width: 0; border-inline-start: 2px solid var(--line-strong); padding-inline-start: 12px; }
+.chapter-item[data-status="running"] .folio-task-info { border-color: var(--accent); }
+.chapter-item[data-status="paused"] .folio-task-info { border-color: var(--warn); }
+.chapter-item[data-status="completed"] .folio-task-info { border-color: var(--ok); }
+.chapter-item[data-status="failed"] .folio-task-info { border-color: var(--danger); }
+.folio-chapter { display: inline; font: 600 16px/1.5 var(--font-serif); margin: 0; overflow-wrap: anywhere; }
+.folio-job-id { display: inline-block; margin-inline-start: 8px; overflow-wrap: anywhere; max-width: 100%; }
+.folio-state { margin-block-start: 4px; color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
+.chapter-item[data-status="paused"] .folio-state { color: var(--warn); }
+.chapter-item[data-status="failed"] .folio-state { color: var(--danger); }
+.folio-meter { height: 4px; background: var(--bg-subtle); border-radius: var(--r-sm); max-width: 360px; margin-top: 8px; overflow: hidden; }
+.folio-meter .progress-bar { height: 100%; background: var(--accent); }
+.chapter-item[data-status="paused"] .progress-bar { background: var(--warn); }
+.chapter-item .job-card-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.folio-card .job-card-status { gap: 4px; margin-block-start: 4px; }
+.folio-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin: 16px 0 32px; font-size: 12px; color: var(--ink-3); }
+.folio-empty { padding: 32px 16px; border-block: 1px solid var(--line); color: var(--ink-2); text-align: center; }
+.folio-empty p { margin: 8px 0; }
+.monograph-running-head { border-bottom: 1px solid var(--line-strong); padding-block: 8px; color: var(--ink-3); font-size: 12px; }
+.monograph-front { display: grid; grid-template-columns: minmax(160px, 29%) minmax(0,1fr); align-items: center; gap: clamp(24px,4vw,48px); padding-block: 32px; }
+.monograph-plate { padding: 24px; background: var(--bg-sidebar); display: grid; place-items: center; position: relative; border-radius: var(--r-md); }
+.monograph-cover { width: 100%; max-width: 232px; aspect-ratio: 3/4; }
+.album-monograph .monograph-cover .detail-cover { display: block; width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover; border: 0; border-radius: 0; box-shadow: none; margin: 0; }
+.album-monograph .monograph-cover .detail-cover-placeholder { display: grid; align-content: center; justify-items: center; gap: 16px; background: var(--bg-subtle); color: var(--seal); }
+.detail-cover-placeholder span { font: 600 32px var(--font-serif); border: 2px solid var(--seal); padding: 8px; writing-mode: vertical-rl; }
+.detail-cover-placeholder small { font: 12px var(--font-serif); letter-spacing: .16em; }
+.monograph-seal { position: absolute; bottom: 8px; right: 8px; color: var(--seal); border: 1px solid var(--seal); padding: 0 4px; font: 600 12px var(--font-serif); background: var(--bg-card); }
+.monograph-imprint { min-width: 0; overflow-wrap: anywhere; }
+.monograph-imprint h1 { font: 600 clamp(28px, 4vw, 44px)/1.28 var(--font-serif); margin: 8px 0; color: var(--ink); }
+.monograph-byline { font: 500 16px var(--font-serif); margin: 0 0 16px; }
+.monograph-meta, .monograph-actions { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.monograph-meta { color: var(--ink-3); font-size: 12px; margin-bottom: 12px; }
+.album-id-seal { border: 1px solid var(--seal); padding: 0 6px; color: var(--seal); }
+.monograph-description { color: var(--ink-2); font: 16px/1.75 var(--font-serif); white-space: pre-line; margin: 16px 0; }
+.monograph-actions { gap: 8px; margin: 16px 0; }
+.monograph-workshop { border-block: 1px solid var(--line-strong); padding-block: 12px; }
+.monograph-workshop summary { font: 600 16px var(--font-serif); }
+.monograph-workshop small { margin-inline-start: 8px; font: 12px var(--font-sans); color: var(--ink-3); }
+.monograph-workshop .tag-edit-area { border: 0; background: var(--bg-card); margin-top: 12px; }
+.monograph-contents { padding-block: 24px; }
+.monograph-contents-head { margin: 4px 0 16px; }
+.monograph-contents-head h2 { margin: 0; font: 600 24px var(--font-serif); }
+#chapter-count { font: 14px var(--font-mono); color: var(--ink-3); }
+.album-monograph .chapter-table { width: 100%; --bs-table-bg: transparent; --bs-table-hover-bg: var(--bg-subtle); }
+.album-monograph .chapter-table :is(th,td) { color: var(--ink-2); background: transparent; border-color: var(--line); }
+.album-monograph .chapter-table th { font-size: 12px; white-space: nowrap; font-weight: 500; }
+.album-monograph .chapter-table td:nth-child(3) { font: 600 16px var(--font-serif); color: var(--ink); overflow-wrap: anywhere; }
+.album-monograph .chapter-table td:is(:nth-child(2),:nth-child(4)) { font: 14px var(--font-mono); }
+.chapter-downloads .folio-history { margin-inline-start: auto; }
+@media (max-width: 640px) {
+  .transfer-mast { gap: 8px; margin-bottom: 16px; }
+  .folio-tools { column-gap: 4px; row-gap: 4px; }
+  .record-cleanup { margin-inline-start: auto; }
+  .folio-book-head, .folio-card .chapter-item { padding: 10px 12px; gap: 8px; }
+  .folio-book-caption h3 { font-size: 18px; }
+  .folio-job-id { display: block; margin: 0; }
+  .folio-ribbon { padding-inline: 12px; }
+  .monograph-front { grid-template-columns: minmax(0,1fr); padding-block: 16px; gap: 16px; }
+  .monograph-plate { padding: 16px; }
+  .monograph-cover { width: 136px; }
+  .album-monograph .chapter-table :is(th,td) { padding-inline: 4px; }
+}

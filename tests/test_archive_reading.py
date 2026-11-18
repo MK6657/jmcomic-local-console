@@ -1419,7 +1419,9 @@ const loaded = [];
 global.window = global;
 window.addEventListener = () => {};
 global.location = { origin: 'http://x', pathname: '/downloads', search: '' };
+global.CustomEvent = class { constructor(type, init) { Object.assign(this, {type}, init); } };
 global.document = {
+  dispatchEvent: () => {},
   createElement: el, createTextNode: textNode, body: el('body'), visibilityState: 'visible',
   getElementById: id => (ids[id] = ids[id] || el('div')),
   addEventListener: (type, fn) => { if (type === 'DOMContentLoaded') loaded.push(fn); },
@@ -1439,8 +1441,9 @@ const visible = box => box.all().filter(b => (b.classList.contains('badge') || b
   for (let i = 0; i < 5; i++) await flush();
   const out = { downloads: {}, search: {}, detail: {} };
   for (const section of ['completed', 'failed']) {
-    const html = ids[section + '-section'].innerHTML;
+    const html = ids['folio-list'].innerHTML;
     for (const part of html.split('<div class="card job-card').slice(1)) {
+      if (!part.includes('data-status="' + section + '"')) continue;
       const job = /data-job-id="([^"]+)"/.exec(part)[1];
       const status = (/job-card-status">([\s\S]*?)<\/div>/.exec(part) || [, ''])[1];
       const badges = Array.from(status.matchAll(/<span class="(?:badge [^"]*|offline-badge)"[^>]*>([\s\S]*?)<\/span>/g))
@@ -1780,7 +1783,9 @@ global.setTimeout = () => 0; global.clearTimeout = () => {};
 window.apiFetch = () => scenario.loadError
   ? Promise.reject(Object.assign(new Error(scenario.loadError.message), { status: scenario.loadError.status }))
   : Promise.resolve(scenario.data);
-global.fetch = async () => ({ ok: false, status: scenario.status, json: async () => scenario.reply });
+global.fetch = async (url, options) => options?.signal && !options.cache
+  ? { ok: true, blob: async () => new Blob(['fixture']) }
+  : { ok: false, status: scenario.status, json: async () => scenario.reply };
 eval(fs.readFileSync(path.join(JS, 'reading-nav.js'), 'utf8'));
 const out = {};
 out.onlinePageUrl = scenario.data.pages.map(p => window.readingNav.onlinePageUrl('101', p));

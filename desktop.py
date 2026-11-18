@@ -50,6 +50,12 @@ def main(argv=None):
     if args and args[0] == "cli":
         from jmcomic_cli import main as cli_main
         return cli_main(args[1:]) or 0
+    if args and args[0] == 'demo':
+        demo = argparse.ArgumentParser(description='打开独立的离线藏书阁样书实例')
+        demo.add_argument('--no-browser', action='store_true', help='只输出预览地址')
+        options = demo.parse_args(args[1:])
+        from core.atelier_demo import run_demo
+        return run_demo(open_browser=not options.no_browser)
     parser = argparse.ArgumentParser(description="JMComic Windows portable console")
     parser.add_argument("command", nargs="?", choices=("launch", "instance", "attach", "serve", "self-check", "lifecycle-check"),
                         default="launch", help="launch 启动；instance 只查看目录；attach 只打开既有服务；cli 提供维护命令")
