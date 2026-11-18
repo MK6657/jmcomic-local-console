@@ -206,10 +206,10 @@ def _isolated(downloads, tmp_path):
 
 @pytest.fixture
 def download(client, downloads, monkeypatch):
-    """The real download_album_job; only the client and fetching one chapter are replaced.
+    """The real download_album_job and its subsequent album maintenance tick.
     download.serve(chapters) changes what upstream lists for the download's own fetch; download.rename(name)
     changes the album's upstream title."""
-    from core import database as db, jm_service
+    from core import album_maintenance, database as db, jm_service
     from core.progress import progress_manager
     monkeypatch.setattr(jm_service, "close_client", lambda _client: True)
     served = {"chapters": list(CHAPTERS), "name": _Album.name}
@@ -229,10 +229,11 @@ def download(client, downloads, monkeypatch):
                          "pack_format": pack_format, "organize_mode": organize})
 
         def chapter(job_id, album_id, album, album_dir, photo, total_pages, done_pages, pending_images,
-                    failed_pages, *rest):
+                    failed_pages, tracker, checkpoint, *rest):
             folder = jm_service._chapter_output_dir(album_dir, photo)
             for n in range(1, (written or len(photo)) + 1):
                 (folder / f"{n:05d}.webp").write_bytes(f"{photo.photo_id}-{n}".encode())
+                checkpoint.confirm(folder / f"{n:05d}.webp")
                 done_pages[0] += 1
             if outcome == "failed":
                 failed_pages.append("下载失败")
@@ -253,6 +254,15 @@ def download(client, downloads, monkeypatch):
             jm_service.download_album_job(job_id, "3001", photo_ids)
         finally:
             progress_manager.remove_tracker(job_id)
+        if db.get_job(job_id)["status"] == "completed":
+            work = album_maintenance.claim()
+            if pack or organize != "none":
+                assert work is not None
+            if work is not None:
+                assert work["album_id"] == "3001"
+                album_maintenance.run(work, threading.Event())
+                maintenance = album_maintenance.statuses(["3001"])["3001"]
+                assert maintenance["state"] == "completed", maintenance
         _forget_local()
         return db.get_job(job_id)["status"]
 
@@ -370,12 +380,14 @@ def _library_item(client, album_id, path="/api/library"):
 
 def test_old_database_gets_update_tables_idempotently(client, download):
     from core import database as db
+    from test_migration_backup import DROP_PUBLICATION_SQL
     assert download("ja", ["71"]) == "completed"
     conn = db.get_db()
     try:
         # Model an older supported schema: a current v4 missing these tables is
         # corruption and must not silently replace their lost contents.
-        conn.executescript("DROP TABLE album_update_checks; DROP TABLE update_check_log; PRAGMA user_version=3;")
+        conn.executescript(DROP_PUBLICATION_SQL +
+                           "DROP TABLE album_update_checks; DROP TABLE update_check_log; PRAGMA user_version=3;")
         conn.execute("UPDATE jobs SET queued_at=created_at WHERE queued_at IS NULL")
         conn.commit()
         before = [tuple(r) for r in conn.execute("SELECT * FROM jobs ORDER BY id")]
@@ -1823,9 +1835,14 @@ def test_a2_job_completes_then_leaves_a2(client, download, upstream, checker, ba
 # ─── partial jobs write into the folder the reader opens (upstream renamed, organized, archive only) ───
 
 
+def _public_paths(root, paths):
+    from core.publication import WORK, VIEWS
+    return sorted(rel.as_posix() for path in paths if (rel := path.relative_to(root)).parts[0] not in (WORK, VIEWS))
+
+
 def _dirs(root):
-    """Every folder under root, relative, as posix paths (chapter folders included)."""
-    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_dir())
+    """All user-visible folders, including every chapter in the published album."""
+    return _public_paths(root, (path for path in root.rglob("*") if path.is_dir()))
 
 
 def _local_photo_pages(client, album_id="3001"):
@@ -1929,7 +1946,7 @@ def test_flat_mode_still_flattens_a_joined_author_folder(client, download, downl
     assert download("jb", ["72"], organize="flat") == "completed"         # the user switched to 扁平化 since
     assert db.get_job("jb")["output_path"] == str(folder)
     assert [p.name for p in folder.glob("第2话__72_*.webp")]                # flattened inside the joined folder
-    assert sorted(p.name for p in downloads.iterdir()) == ["someone"]
+    assert _public_paths(downloads, downloads.iterdir()) == ["someone"]
     assert sorted(p.name for p in (downloads / "someone").iterdir()) == ["Name_3001"]   # no someone/someone/
 
 
@@ -1947,7 +1964,8 @@ def test_a_partial_job_never_joins_the_root_itself(client, download, downloads):
     _forget_local()
     assert download("jb", ["72"]) == "completed"
     assert db.get_job("jb")["output_path"] == str(downloads / "Name_3001")
-    assert sorted(p.name for p in downloads.iterdir()) == ["Name_3001", "Other_4001"]   # nothing written into downloads/
+    assert _public_paths(downloads, downloads.iterdir()) == ["Name_3001", "Other_4001"]
+    assert (other / "00001.webp").read_bytes() == b"page"
 
 
 def test_a_partial_job_never_joins_an_empty_shell(client, download, downloads):
@@ -1956,7 +1974,9 @@ def test_a_partial_job_never_joins_an_empty_shell(client, download, downloads):
     assert download("ja", ["71"]) == "completed"
     folder = downloads / "Name_3001"
     for child in folder.iterdir():
-        shutil.rmtree(child)                                              # the folder is left, its pages are gone
+        if child.is_dir():
+            shutil.rmtree(child)
+    assert not list(folder.rglob("*.webp"))
     _forget_local()
     download.rename("Renamed")
     assert download("jb", ["72"]) == "completed"

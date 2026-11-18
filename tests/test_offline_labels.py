@@ -82,10 +82,11 @@ def download(client, downloads, monkeypatch):
                          "pack_format": pack_format, "organize_mode": organize})
 
         def chapter(job_id, album_id, album, album_dir, photo, total_pages, done_pages, pending_images,
-                    failed_pages, *rest):
+                    failed_pages, tracker, checkpoint, *rest):
             folder = jm_service._chapter_output_dir(album_dir, photo)
             for n in range(1, (written or len(photo)) + 1):
                 (folder / f"{n:05d}.webp").write_bytes(f"{photo.photo_id}-{n}".encode())
+                checkpoint.confirm(folder / f"{n:05d}.webp")
                 done_pages[0] += 1
             if outcome == "failed":
                 failed_pages.append("下载失败")
@@ -97,6 +98,8 @@ def download(client, downloads, monkeypatch):
         progress_manager.create_tracker(job_id)
         try:
             jm_service.download_album_job(job_id, "3001", photo_ids)
+            from publication_support import maintenance_tick
+            maintenance_tick()
         finally:
             progress_manager.remove_tracker(job_id)
         return db.get_job(job_id)["status"]
@@ -152,9 +155,9 @@ def test_multiple_jobs_add_up_and_a_broken_chapter_stops_the_count(client, downl
     assert download("jb", ["72"]) == "completed"
     _chapter_list()
     assert _claim(client) == ({"downloaded": 2, "total": 3}, "partial")
-    # a later job for chapter 73 fails after one of its 4 pages: the album is still readable, but no count
+    # A failed task's private page must not invalidate the two published chapters.
     assert download("jc", ["73"], outcome="failed", written=1) == "failed"
-    assert _claim(client) == (None, "incomplete_chapter")
+    assert _claim(client) == ({'downloaded': 2, 'total': 3}, 'partial')
 
 
 def test_cbz_only_albums_are_counted_from_the_archive(client, download, downloads):
@@ -373,31 +376,23 @@ def test_detail_does_not_ask_for_a_count_when_nothing_is_readable():
 # ─── review round: other folders, busy archives, extra pages, one chapter, wording in the render code ───
 
 
-def _split_like_before(monkeypatch):
-    """Downloads made before partial jobs joined the folder the reader opens (core.jm_service._reusable_album_dir):
-    the next partial download went to a new <current upstream title>_<id> folder. Libraries may still hold these."""
-    from core import jm_service
-    monkeypatch.setattr(jm_service, "_reusable_album_dir", lambda album_id: None)
-
-
-def test_an_earlier_download_in_another_folder_stops_the_count(client, download, downloads, monkeypatch):
-    # organize_mode=by_author moved the first download to <author>/<title>_<id>; the next one could not move there
-    assert download("ja", ["71", "72"], organize="by_author") == "completed"
-    assert (downloads / "someone" / "Name_3001").is_dir()
-    _split_like_before(monkeypatch)
-    assert download("jb", ["73"], organize="by_author") == "completed"
-    assert (downloads / "Name_3001").is_dir()
+@pytest.mark.parametrize('first,second', [('someone/Name_3001', 'Name_3001'), ('Name_3001', 'Name v2_3001')])
+def test_legacy_split_album_does_not_claim_an_incomplete_count(client, downloads, first, second):
+    # Simulate two v4 catalog entries. New publications deliberately cannot create
+    # these split libraries, but an upgrade must continue to report them accurately.
+    from core import database as db
+    for job, relative, photos in [('old_a', first, CHAPTERS[:2]), ('old_b', second, CHAPTERS[2:])]:
+        folder = downloads / relative
+        for pid, title, count in photos:
+            chapter = folder / f'{title}__{pid}'
+            chapter.mkdir(parents=True)
+            (chapter / '.jm-chapter.json').write_text(json.dumps({'photo_id':pid,'format':2}))
+            for n in range(1,count+1):
+                (chapter / f'{n:05d}.webp').write_bytes(b'fixture page')
+        db.insert_job(job, '3001', 'Name', [p[0] for p in photos])
+        assert db.transition_job_status(job, ['queued'], 'completed', output_path=str(folder))
     _chapter_list()
-    assert _claim(client) == (None, "other_folders")     # never “1/3”: chapters 71 and 72 are on disk too
-
-
-def test_a_renamed_album_stops_the_count(client, download, monkeypatch):
-    assert download("ja", ["71", "72"]) == "completed"
-    monkeypatch.setattr(_Album, "name", "Name v2")        # upstream renamed it
-    _split_like_before(monkeypatch)                       # …and the next download got a new folder
-    assert download("jb", ["73"]) == "completed"
-    _chapter_list()
-    assert _claim(client) == (None, "other_folders")
+    assert _claim(client) == (None, 'other_folders')
 
 
 @pytest.mark.parametrize("organize", ["none", "by_author"])
@@ -407,7 +402,7 @@ def test_a_partial_download_after_a_rename_joins_the_folder_and_is_counted(clien
     monkeypatch.setattr(_Album, "name", "Name v2")        # upstream renamed it: the partial job still joins Name_3001
     assert download("jb", ["72"], organize=organize) == "completed"
     base = downloads / "someone" if organize == "by_author" else downloads
-    assert sorted(p.name for p in base.iterdir()) == ["Name_3001"]
+    assert sorted(p.name for p in base.iterdir() if not p.name.startswith(".jmcomic-")) == ["Name_3001"]
     _chapter_list()
     assert _claim(client) == ({"downloaded": 2, "total": 3}, "partial")
 

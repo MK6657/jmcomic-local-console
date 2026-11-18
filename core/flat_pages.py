@@ -79,7 +79,7 @@ class _FlatPages:
             self.readers[index.path] = self.stack.enter_context(archive_pages.open_pages(index))
         return self.readers[index.path](page)
 
-    def place(self, source, prefix, photo_id):
+    def place(self, source, prefix, photo_id, *, verify_source=None):
         variants = self.variants[photo_id, source.stem]
         if variants:
             size, digest = source.stat().st_size, _digest(source)
@@ -88,20 +88,24 @@ class _FlatPages:
                 if variant.matches(size, digest, self._read):
                     if variant.loose:
                         self.check_control()
+                        if verify_source:
+                            verify_source()
                         source.unlink()
                         return variant.loose[0]
-                    return self._move(source, self.directory / variant.name, variant)
+                    return self._move(source, self.directory / variant.name, variant, verify_source)
             log.warning(f"扁平整理：章节 {photo_id} 第 {source.stem} 页已有不同内容，分别保留")
         for version in count(1):
             suffix = "" if version == 1 else f"~{version}"
             target = self.directory / f"{prefix}_p{source.stem}{suffix}.webp"
             if target.stem.casefold() not in variants and not os.path.lexists(target):
-                return self._move(source, target, self._variant(target.name))
+                return self._move(source, target, self._variant(target.name), verify_source)
 
-    def _move(self, source, target, variant):
+    def _move(self, source, target, variant, verify_source):
         if variant is None or target.parent != self.directory or not is_safe_path(target):
             raise ValueError("扁平整理目标名称不安全，保留原图")
         self.check_control()
+        if verify_source:
+            verify_source()
         if os.name == "nt":
             source.rename(target)
         else:
@@ -134,6 +138,7 @@ def flatten(directory, photos, check_control):
 def check_unowned_overlaps(directory, loose, confirmed, bases, check_control):
     """Packer prefers loose files by path stem. An unowned loose file must not erase different archived bytes."""
     unowned = defaultdict(list)
+    overlaps = {}
     for path in loose:
         if path not in confirmed:
             unowned[archive_pages.page_key(path.relative_to(directory).as_posix())].append(path)
@@ -151,3 +156,5 @@ def check_unowned_overlaps(directory, loose, confirmed, bases, check_control):
                     archived = hashlib.sha256(read(page)).digest()
                     if any(path.stat().st_size != page.size or _digest(path) != archived for path in paths):
                         raise ValueError(f"旧包与未认领散图 {page.name} 内容不同，保留旧包和原图")
+                    overlaps.update(dict.fromkeys(paths, archived.hex()))
+    return overlaps

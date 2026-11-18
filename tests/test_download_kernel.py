@@ -1,6 +1,7 @@
 """Offline observations at the actual image-fetch, reader and filesystem boundaries."""
 import io
 import json
+import re
 import threading
 import zipfile
 from collections import Counter
@@ -39,14 +40,14 @@ class Book(list):
 
 @pytest.fixture
 def pipeline(client, tmp_path, monkeypatch):
-    from core import database as db, jm_service, path_guard
+    from core import album_maintenance, database as db, jm_service, path_guard
     from core.progress import progress_manager
     from core.settings import update_settings
-    from routes import api_preview
+    from routes import api_export, api_preview
 
     root = tmp_path / "downloads"
     root.mkdir()
-    for module in (jm_service, path_guard, api_preview):
+    for module in (jm_service, path_guard, api_preview, api_export):
         monkeypatch.setattr(module, "DOWNLOAD_ROOT", root)
     update_settings({"image_threads": 3, "photo_threads": 2, "retry_times": 0, "skip_existing": False})
     books = {"100": Book([Photo("71", "第一章", 1), Photo("72", "第二章", 3)])}
@@ -74,6 +75,9 @@ def pipeline(client, tmp_path, monkeypatch):
             on_tracker(tracker)
         try:
             jm_service.download_album_job(job_id, album_id, list(selection), stop_event=stop_event)
+            work = album_maintenance.claim()
+            if work:
+                album_maintenance.run(work, stop_event or threading.Event())
             return db.get_job(job_id)
         finally:
             progress_manager.remove_tracker(job_id)
@@ -90,6 +94,28 @@ def stored_pages(folder, fmt):
         return {name: archive.read(name) for name in archive.namelist() if name.endswith(".webp")}
 
 
+def test_v4_resume_only_adopts_signed_pages_even_when_skip_is_enabled(pipeline):
+    from core import jm_service, publication
+    from core.download_checkpoint import DownloadCheckpoint
+    from core.download_layout import chapter_output_dir
+    photo = pipeline.books['100'][1]
+    old = pipeline.root / 'Book_100'
+    old.mkdir()
+    folder = chapter_output_dir(old, photo)
+    valid, replaced, unrelated = [folder / f'{i:05d}.webp' for i in (1, 2, 3)]
+    for path in (valid, replaced, unrelated):
+        path.write_bytes(image_bytes('red'))
+    receipt = DownloadCheckpoint('old-job', {'total_pages': 3, 'output_path': str(old)})
+    receipt.confirm(valid)
+    receipt.confirm(replaced)
+    replaced.unlink()
+    replaced.write_bytes(image_bytes('blue') + b'different-length')
+    ws = publication.Workspace(pipeline.root, 'old-job', '100', old, receipt)
+    seeds = ws.seed([photo], old, True, jm_service._valid_image, jm_service.image_is_gif)
+    assert [p.name for p in seeds] == [valid.name] and seeds[0].read_bytes() == valid.read_bytes()
+    assert replaced.exists() and unrelated.exists()
+
+
 @pytest.mark.parametrize("fmt", [None, "cbz", "zip"], ids=["loose", "cbz", "zip"])
 def test_flat_whole_subset_rename_then_content_change(pipeline, client, fmt):
     from core.settings import update_settings
@@ -97,36 +123,44 @@ def test_flat_whole_subset_rename_then_content_change(pipeline, client, fmt):
                      "delete_originals": bool(fmt)})
     book = pipeline.books["100"]
     book[0].name = book[1].name
-    folder = pipeline.root / "Book_100"
-    assert pipeline.run("whole")["status"] == "completed"
-    original = stored_pages(folder, fmt)
-    assert len(original) == 4 and all("/" not in name for name in original)
+    def published(job_id, selection=()):
+        row = pipeline.run(job_id, selection=selection)
+        assert row['status'] == 'completed'
+        folder = Path(row['output_path'])
+        pages = stored_pages(folder, fmt)
+        keys = [re.fullmatch(r'[^/]+__([0-9]+)_p([0-9]+)\.webp', name) for name in pages]
+        assert all(keys) and len(keys) == 4
+        if fmt:
+            assert not list(folder.rglob('*.webp'))
+        return {match.groups(): data for match, data in zip(keys, pages.values())}
+    original = published('whole')
     assert len(set(original.values())) == 1  # Four distinct page identities may contain identical bytes.
 
     book.reverse()
     book[0].name = "章名已改"
-    assert pipeline.run("subset", selection=["72"])["status"] == "completed"
-    assert stored_pages(folder, fmt) == original
-    assert pipeline.run("again")["status"] == "completed"
-    assert stored_pages(folder, fmt) == original
+    assert published('subset', ['72']) == original
+    assert published('again') == original
     assert client.get("/api/preview/100").get_json()["total_pages"] == 4
 
     changed = image_bytes("blue")
     pipeline.payloads[book[0][1].download_url] = changed
-    assert pipeline.run("changed", selection=["72"])["status"] == "completed"
-    variants = stored_pages(folder, fmt)
-    assert original.items() <= variants.items() and len(variants) == 5
-    assert list(variants.values()).count(changed) == 1
-    assert pipeline.run("repeat_changed", selection=["72"])["status"] == "completed"
-    assert stored_pages(folder, fmt) == variants
-    assert client.get("/api/preview/100").get_json()["total_pages"] == 5
-    if fmt:
-        assert not list(folder.rglob("*.webp"))
-    assert {path.name for path in folder.rglob("*.json")} == {".jm-chapter.json"}
+    newest = {**original, ('72', '00002'): changed}
+    assert published('changed', ['72']) == newest
+    assert published('repeat_changed', ['72']) == newest
+    preview = client.get('/api/preview/100').get_json()
+    assert preview['total_pages'] == 4
+    assert Counter(client.get(page['url']).data for page in preview['pages']) == Counter(newest.values())
+    for job_id, count, blue in [('whole', 4, 0), ('changed', 3, 1)]:
+        with client.post(f'/api/export/{job_id}/zip') as response:
+            assert response.status_code == 200
+            with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+                data = [archive.read(name) for name in archive.namelist() if name.endswith('.webp')]
+                assert len(data) == count and data.count(changed) == blue
 
 
 def test_unknown_flat_and_chapter_files_survive_pack_and_cleanup(pipeline):
-    from core.settings import update_settings
+    from core.download_finalize import finalize_files
+    from core.download_layout import chapter_output_dir
     folder = pipeline.root / "Book_100"
     legacy = {"第一章__71_00001.webp": image_bytes("red"), "手工目录/00001.webp": image_bytes("green"),
               "第一章__71/00001.webp": image_bytes("gold"), "第二章__72/00099.webp": image_bytes("gray"),
@@ -136,17 +170,47 @@ def test_unknown_flat_and_chapter_files_survive_pack_and_cleanup(pipeline):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
     (folder / "第二章__72/.jm-chapter.json").write_text(json.dumps({"photo_id": "72", "format": 2}))
-    update_settings({"organize_mode": "flat", "auto_pack": True, "delete_originals": True})
+    photos = pipeline.books['100']
+    def legacy_finalize():
+        for photo in photos:
+            chapter = chapter_output_dir(folder, photo)
+            for number in range(1, len(photo) + 1):
+                (chapter / f'{number:05d}.webp').write_bytes(image_bytes('red'))
+        finalize_files(str(folder), 'flat', photos, photos, keep_location=True,
+                       settings={'auto_pack': 'true', 'delete_originals': 'true'},
+                       check_control=lambda: None, path_changed=lambda path: None, archiving=lambda: None)
     for job_id in ("first", "again"):
-        assert pipeline.run(job_id)["status"] == "completed"
+        legacy_finalize()
         assert {name: (folder / name).read_bytes() for name in legacy} == legacy
         assert len(stored_pages(folder, "cbz")) == 4 + len(legacy) - 1
     archive = folder / "Book_100.cbz"
     previous = archive.read_bytes()
     (folder / "手工目录/00001.webp").write_bytes(image_bytes("white"))
-    assert pipeline.run("manual_change")["status"] == "completed"
+    legacy_finalize()
     assert archive.read_bytes() == previous
     assert (folder / "手工目录/00001.webp").read_bytes() == image_bytes("white")
+
+
+def test_three_publications_behind_pause_restore_one_shelf_for_all_jobs(pipeline, client):
+    from core import album_maintenance, database as db
+    from core.settings import update_settings
+    update_settings({'organize_mode': 'none', 'auto_pack': False})
+    db.insert_job('pause', '100', 'Book', [])
+    assert db.transition_job_status('pause', ['queued'], 'paused')
+    for job_id, selection in [('first', ['71']), ('second', ['72']), ('third', ['71'])]:
+        assert pipeline.run(job_id, selection=selection)['status'] == 'completed'
+    assert not album_maintenance.claim()
+    assert db.transition_job_status('pause', ['paused'], 'canceled')
+    work = album_maintenance.claim()
+    assert work and work['payload']['preferred_directory'] == 'Book_100'
+    album_maintenance.run(work, threading.Event())
+    assert album_maintenance.statuses(['100'])['100']['state'] == 'completed'
+    shelf = pipeline.root / 'Book_100'
+    assert album_maintenance.public_directory('100') == shelf
+    assert {row['output_path'] for row in db.resource_records(['100'])} == {str(shelf)}
+    assert {client.get(f'/api/jobs/{job_id}').json['job']['output_path']
+            for job_id in ('first', 'second', 'third')} == {str(shelf)}
+    assert client.get('/api/preview/100').json['total_pages'] == 4
 
 
 class InFlight:
@@ -291,7 +355,7 @@ def test_waiting_image_stops_without_another_fetch_or_releasing_the_owner(pipeli
 
 
 def test_shutdown_after_author_move_does_not_nest_the_resumed_directory(pipeline, monkeypatch):
-    from core import database as db
+    from core import album_maintenance, database as db
     from core.job_manager import JobManager
     from core.packer import CbzPacker
     from core.settings import update_settings
@@ -308,7 +372,7 @@ def test_shutdown_after_author_move_does_not_nest_the_resumed_directory(pipeline
 
     monkeypatch.setattr(CbzPacker, "pack", after_move)
     db.insert_job("restart", "100", "Book", [])
-    manager.schedule_next()
+    manager.start()
     folder = pipeline.root / "Writer/Book_100"
     try:
         assert at_pack.wait(4)
@@ -318,12 +382,13 @@ def test_shutdown_after_author_move_does_not_nest_the_resumed_directory(pipeline
     finally:
         release.set()
         assert manager.stop(timeout=5)
-    assert db.get_job("restart")["status"] == "queued" and not (folder / "Book_100.cbz").exists()
+    assert db.get_job('restart')['status'] == 'completed' and not (folder / 'Book_100.cbz').exists()
+    assert album_maintenance.statuses(['100'])['100']['state'] == 'pending'
     assert len(stored_pages(folder, None)) == 4
     resumed = JobManager()
-    resumed.schedule_next()
+    resumed.start()
     with resumed._changed:
-        assert resumed._changed.wait_for(lambda: not resumed._running_jobs, 6)
+        assert resumed._changed.wait_for(lambda: album_maintenance.statuses(['100'])['100']['state'] == 'completed', 6)
     assert resumed.stop(timeout=3) and db.get_job("restart")["status"] == "completed"
     assert Path(db.get_job("restart")["output_path"]) == folder and not (folder.parent / "Writer").exists()
     assert len(stored_pages(folder, "cbz")) == 4 and not list(folder.rglob("*.webp"))

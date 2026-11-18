@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import database as db
+from . import album_maintenance
 from .download_checkpoint import discard_checkpoint
 from .logger import log, set_request_id, clear_request_id
 from .progress import progress_manager
@@ -46,6 +47,9 @@ class JobManager:
         self._schedule_wakeup = threading.Event()
         self._stop_event = threading.Event()
         self._scheduler_thread: Optional[threading.Thread] = None
+        self._maintenance_album = None
+        self._maintenance_thread = None
+        self._recover_maintenance = False
 
     @contextmanager
     def _operation(self):
@@ -90,9 +94,10 @@ class JobManager:
                 if self._stop_event.is_set():
                     raise RuntimeError("下载执行器仍在停止中，请等待退出后再启动")
                 return
-            if self._stop_event.is_set() and (self._running_jobs or self._pending_operations):
+            if self._stop_event.is_set() and (self._running_jobs or self._pending_operations or self._maintenance_thread):
                 raise RuntimeError("下载执行器仍在停止中，请等待退出后再启动")
             self._stop_event.clear()
+            self._recover_maintenance = True
             thread = threading.Thread(target=self._scheduler_loop, daemon=True, name="download-queue")
             self._scheduler_thread = thread
             try:
@@ -120,6 +125,8 @@ class JobManager:
             self._stop_waiters += 1
             scheduler = self._scheduler_thread
             workers = tuple(self._running_jobs.values())
+            if self._maintenance_thread:
+                workers += (self._maintenance_thread,)
         finally:
             self._lock.release()
         try:
@@ -128,7 +135,7 @@ class JobManager:
                 if thread is not current and thread.is_alive():
                     thread.join(timeout=max(0.0, deadline - time.monotonic()))
             with self._changed:
-                while self._pending_operations or self._running_jobs:
+                while self._pending_operations or self._running_jobs or self._maintenance_thread:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         return False
@@ -170,6 +177,7 @@ class JobManager:
             self._schedule_wakeup.clear()
             try:
                 self._schedule_next()
+                self._schedule_maintenance()
             except Exception as e:
                 log.error(f"调度器异常: {e}")
             if not self._stop_event.is_set():
@@ -187,6 +195,9 @@ class JobManager:
             with self._admission_lock:
                 if self._stop_event.is_set():
                     return
+                if self._recover_maintenance:
+                    album_maintenance.recover()
+                    self._recover_maintenance = False
                 if not can_auto_schedule():
                     return
                 max_running = int(db.get_setting("max_running_jobs", "1") or 1)
@@ -194,12 +205,51 @@ class JobManager:
                     if self._stop_event.is_set() or len(self._running_jobs) >= max_running:
                         return
                     excluded_albums = tuple(self._running_albums.values())
+                    if self._maintenance_album is not None:
+                        excluded_albums += (self._maintenance_album,)
 
                 next_job = db.claim_next_queued_job(excluded_albums)
                 if not next_job:
                     return
                 with self._job_control(next_job["job_id"]):
                     self._start_claimed_job(next_job)
+
+    def _schedule_maintenance(self):
+        with self._admission_lock:
+            with self._lock:
+                if self._stop_event.is_set() or self._maintenance_thread:
+                    return
+                excluded = tuple(self._running_albums.values())
+            work = album_maintenance.claim(excluded)
+            if not work:
+                return
+            thread = threading.Thread(target=self._run_maintenance, args=(work,), daemon=True, name='album-maintenance')
+            with self._lock:
+                self._maintenance_album = work['album_id']
+                self._maintenance_thread = thread
+                try:
+                    thread.start()
+                except BaseException:
+                    self._recover_maintenance = True
+                    self._maintenance_album = self._maintenance_thread = None
+                    raise
+
+    def _run_maintenance(self, work):
+        try:
+            album_maintenance.run(work, self._stop_event)
+        except Exception:
+            with self._lock:
+                self._recover_maintenance = True
+            log.exception(f"保存整册整理结果失败 album_id={work['album_id']}")
+        finally:
+            with self._changed:
+                self._maintenance_album = self._maintenance_thread = None
+                self._schedule_wakeup.set()
+                self._changed.notify_all()
+
+    def retry_maintenance(self, album_id):
+        album_maintenance.retry(album_id)
+        self._schedule_wakeup.set()
 
     def _start_claimed_job(self, next_job):
         """Called with the tracked admission and per-job gates, never _lock."""
@@ -320,6 +370,7 @@ class JobManager:
             result = cancel_download(job_id)
             if result[0]:
                 discard_checkpoint(job_id)
+                self._schedule_wakeup.set()
             if result == (True, "已取消"):
                 log.info(f"取消任务 job_id={job_id}")
         return result
@@ -334,6 +385,7 @@ class JobManager:
                 raise TaskCommandError("status", "任务正在下载中，请先取消后再删除", 400)
             db.delete_job(job_id)
             discard_checkpoint(job_id)
+            self._schedule_wakeup.set()
 
     def begin_file_finalization(self, job_id: str) -> bool:
         """Order the first non-repeatable file operation against pause, without locking I/O."""

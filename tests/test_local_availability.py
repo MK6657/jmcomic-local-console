@@ -12,11 +12,12 @@ ROOT = Path(__file__).resolve().parent.parent
 @pytest.fixture
 def downloads(client, tmp_path, monkeypatch):
     from core import path_guard
-    from routes import api_preview
+    from routes import api_export, api_preview
     root = tmp_path / "downloads"
     root.mkdir()
     monkeypatch.setattr(path_guard, "DOWNLOAD_ROOT", root)
     monkeypatch.setattr(api_preview, "DOWNLOAD_ROOT", root)  # the reader builds page URLs relative to it
+    monkeypatch.setattr(api_export, "DOWNLOAD_ROOT", root)
     return root
 
 
@@ -326,10 +327,11 @@ def download(client, downloads, monkeypatch):
         monkeypatch.setattr(jm_service, "get_client", lambda shared=True: (_Client(album), None))
 
         def chapter(job_id, album_id, album, album_dir, photo, total_pages, done_pages, pending_images,
-                    failed_pages, *rest):
+                    failed_pages, tracker, checkpoint, *rest):
             folder = jm_service._chapter_output_dir(album_dir, photo)
             for n in range(1, pages + 1):
                 (folder / f"{n:05d}.webp").write_bytes(b"page")
+                checkpoint.confirm(folder / f"{n:05d}.webp")
                 done_pages[0] += 1
             if during:
                 during()
@@ -365,8 +367,11 @@ def _buckets(client, album_id):
 
 @pytest.mark.parametrize("outcome, group, bucket", [("failed", "failed", "failed"), ("canceled", "none", "missing")])
 def test_a_failed_redownload_into_a_deleted_folder_is_not_readable(client, downloads, download, outcome, group, bucket):
+    import io
     import shutil
+    import zipfile
     from core import database as db
+    from core.publication import WORK
     from core.local_availability import readable_album_ids
     db.add_wishlist("2001", "Name", "someone", "")
     first = download("job_a", "2001", pages=2)
@@ -377,8 +382,10 @@ def test_a_failed_redownload_into_a_deleted_folder_is_not_readable(client, downl
     seen = []
     second = download("job_b", "2001", pages=1, outcome=outcome, during=lambda: seen.append(
         (_library_item(client, "2001")["status_group"], readable_album_ids(["2001"]))))
-    assert second["status"] == outcome and Path(second["output_path"]) == folder  # the same folder, recreated
-    assert [p.name for p in folder.rglob("*.webp")] == ["00001.webp"]  # one page of two on disk again
+    partial = Path(second["output_path"])
+    assert second["status"] == outcome and partial.is_relative_to(downloads / WORK)
+    assert [page.name for page in partial.rglob("*.webp")] == ["00001.webp"]
+    assert not folder.exists()
     assert seen == [("active", set())]  # while it downloads: 排队中 / 下载中, not 可离线阅读
     assert readable_album_ids(["2001"]) == set()
     item = _library_item(client, "2001")
@@ -388,9 +395,12 @@ def test_a_failed_redownload_into_a_deleted_folder_is_not_readable(client, downl
     assert (favourite["status_group"], favourite["readable"]) == (group, False)
     assert client.post("/api/preview/available", json={"album_ids": ["2001"]}).get_json()["readable"] == []
     assert client.get("/api/preview/2001").status_code == 404  # the reader agrees: no partial pages as the old download
-    exported = client.post("/api/export/job_a/zip")
-    assert exported.status_code == 404 and "重新下载" in exported.get_json()["message"]  # nor exported as it
-    exported.close()
+    assert client.post("/api/export/job_b/zip").status_code == 400
+    with client.post("/api/export/job_a/zip") as exported:
+        assert exported.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(exported.data)) as bundle:
+            assert sorted(Path(name).name for name in bundle.namelist() if name.endswith(".webp")) == [
+                "00001.webp", "00002.webp"]
 
 
 def test_existing_databases_get_the_superseded_column(client, tmp_path, monkeypatch):

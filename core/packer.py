@@ -1,6 +1,7 @@
 """
 CBZ / 漫画打包模块
 """
+import hashlib
 import zipfile
 import threading
 from abc import ABC, abstractmethod
@@ -70,7 +71,8 @@ class CbzPacker(Packer):
                     log.warning(f"打包跳过空的或过大的图片: {entry} ({size} 字节)")
         return images
 
-    def pack(self, source_dir: Path, output_path: Path, on_progress=None, base=None, *, check_control=None) -> Path:
+    def pack(self, source_dir: Path, output_path: Path, on_progress=None, base=None, *, check_control=None,
+             verified_inputs=None) -> Path:
         """
         将 source_dir 中的所有图片打包为 .cbz 文件。
 
@@ -93,7 +95,9 @@ class CbzPacker(Packer):
             raise FileNotFoundError(f"源目录不存在: {source_dir}")
 
         # 收集图片文件
-        image_files = self.packable_images(source_dir)
+        # The publication worker already checked this inventory for conflicts with
+        # the old archive. A second scan could introduce an unchecked replacement.
+        image_files = self.packable_images(source_dir) if verified_inputs is None else list(verified_inputs)
 
         bases = [] if base is None else (list(base) if isinstance(base, (list, tuple)) else [base])
         keep = []   # [(旧包, 页)]
@@ -160,6 +164,12 @@ class CbzPacker(Packer):
             def complete_archive(path):
                 checkpoint()
                 with _VerifyingArchive(path, checkpoint) as archive:
+                    if verified_inputs is not None:
+                        for source, digest in verified_inputs.items():
+                            if digest is not None:
+                                with archive.open(source.relative_to(source_dir).as_posix()) as member:
+                                    if hashlib.file_digest(member, 'sha256').hexdigest() != digest:
+                                        raise ValueError('散图在打包期间发生变化，保留旧包和原图')
                     return (len(archive.infolist()) == total + 1
                             and archive.namelist().count("ComicInfo.xml") == 1
                             and archive.testzip() is None)

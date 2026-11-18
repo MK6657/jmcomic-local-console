@@ -77,6 +77,38 @@
       });
   }
 
+  function retryMaintenance(button) {
+    button.disabled = true;
+    apiFetch('/api/albums/' + encodeURIComponent(button.getAttribute('data-album-id')) + '/maintenance/retry', { method: 'POST' })
+      .then(function (data) { showToast(data.message, 'info'); refreshJobs(); })
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') return;
+        showToast('重新整理失败: ' + err.message, 'danger');
+        refreshJobs();
+      })
+      .finally(function () { button.disabled = false; });
+  }
+
+  function maintenanceButton(albumId) {
+    return '<button type="button" class="btn btn-sm btn-outline-warning" data-action="retry-maintenance" data-album-id="'
+      + escapeHtmlAttr(albumId) + '"><i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i> 重新整理整册</button>';
+  }
+
+  function renderMaintenanceFailures(failures) {
+    var box = document.getElementById('maintenance-failures');
+    if (!failures.length) { if (box) box.remove(); return; }
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'maintenance-failures';
+      box.className = 'alert alert-warning mb-3';
+      tabsContent.insertBefore(box, tabsContent.firstChild);
+    }
+    box.innerHTML = '<strong>整册整理失败</strong>' + failures.map(function (item) {
+      return '<div class="d-flex flex-wrap align-items-center gap-2 mt-2"><span>车号 '
+        + escapeHtml(item.album_id) + '：' + escapeHtml(item.error) + '</span>' + maintenanceButton(item.album_id) + '</div>';
+    }).join('');
+  }
+
   function deleteJob(jobId) {
     if (!confirmAction('确定删除此记录？不会删除已下载的文件。')) return;
     apiFetch('/api/jobs/' + encodeJobId(jobId), { method: 'DELETE' })
@@ -186,6 +218,7 @@
     resume: function (el) { resumeJob(el.getAttribute('data-job-id')); },
     cancel: function (el) { cancelJob(el.getAttribute('data-job-id')); },
     retry: function (el) { retryJob(el.getAttribute('data-job-id')); },
+    'retry-maintenance': retryMaintenance,
     'delete': function (el) { deleteJob(el.getAttribute('data-job-id')); },
     'open-folder': function (el) { window.openFolder(el.getAttribute('data-job-id')); },
     'export-zip': function (el) { exportZip(el.getAttribute('data-job-id')); },
@@ -345,6 +378,7 @@
       .then(function (data) {
         if (serial !== refreshSerial || group !== activeGroup) return;
         var jobs = data.jobs || [];
+        renderMaintenanceFailures(data.maintenance_failures || []);
         var paged = Number.isInteger(data.page);
         if (paged) groupPages[group] = data.page;
         renderJobs(jobs, paged ? group : null, data.counts);
@@ -509,6 +543,11 @@
 
   function renderCompletedCard(job) {
     var albumPath = encodeURIComponent(job.album_id);
+    var maintenance = job.maintenance || {};
+    var maintenanceLabel = { pending: maintenance.error ? '等待重试整册整理' : '等待整册整理',
+      running: '正在整理整册', completed: '整册整理完成', failed: '整册整理失败' }[maintenance.state];
+    var maintenanceInfo = maintenanceLabel ? '<div class="small text-muted mt-1"><i class="bi bi-folder2-open" aria-hidden="true"></i> '
+      + maintenanceLabel + (maintenance.error ? '：' + escapeHtml(maintenance.error) : '') + '</div>' : '';
     // 本地可读：与其他页面同一规则、同一标记。判断结果回来之前（known=false）两种标记都不显示
     var albumKey = String(job.album_id);
     var known = Object.prototype.hasOwnProperty.call(readableAlbums, albumKey);
@@ -539,8 +578,9 @@
       + '<div class="card-body job-card-row">'
       + '<div class="job-card-info"><h6 class="mb-1">' + escapeHtml(job.title) + '</h6>'
       + '<div class="job-card-status">' + cbzBadge + '<span class="badge bg-success">已完成</span>' + marker + updateChip + '</div>'
-      + '<small class="text-muted"><i class="bi bi-folder"></i> ' + escapeHtml(job._path) + '</small></div>'
+      + '<small class="text-muted"><i class="bi bi-folder"></i> ' + escapeHtml(job._path) + '</small>' + maintenanceInfo + '</div>'
       + '<div class="job-card-actions">'
+      + (maintenance.state === 'failed' ? maintenanceButton(job.album_id) : '')
       + readBtn
       + (readable && job._path ? '<a class="btn btn-sm btn-outline-info" href="/preview/' + albumPath + '" title="单页翻页预览本地文件"><i class="bi bi-images" aria-hidden="true"></i> 预览</a>' : '')
       + (job._path ? jobButton('open-folder', job, 'btn-outline-secondary', '打开文件夹', '<i class="bi bi-folder2-open"></i>', true) : '')

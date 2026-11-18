@@ -322,8 +322,6 @@ def test_an_archive_only_folder_is_not_an_empty_shell(downloads):
     assert has_local_pages(loose(downloads / "L"))
     assert not has_local_pages(junk_archive(downloads / "X").parent)
     assert not has_local_pages(comic(downloads / "E", {}).parent)
-    source = (ROOT / "core" / "jm_service.py").read_text(encoding="utf-8")
-    assert "recreated = not has_local_pages(album_dir)" in source
 
 
 def test_auto_pack_then_deleting_the_originals_keeps_the_same_pages(client, downloads):
@@ -736,7 +734,7 @@ class _Client:
 def download(client, downloads, monkeypatch):
     """The real download_album_job with auto-pack + delete originals; only fetching a chapter is replaced
     (it writes `written` pages of it, or all of them, then the job ends as `outcome` says)."""
-    from core import database as db, jm_service
+    from core import album_maintenance, database as db, jm_service
     from core.progress import progress_manager
     from core.settings import update_settings
     monkeypatch.setattr(jm_service, "DOWNLOAD_ROOT", downloads)
@@ -745,15 +743,19 @@ def download(client, downloads, monkeypatch):
     album = _Album([_Photo("71", "第1话", 3), _Photo("72", "第2话", 2)])
     monkeypatch.setattr(jm_service, "get_client", lambda shared=True: (_Client(album), None))
 
-    def run(job_id, photo_ids, outcome="completed", written=None):
+    def run(job_id, photo_ids, outcome="completed", written=None, *, before_maintenance=None):
         def chapter(job_id, album_id, album, album_dir, photo, total_pages, done_pages, pending_images,
-                    failed_pages, *rest, stop_event=None):
+                    failed_pages, tracker, checkpoint, *rest, stop_event=None):
             folder = jm_service._chapter_output_dir(album_dir, photo)
             for n in range(1, (written or len(photo)) + 1):
                 (folder / f"{n:05d}.webp").write_bytes(f"{photo.photo_id}-{n}".encode())
+                checkpoint.confirm(folder / f"{n:05d}.webp")
                 done_pages[0] += 1
             if outcome == "failed":
                 failed_pages.append("下载失败")
+            if outcome == 'canceled':
+                from core.task_commands import cancel_download
+                assert cancel_download(job_id)[0]
         monkeypatch.setattr(jm_service, "_download_chapter", chapter)
         db.insert_job(job_id, "3001", "Name", photo_ids)
         db.transition_job_status(
@@ -764,20 +766,42 @@ def download(client, downloads, monkeypatch):
             jm_service.download_album_job(job_id, "3001", photo_ids)
         finally:
             progress_manager.remove_tracker(job_id)
+        if db.get_job(job_id)['status'] == 'completed':
+            work = album_maintenance.claim()
+            assert work and work['album_id'] == '3001'
+            if before_maintenance:
+                before_maintenance(Path(db.get_job(job_id)['output_path']))
+            album_maintenance.run(work, threading.Event())
         return db.get_job(job_id)
     return run
 
 
 def _archived(downloads):
-    from core import archive_pages
+    from core import archive_pages, database as db
     archive_pages.clear_cache()
-    index = archive_pages.read_index(downloads / "Name_3001" / "Name_3001.cbz")
+    folder = Path(db.get_completed_job_by_album_id('3001')['output_path'])
+    index = archive_pages.read_index(folder / (folder.name + '.cbz'))
     return {p.name.split("__")[1]: archive_pages.read_page(index, p).decode() for p in index.pages}
+
+
+def _legacy_pack(folder, chapter, pages, fmt='cbz', stop=None):
+    from core.download_finalize import finalize_files
+    from core.transfer import DownloadInterrupted
+    def check():
+        if stop is not None and stop.is_set():
+            raise DownloadInterrupted('stopped')
+    directory = folder / f'第{1 if chapter == "71" else 2}话__{chapter}'
+    directory.mkdir(exist_ok=True)
+    for number in range(1, pages + 1):
+        (directory / f'{number:05d}.webp').write_bytes(f'{chapter}-{number}'.encode())
+    return finalize_files(str(folder), 'none', None, [], keep_location=True, check_control=check,
+                          settings=dict(auto_pack='true', delete_originals='true', pack_format=fmt),
+                          path_changed=lambda path: None, archiving=lambda: None)
 
 
 @pytest.mark.parametrize("stop_after", [1, 3], ids=["loose-member", "copied-member"])
 def test_pack_control_stop_waits_for_member_then_requeues(downloads, download, monkeypatch, stop_after):
-    from core import database as db, jm_service, job_manager as jobs
+    from core import album_maintenance, database as db, job_manager as jobs
     from core.packer import CbzPacker
     from core.storage import STAGING_DIRECTORY
     assert download("old", ["71"])["status"] == "completed"
@@ -787,13 +811,7 @@ def test_pack_control_stop_waits_for_member_then_requeues(downloads, download, m
     manager = jobs.JobManager()
     monkeypatch.setattr(jobs, "job_manager", manager)
     reached, release = threading.Event(), threading.Event()
-    written, queries_after_stop = [], []
-    lookup = jm_service._download_canceled
-
-    def watch_lookup(job_id):
-        if release.is_set():
-            queries_after_stop.append(job_id)
-        return lookup(job_id)
+    written = []
 
     def after_member(current, total):
         written.append(current)
@@ -801,21 +819,22 @@ def test_pack_control_stop_waits_for_member_then_requeues(downloads, download, m
             reached.set()
             assert release.wait(10)
 
-    monkeypatch.setattr(jm_service, "_download_canceled", watch_lookup)
     monkeypatch.setattr(CbzPacker, "pack", partialmethod(CbzPacker.pack, on_progress=after_member))
-    db.insert_job("packing", "3001", "Name", ["72"])
-    manager.schedule_next()
+    loose(folder, ['第2话__72/00001.webp', '第2话__72/00002.webp'])
+    with db.transaction() as conn:
+        conn.execute("UPDATE album_maintenance SET state='pending',generation=generation+1")
+    manager.start()
     try:
         assert reached.wait(5)
         assert manager.stop(timeout=0) is False
-        assert manager.get_running_count() == 1 and db.get_job("packing")["status"] == "running"
+        assert manager.get_running_count() == 0 and album_maintenance.statuses(['3001'])['3001']['state'] == 'running'
     finally:
         release.set()
         assert manager.stop(timeout=5)
     assert hashlib.sha256(archive.read_bytes()).digest() == old_hash
     assert written == list(range(1, stop_after + 1))
-    assert queries_after_stop == []
-    assert db.get_job("packing")["status"] == "queued"
+    assert album_maintenance.statuses(['3001'])['3001']['state'] == 'pending'
+    assert db.get_job('old')['status'] == 'completed'
     assert [row["job_id"] for row in db.resource_records(["3001"])] == ["old"]
     assert len(list(folder.rglob("*.webp"))) == 2 and not (folder / STAGING_DIRECTORY).exists()
 
@@ -848,7 +867,8 @@ def test_pack_control_between_crc_members(tmp_path, monkeypatch):
 @pytest.mark.parametrize("fmt", ["cbz", "zip"])
 def test_pack_control_cancel_inside_the_final_publish_lock(downloads, download, monkeypatch, fmt):
     from core import packer, storage
-    from core.task_commands import cancel_download
+    from core.transfer import DownloadInterrupted
+    stop = threading.Event()
     _pack_format(fmt)
     assert download("old", ["71"])["status"] == "completed"
     folder = downloads / "Name_3001"
@@ -859,17 +879,19 @@ def test_pack_control_cancel_inside_the_final_publish_lock(downloads, download, 
     def cancel_after_checks(path):
         check_target(path)
         if path == archive and packer._publish_lock.locked():
-            assert cancel_download("packing")[0]
+            stop.set()
 
     monkeypatch.setattr(storage, "_check_target", cancel_after_checks)
-    assert download("packing", ["72"])["status"] == "canceled"
+    with pytest.raises(DownloadInterrupted):
+        _legacy_pack(folder, '72', 2, fmt, stop)
     assert hashlib.sha256(archive.read_bytes()).digest() == old_hash
     assert len(list(folder.rglob("*.webp"))) == 2 and not (folder / storage.STAGING_DIRECTORY).exists()
 
 
 def test_pack_control_cancel_after_first_original_keeps_the_rest(downloads, download, monkeypatch):
     from core import database as db
-    from core.task_commands import cancel_download
+    from core.transfer import DownloadInterrupted
+    stop = threading.Event()
     assert download("old", ["72"])["status"] == "completed"
     folder = downloads / "Name_3001"
     chapter = folder / "第1话__71"
@@ -881,10 +903,11 @@ def test_pack_control_cancel_after_first_original_keeps_the_rest(downloads, down
         if path.parent == chapter and path.suffix == ".webp":
             removed.append(path)
             if len(removed) == 1:
-                assert cancel_download("packing")[0]
+                stop.set()
 
     monkeypatch.setattr(Path, "unlink", cancel_after_unlink)
-    assert download("packing", ["71"])["status"] == "canceled"
+    with pytest.raises(DownloadInterrupted):
+        _legacy_pack(folder, '71', 3, stop=stop)
     assert len(removed) == 1
     expected = {chapter / f"{number:05d}.webp": f"71-{number}".encode() for number in (1, 2, 3)}
     assert {path: path.read_bytes() for path in chapter.glob("*.webp")} == {
@@ -901,9 +924,7 @@ def test_pack_control_cancel_after_first_original_keeps_the_rest(downloads, down
                          ids=["add-chapter", "redownload-all", "renamed-redownload"])
 def test_author_directory_keeps_successful_resource_on_cancel(client, downloads, download, monkeypatch, selection, title):
     from core import database as db
-    from core.packer import CbzPacker
     from core.settings import update_settings
-    from core.task_commands import cancel_download
     old = download("old", ["71"])
     folder = Path(old["output_path"])
     assert folder == downloads / "Name_3001" and old["status"] == "completed"
@@ -911,16 +932,8 @@ def test_author_directory_keeps_successful_resource_on_cancel(client, downloads,
     db.delete_job("old")
     update_settings({"organize_mode": "by_author"})
     monkeypatch.setattr(_Album, "name", title)
-    at_cancel = []
-
-    def after_member(current, total):
-        if current == 1:
-            at_cancel.append(Path(db.get_job("retry")["output_path"]))
-            assert cancel_download("retry")[0]
-
-    monkeypatch.setattr(CbzPacker, "pack", partialmethod(CbzPacker.pack, on_progress=after_member))
-    assert download("retry", selection)["status"] == "canceled"
-    assert at_cancel == [folder] and list(downloads.iterdir()) == [folder]
+    assert download('retry', selection, outcome='canceled', written=1)['status'] == 'canceled'
+    assert not (downloads / 'someone').exists()
     assert [client.get(url).data for url in urls] == [b"71-1", b"71-2", b"71-3"]
     assert db.get_completed_job_by_album_id("3001")["output_path"] == str(folder)
 
@@ -953,7 +966,7 @@ def test_a_failed_redownload_never_hides_the_archive(client, downloads, download
     assert download("jb", ["71"], outcome="failed", written=1)["status"] == "failed"
     assert db.get_job("ja")["superseded_at"] is None   # the archive still holds the whole earlier download
     data = client.get("/api/preview/3001").get_json()
-    assert (data["source"], data["total_pages"]) == ("mixed", 3)  # page 1 loose, pages 2-3 from the archive
+    assert (data["source"], data["total_pages"]) == ("archive", 3)
     response = client.post("/api/export/ja/zip")
     with zipfile.ZipFile(io.BytesIO(response.data)) as zf:
         assert len([n for n in zf.namelist() if n.endswith(".webp")]) == 3
@@ -1227,7 +1240,7 @@ def test_auto_pack_never_overwrites_an_archive_it_cannot_fully_read(client, down
     write_zip(target, pages, zipfile.ZIP_STORED)
     damage_page(target, pages[sorted(pages)[0]])       # page 1 damaged, pages 2-3 intact
     before = target.read_bytes()
-    assert download("jb", ["72"])["status"] == "completed"
+    _legacy_pack(target.parent, '72', 2)
     assert target.read_bytes() == before                 # not replaced: pages 2-3 exist only in there
     assert sorted(p.name for p in (downloads / "Name_3001").rglob("*.webp")) == ["00001.webp", "00002.webp"]
 
@@ -1241,8 +1254,9 @@ def test_auto_pack_never_drops_archive_entries_it_had_to_skip(client, downloads,
     archive_pages.clear_cache()
     assert archive_pages.read_index(target).skipped == 1
     before = target.read_bytes()
-    assert download("jb", ["72"])["status"] == "completed"
+    _legacy_pack(target.parent, '72', 2)
     assert target.read_bytes() == before
+    assert len(list(target.parent.rglob('*.webp'))) == 2
 
 
 def test_a_passing_read_error_never_supersedes_the_earlier_download(client, downloads, download, monkeypatch):
@@ -1562,7 +1576,7 @@ def test_an_archive_that_cannot_be_merged_blocks_packing(client, downloads, down
     with monkeypatch.context() as patch:
         if trouble == "busy":
             _lock(patch, ".cbz")
-        assert download("jb", ["72"])["status"] == "completed"
+        _legacy_pack(old.parent, '72', 2, 'zip')
     # ... but a new zip would hide it: no pack, originals kept, the cbz untouched
     assert not (downloads / "Name_3001" / "Name_3001.zip").exists()
     assert old.read_bytes() == before
@@ -1571,10 +1585,9 @@ def test_an_archive_that_cannot_be_merged_blocks_packing(client, downloads, down
 
 def test_empty_leftover_files_are_neither_packed_nor_blocking(client, downloads, download):
     from core import archive_pages
-    chapter = downloads / "Name_3001" / "第1话__71"
-    chapter.mkdir(parents=True)
-    (chapter / "00002.q7w3e9rt.webp").write_bytes(b"")                   # left by a download that was killed
-    assert download("ja", ["71"])["status"] == "completed"
+    def killed_write(public):
+        (public / '第1话__71/00002.q7w3e9rt.webp').write_bytes(b'')
+    assert download('ja', ['71'], before_maintenance=killed_write)['status'] == 'completed'
     archive_pages.clear_cache()
     index = archive_pages.read_index(downloads / "Name_3001" / "Name_3001.cbz")
     assert index.skipped == 0 and len(index.pages) == 3
@@ -1684,12 +1697,13 @@ def test_repack_details(client, downloads):
     assert response.status_code == 409 and response.headers["Cache-Control"] == "no-store"
 
 
-def test_a_failed_redownload_is_seen_at_once(client, downloads, download):
+def test_a_failed_redownload_keeps_the_public_archive(client, downloads, download):
     from core.local_availability import local_state
     assert download("ja", ["71"])["status"] == "completed"
     assert local_state("3001").state == "archive"
     assert download("jb", ["71"], outcome="failed", written=1)["status"] == "failed"
-    assert local_state("3001").state == "loose"     # forgotten at the end of the job, not after the TTL
+    assert local_state('3001').state == 'archive'
+    assert not list((downloads / 'Name_3001').rglob('*.webp'))
 
 
 # Node: the real reading-nav.js + reader.js / preview.js (fake DOM), adapted from the round-3 reviewer's harness
@@ -1878,7 +1892,7 @@ def test_a_zero_byte_entry_in_an_old_archive_does_not_block_packing(client, down
         zf.writestr("第1话__71/00002.q7w3e9rt.webp", b"")
     archive_pages.clear_cache()
     assert archive_pages.read_index(cbz).skipped == 0
-    assert download("jb", ["72"])["status"] == "completed"
+    _legacy_pack(cbz.parent, '72', 2)
     assert len(_archived(downloads)) == 5 and not list((downloads / "Name_3001").rglob("*.webp"))
 
 
@@ -1888,7 +1902,8 @@ def test_packing_merges_every_archive_newest_first(client, downloads, download):
     os.utime(old, ns=(10**18, 10**18))                      # cbz: chapter 71 only (made before a format switch)
     new = comic(folder, {"第2话__72/00001.webp": b"x", "第1话__71/00001.webp": b"71-newer"}, suffix=".zip")
     os.utime(new, ns=(2 * 10**18, 2 * 10**18))              # zip: newer, never merged with the cbz
-    assert download("ja", ["72"])["status"] == "completed"  # packs as cbz (overwrites the old cbz)
+    _job('ja', '3001', folder)
+    _legacy_pack(folder, '72', 2)
     assert _archived(downloads) == {"71/00001.webp": "71-newer", "71/00002.webp": "71-2", "71/00003.webp": "71-3",
                                     "72/00001.webp": "72-1", "72/00002.webp": "72-2"}
 

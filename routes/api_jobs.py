@@ -18,7 +18,7 @@ from core.progress import progress_manager, StreamCapacityError
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.validation import validate_numeric, validate_job_id, require_job_id
 from core.packer import CbzPacker
-from core import archive_pages
+from core import album_maintenance, archive_pages
 from core import desktop_platform
 # ── 模块级压缩包检查缓存（避免 N+1 文件系统扫描）：值是压缩包格式 'cbz' / 'zip'，没有为 None ──
 _cbz_cache: dict[str, tuple[str | None, float]] = {}
@@ -145,7 +145,9 @@ def list_jobs():
     except ValueError as error:
         return jsonify(status="error", message=str(error)), 400
     jobs = result["jobs"]
+    maintenance = album_maintenance.statuses(job['album_id'] for job in jobs)
     for job in jobs:
+        job['maintenance'] = maintenance.get(job['album_id'])
         if isinstance(job.get("selected_photo_ids"), str):
             try:
                 job["selected_photo_ids"] = json.loads(job["selected_photo_ids"])
@@ -159,7 +161,7 @@ def list_jobs():
         fmt = cbz_map.get(op) if op else None
         job["has_cbz"] = bool(fmt)
         job["archive_format"] = fmt if fmt in ("cbz", "zip") else ("cbz" if fmt else None)
-    return jsonify({"status": "ok", **result})
+    return jsonify({"status": "ok", **result, 'maintenance_failures': album_maintenance.failed_without_history()})
 
 
 @api_jobs_bp.get("/api/jobs/<job_id>")
@@ -180,7 +182,26 @@ def get_single_job(job_id: str):
     fmt = _check_cbz_path(job.get("output_path") or "")
     job["has_cbz"] = bool(fmt)
     job["archive_format"] = fmt if fmt in ("cbz", "zip") else ("cbz" if fmt else None)
+    job['maintenance'] = album_maintenance.statuses([job['album_id']]).get(job['album_id'])
     return jsonify({"status": "ok", "job": job})
+
+
+@api_jobs_bp.get('/api/albums/<album_id>/maintenance')
+def maintenance_status(album_id):
+    if not validate_numeric(album_id):
+        return jsonify(status='error', message='album_id 必须是纯数字'), 400
+    return jsonify(status='ok', maintenance=album_maintenance.statuses([album_id]).get(album_id))
+
+
+@api_jobs_bp.post('/api/albums/<album_id>/maintenance/retry')
+def retry_maintenance(album_id):
+    if not validate_numeric(album_id):
+        return jsonify(status='error', message='album_id 必须是纯数字'), 400
+    try:
+        job_manager.retry_maintenance(album_id)
+    except TaskCommandError as error:
+        return jsonify(status='error', message=str(error), reason=error.reason), error.http_status
+    return jsonify(status='ok', message='已重新排队整理整册'), 202
 
 
 @api_jobs_bp.get("/api/jobs/<job_id>/events")
