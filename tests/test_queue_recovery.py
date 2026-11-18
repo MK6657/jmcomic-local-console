@@ -810,5 +810,3 @@ def test_publication_restart_at_filesystem_database_boundary(real_download_pipel
     assert len(list(publication.job_snapshot(job, root).rglob('*.webp'))) == 3
     assert len(db.resource_records(['100'])) == 1
     assert [state.counts[f'/images/100/{p:05d}.webp'] for p in (1, 2, 3)] == [1, 1, 1]
-
-
