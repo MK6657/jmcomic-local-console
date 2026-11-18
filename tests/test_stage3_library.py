@@ -144,7 +144,7 @@ def test_cached_truncated_only_page_is_missing_everywhere(client, monkeypatch, t
 def test_downloads_page_does_not_query_job_history(client, monkeypatch):
     from routes import page_routes
     query = Mock(side_effect=AssertionError("unneeded download history query"))
-    monkeypatch.setattr(page_routes, "get_all_jobs", query)
+    monkeypatch.setattr(page_routes, "get_db", query)
     assert client.get("/downloads").status_code == 200
     query.assert_not_called()
 

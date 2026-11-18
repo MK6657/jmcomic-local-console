@@ -54,7 +54,7 @@ def save_settings():
         update_settings(body)
     except ValueError as exc:
         return jsonify(status="error", message=str(exc)), 400
-    ui_only = set(body).issubset({"ui_theme", "library_card_click"})
+    ui_only = set(body).issubset({"ui_theme", "library_card_click", "home_show_recent_downloads"})
     warnings = [] if ui_only else _apply_saved_settings()
     updated = get_settings()
     log.info(f"API保存设置 keys_updated={list(body.keys())}")

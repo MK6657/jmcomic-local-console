@@ -2,7 +2,7 @@
 搜索 API & 搜索历史
 """
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from core.database import add_search_history, get_search_history, delete_search_history, clear_search_history
 from core.jm_service import MAX_SEARCH_PAGE, search_albums
@@ -60,9 +60,14 @@ def search():
 @api_search_bp.get("/search-history")
 def search_history():
     """返回最近的搜索记录(已去重)"""
+    session = current_app.config["SEARCH_HISTORY_SESSION"]
+    supplied_session = request.headers.get("X-JM-History-Session", session)
+    headers = {"Cache-Control": "no-store", "X-JM-History-Session": session}
+    if request.method == "HEAD":
+        return "", 200, headers
     try:
-        items = get_search_history(limit=20)
-        return jsonify({"status": "ok", "items": items})
+        items = get_search_history(limit=20) if supplied_session == session else []
+        return jsonify(status="ok", items=items, session=session), 200, headers
     except Exception as e:
         log.error(f"获取搜索历史失败 error={e}")
         return jsonify({"status": "error", "message": "获取搜索历史失败"}), 500

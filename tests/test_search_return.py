@@ -317,7 +317,7 @@ def test_a_snapshot_is_redrawn_at_the_return_place_without_searching(harness):
     assert r["searches"] == [] and r["drawn"] is True   # the snapshot's results, upstream not asked again
     assert r["scrolls"] == [[2600, 300]]                # where 返回 left off, not the snapshot's own 900 / 250
     assert r["takes"] == 1
-    assert r["history"] is True                         # the search history is a separate request
+    assert r["history"] is False                        # search restoration never loads hidden history
 
 
 def test_without_a_snapshot_the_search_runs_again_then_lands_in_place(harness):

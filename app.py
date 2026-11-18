@@ -1,6 +1,7 @@
 """Flask 应用入口 - 含 PID 单实例锁 + 防僵尸端口"""
 import json
 import os
+import secrets
 import socket
 import sys
 import time
@@ -169,6 +170,8 @@ def create_app() -> Flask:
 
     # 全局限制请求体大小，防止 DoS（最大 10MB）
     app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+    # Public UI generation, independent of the launcher shutdown token.
+    app.config["SEARCH_HISTORY_SESSION"] = secrets.token_hex(16)
     # 静态资源强缓存 1 年；配合 asset_url() 的 ?v=mtime 版本参数，
     # 文件更新后 URL 变化 → 浏览器立即拉新，未更新则命中缓存（不再每次页面加载全量重下）
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000
@@ -306,8 +309,12 @@ def create_app() -> Flask:
         if app.config.get('ATELIER_DEMO'):
             response.headers['Content-Security-Policy'] += "; img-src 'self' blob: data:; connect-src 'self'"
         if response.mimetype == 'text/html':
+            from flask import request
             response.vary.add('Cookie')
-            response.headers['Cache-Control'] = 'no-cache'
+            if request.endpoint in ('page.index', 'page.search'):
+                response.headers['Cache-Control'] = 'no-store'
+            else:
+                response.headers.setdefault('Cache-Control', 'no-cache')
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
@@ -321,7 +328,8 @@ def create_app() -> Flask:
             status = response.status_code
             path = request.path
             if (200 <= status < 300 or status == 304) and (
-                    path.startswith("/static/") or path in _quiet_paths):
+                    path.startswith("/static/") or path in _quiet_paths
+                    or (request.method == "HEAD" and path == "/api/search-history")):
                 return response
             duration_ms = round((_time.time() - request._request_start_time) * 1000) if hasattr(request, '_request_start_time') else -1
             # response.status 带原因短语（"404 NOT FOUND"），使去重模板能区分不同结果

@@ -162,7 +162,8 @@ def test_templates_have_no_inline_event_handlers(template):
 @pytest.mark.parametrize("path", ["/album/123", "/search", "/downloads", "/"])
 def test_rendered_pages_have_no_inline_event_handlers(client, downloads, path):
     _album(downloads / "H")
-    _job("job_0123456789ab", "321", "completed", downloads / "H")  # home page lists it under 最近下载
+    _job("job_0123456789ab", "321", "completed", downloads / "H")
+    assert client.post("/api/settings", json={"home_show_recent_downloads": True}).status_code == 200
     html = client.get(path).get_data(as_text=True)
     assert not re.search(r"\son[a-z]+\s*=", html, re.IGNORECASE)
 
@@ -171,6 +172,7 @@ def test_home_open_folder_is_a_delegated_button(client, downloads):
     # tojson inside onclick="..." broke the attribute at the JSON string's own quotes: the button did nothing
     _album(downloads / "H")
     _job("job_0123456789ab", "321", "completed", downloads / "H")
+    assert client.post("/api/settings", json={"home_show_recent_downloads": True}).status_code == 200
     html = client.get("/").get_data(as_text=True)
     button = re.search(r'<button[^>]*data-action="open-folder"[^>]*>', html)
     assert button, "open-folder must be a real <button data-action>"

@@ -1,0 +1,12 @@
+<div class="col-12" data-setting-key="home_show_recent_downloads">
+    <div class="form-check form-switch">
+        <input type="checkbox" id="home_show_recent_downloads" name="home_show_recent_downloads"
+               class="form-check-input" role="switch" value="true"
+               aria-describedby="home_show_recent_downloads_help"
+               {% if settings.home_show_recent_downloads == 'true' %}checked{% endif %}>
+        <label class="form-check-label" for="home_show_recent_downloads">在首页显示最近下载</label>
+    </div>
+    <div class="form-text" id="home_show_recent_downloads_help">
+        默认关闭。保存后刷新首页生效，完整记录可在传输中心查看。
+    </div>
+</div>

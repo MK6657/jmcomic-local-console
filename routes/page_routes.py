@@ -1,10 +1,12 @@
 """
 页面路由 —— 返回 Jinja2 模板，传入必要数据
 """
-from flask import Blueprint, request, abort, redirect
+from contextlib import closing
+
+from flask import Blueprint, request, abort, redirect, current_app
 from core.interface import render_page as render_template
 from core import local_availability
-from core.database import get_all_jobs, get_job
+from core.database import get_db, get_job
 from core.logger import log
 from core.settings import get_settings
 from core.validation import validate_numeric, validate_job_id
@@ -26,9 +28,13 @@ def select_edition(edition):
 def index():
     """首页：搜索框 + 当前任务 + 最近下载"""
     log.info("页面访问 首页")
-    all_jobs = get_all_jobs()
-    running_jobs = [j for j in all_jobs if j.get("status") == "running"][:5]
-    recent_jobs = [j for j in all_jobs if j.get("status") in ("completed", "failed")][:10]
+    show_recent = get_settings().get("home_show_recent_downloads") == "true"
+    with closing(get_db()) as conn:
+        running_jobs = [dict(row) for row in conn.execute(
+            "SELECT * FROM jobs WHERE status = 'running' ORDER BY created_at DESC, id DESC LIMIT 5")]
+        recent_jobs = conn.execute(
+            "SELECT * FROM jobs WHERE status IN ('completed', 'failed') ORDER BY created_at DESC, id DESC LIMIT 10"
+        ).fetchall() if show_recent else []
 
     # 给 running_jobs 计算百分比
     for job in running_jobs:
@@ -37,15 +43,12 @@ def index():
         job["percentage"] = round(done / total * 100, 1)
         job["current_page"] = done
 
-    # 给 recent_jobs 格式化路径
-    for job in recent_jobs:
-        job["path"] = job.get("output_path") or ""
-
     return render_template(
         "index.html",
         title="禁漫下载搜索",
         running_jobs=running_jobs,
         recent_jobs=recent_jobs,
+        show_recent_downloads=show_recent,
     )
 
 
@@ -57,7 +60,8 @@ def search():
     page_size = request.args.get("page_size", 20, type=int)
     log.info(f"页面访问 搜索页 keyword={keyword}")
     return render_template("search.html", title="搜索漫画",
-                           keyword=keyword, sort=sort, page_size=page_size)
+                           keyword=keyword, sort=sort, page_size=page_size,
+                           search_history_session=current_app.config["SEARCH_HISTORY_SESSION"])
 
 
 @page_bp.get("/album/<album_id>")

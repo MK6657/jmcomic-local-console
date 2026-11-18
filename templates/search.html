@@ -43,15 +43,7 @@
         <div class="form-text mt-2">标签检索：<code>全彩 短篇</code> 任一匹配 · <code>+全彩 +短篇</code> 同时匹配 · <code>全彩 -短篇</code> 排除短篇</div>
 </div>
 
-<!-- ===== 搜索历史 ===== -->
-<div id="search-history-container" class="mb-4 d-none">
-    <div class="shelf-history">
-            <h6 class="card-subtitle mb-2 text-muted">
-                <i class="bi bi-clock-history"></i> 搜索历史
-            </h6>
-            <div id="search-history-tags" class="d-flex flex-wrap gap-2"></div>
-    </div>
-</div>
+{% include 'partials/search-history.html' %}
 
 <!-- ===== 搜索状态 ===== -->
 <div class="shelf-subhead"><div><p class="shelf-kicker">SEARCH INDEX</p><h2>检索结果</h2></div>
@@ -77,4 +69,5 @@
 <script src="{{ asset_url('js/utils.js') }}"></script>
 <script src="{{ asset_url('js/home.js') }}"></script>
 <script src="{{ asset_url('js/search.js') }}"></script>
+<script src="{{ asset_url('shared/search-history.js') }}"></script>
 {% endblock %}

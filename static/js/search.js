@@ -589,88 +589,6 @@
     if (currentQuery) fetchResults(1);
   });
 
-  // ── 搜索历史 ──
-  // 关键词只放在 data-* 属性里（escapeHtmlAttr 对属性值是安全的）；拼进内联 JS 字符串则会被
-  // encodeURIComponent 不编码的 ' ( ) 打断，形成可存储的脚本注入。
-
-  var historyContainer = document.getElementById('search-history-container');
-  var historyTags = document.getElementById('search-history-tags');
-
-  function loadSearchHistory() {
-    if (!historyContainer || !historyTags) return;
-
-    window.apiFetch('/api/search-history', { timeoutMs: 15000 })
-      .then(function (data) {
-        if (data.status !== 'ok' || !data.items || data.items.length === 0) {
-          historyContainer.classList.add('d-none');
-          return;
-        }
-        // 渲染去重后的标签 + 删除按钮
-        var html = '';
-        data.items.forEach(function (item) {
-          var kwAttr = escapeHtmlAttr(item.keyword);
-          html += '<span class="search-history-tag badge bg-light text-dark border px-3 py-2">'
-            + '<button type="button" class="search-history-text" data-history-search="' + kwAttr + '">' + escapeHtml(item.keyword) + '</button>'
-            + '<button type="button" class="search-history-del" data-history-delete="' + kwAttr + '" title="删除" aria-label="删除搜索历史 ' + kwAttr + '"><i class="bi bi-x-circle-fill" aria-hidden="true"></i></button>'
-            + '</span>';
-        });
-        // 清空按钮
-        html += '<button type="button" class="btn btn-outline-danger btn-sm" data-history-clear title="清空全部" aria-label="清空全部搜索历史"><i class="bi bi-trash" aria-hidden="true"></i></button>';
-        historyTags.innerHTML = html;
-        historyContainer.classList.remove('d-none');
-      })
-      .catch(function (err) {
-        if (err && err.name === 'AbortError') return; // pagehide 中止，静默（保留现有 UI）
-        historyContainer.classList.add('d-none');
-      });
-  }
-
-  if (historyTags) historyTags.addEventListener('click', function (event) {
-    var el = event.target.closest('[data-history-search], [data-history-delete], [data-history-clear]');
-    if (!el) return;
-    if (el.hasAttribute('data-history-search')) {
-      // 点击历史关键词重新搜索
-      searchInput.value = el.getAttribute('data-history-search');
-      doSearch();
-    } else if (el.hasAttribute('data-history-delete')) {
-      deleteSearchHistory(el.getAttribute('data-history-delete'));
-    } else {
-      clearSearchHistory();
-    }
-  });
-
-  // ── 删除单条搜索历史 ──
-  function deleteSearchHistory(keyword) {
-    if (!confirm('确定删除 "' + keyword + '" 的搜索历史？')) return;
-    window.apiFetch('/api/search-history/' + encodeURIComponent(keyword), { method: 'DELETE', timeoutMs: 15000 })
-      .then(function (data) {
-        if (data.status === 'ok') {
-          if (typeof showToast === 'function') showToast('已删除', 'info');
-          loadSearchHistory();
-        }
-      })
-      .catch(function (err) {
-        if (err && err.name === 'AbortError') return; // pagehide 中止，静默
-        console.warn('操作搜索历史失败');
-      });
-  }
-
-  // ── 清空全部搜索历史 ──
-  function clearSearchHistory() {
-    if (!confirm('确定清空全部搜索历史？')) return;
-    window.apiFetch('/api/search-history/clear', { method: 'POST', timeoutMs: 15000 })
-      .then(function (data) {
-        if (data.status === 'ok') {
-          if (typeof showToast === 'function') showToast('已清空', 'info');
-          loadSearchHistory();
-        }
-      })
-      .catch(function (err) {
-        if (err && err.name === 'AbortError') return; // pagehide 中止，静默
-        console.warn('操作搜索历史失败');
-      });
-  }
-
   // URL is the source of truth; snapshots preserve results across both reload and bfcache.
   restoreSearchState(false);
   window.addEventListener('pageshow', function (event) {
@@ -686,8 +604,5 @@
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'visible') refreshReadable();
   });
-
-  // ── 页面加载时获取搜索历史 ──
-  loadSearchHistory();
 
 })();

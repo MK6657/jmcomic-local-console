@@ -42,7 +42,7 @@
 
 <div class="row">
     <!-- ===== 当前任务卡片 ===== -->
-    <div class="col-lg-6 mb-4">
+    <div class="{% if show_recent_downloads %}col-lg-6{% else %}col-12{% endif %} mb-4">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <span><i class="bi bi-activity"></i> 当前任务</span>
@@ -82,7 +82,8 @@
     </div>
 
     <!-- ===== 最近下载列表 ===== -->
-    <div class="col-lg-6 mb-4">
+    {% if show_recent_downloads %}
+    <div class="col-lg-6 mb-4" id="home-recent-downloads">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <span><i class="bi bi-clock-history"></i> 最近下载</span>
@@ -130,6 +131,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
 </div>
 
 {% endblock %}
