@@ -41,6 +41,7 @@ class ExportBudget:
         self.deadline = self.clock() + self.limits.seconds
         self.scanned = self.files = self.pages = self.source_bytes = 0
         self.sources = {}
+        self.page_digests = {}  # sealed task pages only; keyed by the actual collected source path
         self.archive_paths = []  # top-level archive candidates from the bounded scan
         self.input_sources = {}  # extracted path -> archive source; JPEG path -> None
         self.staging = {}

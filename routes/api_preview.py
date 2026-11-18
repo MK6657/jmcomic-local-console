@@ -1,5 +1,6 @@
 """图片预览/本地阅读器 API v2.0.0"""
 import re
+import stat
 from pathlib import Path
 from urllib.parse import quote
 
@@ -7,10 +8,10 @@ from flask import Blueprint, Response, jsonify, request, send_file
 
 import core.database as db
 from core import archive_pages, chapter_inventory
+from core.publication_access import published_path
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.database import get_completed_job_by_album_id
 from core.file_tree import safe_files
-from core.storage import is_temporary_path
 from core.local_availability import MAX_IDS, is_page_image, local_states
 from core.logger import log
 # P1-8 补充 album_id 校验；图片类型与 MIME 统一取自 core.validation
@@ -104,7 +105,7 @@ def _find_album_dir(album_id: str) -> tuple[Path | None, str | None]:
     job = get_completed_job_by_album_id(album_id)
     if job and job.get("output_path") and not job.get("superseded_at"):
         p = Path(job["output_path"])
-        if p.is_dir() and is_safe_path(p):
+        if published_path(p, DOWNLOAD_ROOT, directory=True) is not None and p.is_dir():
             return p, job.get("title") or p.name
     return None, None
 
@@ -223,9 +224,8 @@ def preview_album(album_id: str):
 def _packed_away(full_path: Path) -> bool:
     """不在了的散图是否已在它所在漫画目录的压缩包里（按页名 / page_key 找；往上最多看 3 层目录）"""
     try:
-        root = DOWNLOAD_ROOT.resolve()
         for folder in list(full_path.parents)[:3]:
-            if not folder.is_dir() or not is_safe_path(folder) or folder.resolve() == root:
+            if not folder.is_dir() or published_path(folder, DOWNLOAD_ROOT, directory=True) is None:
                 continue
             if not archive_pages.candidates(folder):
                 continue
@@ -247,12 +247,15 @@ def preview_image(img_path: str):
         log.warning(f"图片访问路径越权 img_path={img_path}")
         return jsonify({"status": "error", "message": "没有权限访问该文件"}), 403
 
-    # A guessed URL must not bypass the same staging exclusion used by page scans.
-    if is_temporary_path(full_path):
+    # Observe the file first: a view renamed into an absent legacy URL during marker lookup is not yet readable.
+    try:
+        info = full_path.stat()
+    except OSError:
+        info = None
+    real = published_path(full_path, DOWNLOAD_ROOT)
+    if real is None:
         return jsonify({"status": "error", "message": "文件不存在"}), 404
-
-    # 检查文件是否存在
-    if not full_path.is_file():
+    if info is None or not stat.S_ISREG(info.st_mode) or info.st_size == 0:
         if _packed_away(full_path):
             # 阅读页打开后这一页被自动打包进了压缩包（删了原图）：让阅读页提示刷新，而不是重试不了的“加载失败”
             response = jsonify({"status": "error", "reason": "archive_changed",
@@ -269,7 +272,7 @@ def preview_image(img_path: str):
 
     # max_age=0：预览图内容可能因重试/重新下载而变化（URL 不变），
     # 不能吃 SEND_FILE_MAX_AGE_DEFAULT 的一年强缓存；保留 ETag 走 304 协商缓存
-    return send_file(str(full_path), mimetype=get_image_mime(full_path.suffix), max_age=0)
+    return send_file(str(real), mimetype=get_image_mime(full_path.suffix), max_age=0)
 
 
 @api_preview_bp.get("/api/preview-archive/<album_id>/<int:number>")

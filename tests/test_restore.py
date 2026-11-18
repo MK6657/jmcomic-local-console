@@ -1,5 +1,6 @@
 """Restore only disposable backups into new temporary instances, entirely offline."""
 import hashlib
+import io
 from contextlib import closing, nullcontext
 import json
 from pathlib import Path
@@ -73,6 +74,48 @@ def _rewrite_archive(path, *, manifest_change=None, database_change=None, extra=
 def _assert_not_published(parent, target):
     assert not target.exists()
     assert not list(parent.glob(".jmcomic-restore-*"))
+
+
+def test_full_backup_restores_relative_task_snapshots_and_current_album(client, tmp_path, monkeypatch):
+    from core import database as db, path_guard, publication
+    from core.restore import restore_backup
+    from routes import api_export, api_preview
+    from test_publication_reader_export import prepare_publication, finish_publication
+
+    original = tmp_path / "before" / "downloads"
+    original.mkdir(parents=True)
+    monkeypatch.setattr(path_guard, "DOWNLOAD_ROOT", original)
+    snapshots, images = {}, {}
+    for job_id, green in (("old", 0), ("new", 255)):
+        workspace, album, evidence = prepare_publication(original, job_id, green)
+        finish_publication(job_id, album, evidence)
+        snapshots[job_id] = workspace.snapshot.relative_to(original).as_posix()
+        images[job_id] = (workspace.snapshot / "Chapter__71" / "00001.webp").read_bytes()
+    assert images["old"] != images["new"]
+    archive = _backup((db.DB_PATH, original), tmp_path / "full-publication.zip", included=True)
+    with zipfile.ZipFile(archive) as package:
+        for job_id, relative in snapshots.items():
+            assert package.read(f"downloads/{relative}/Chapter__71/00001.webp") == images[job_id]
+    original.rename(tmp_path / "offline-original-downloads")
+    restored = restore_backup(archive, tmp_path / "recovered")
+    assert restored.resources_included and not restored.warnings
+    monkeypatch.setattr(db, "DB_PATH", restored.database)
+    monkeypatch.setattr(db, "DB_DIR", restored.database.parent)
+    for module in (path_guard, api_export, api_preview):
+        monkeypatch.setattr(module, "DOWNLOAD_ROOT", restored.downloads)
+    with closing(db.get_db()) as conn:
+        assert dict(conn.execute("SELECT job_id,snapshot FROM published_tasks")) == snapshots
+    for job_id, relative in snapshots.items():
+        assert publication.job_snapshot(job_id, restored.downloads) == restored.downloads / relative
+    for route, job_id in (("/api/export/old/zip", "old"), ("/api/library/123/export/zip", "new")):
+        with client.post(route) as response:
+            assert response.status_code == 200
+            with zipfile.ZipFile(io.BytesIO(response.data)) as exported:
+                assert exported.read("Album/Chapter__71/00001.webp") == images[job_id]
+                assert {Path(name).name for name in exported.namelist()} == {".jm-chapter.json", "00001.webp", "00002.webp"}
+    first = client.get("/api/preview/123").json["pages"][0]
+    with client.get(first["url"]) as response:
+        assert response.status_code == 200 and response.data == images["new"]
 
 
 def test_full_restore_maps_paths_and_preserves_non_path_data(source, tmp_path):

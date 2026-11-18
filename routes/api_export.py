@@ -10,23 +10,28 @@ ZIP / PDF 导出 API
 从不写进下载目录。只剩压缩包而它损坏或没有图片时给出明确的错误（422）；一页都没有 → 404。
 ZIP 导出永远不把 .cbz / .zip 压缩包本身再装进去。
 """
+import hashlib
+import io
 import os
 import shutil
 import tempfile
 import threading
 import zipfile
-from contextlib import nullcontext
+from contextlib import closing, contextmanager, nullcontext
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 
 from flask import Blueprint, Response, g, jsonify, send_file
 
 import core.database as db
-from core import archive_pages
+from core import archive_pages, publication
 from core.logger import log
 from core.path_guard import DOWNLOAD_ROOT, is_safe_path
+from core.publication_access import published_path, snapshot_page_digests
 from core.validation import validate_job_id, validate_numeric, is_allowed_image, EXPORT_IMAGE_EXTENSIONS
 from core.file_tree import is_link, _entry_is_link, natural_key
+from core.download_layout import CHAPTER_MARKER
 from core.storage import is_temporary_path
 from core.export_budget import ExportBudget, ExportLimit, ExportTimeout, BudgetedWriter
 
@@ -80,7 +85,7 @@ def _export_capacity(view):
             log.warning(f"导出时压缩包页读取失败 source={source} error={e}")
             return jsonify(status="error", reason="archive_corrupt", message=_PAGE_READ_FAILED), 422
         except ExportSourceUnreadable as e:
-            log.warning(f"导出时无法完整列出下载目录 source={source} error={e.__cause__}")
+            log.warning(f"导出时无法完整读取下载目录 source={source} error={e.__cause__ or e}")
             return (jsonify(status="error", reason="export_source_unreadable",
                             message="部分下载内容无法读取，已取消导出。请检查目录是否存在、是否有读取权限，再重试。"),
                     503, {"Retry-After": _RETRY_AFTER})
@@ -139,8 +144,22 @@ class ExportSourceUnreadable(RuntimeError):
     """A complete page inventory cannot be established; never send a partial attachment."""
 
 
+def _check_complete_source(source, size, budget):
+    if size < budget.sources[source][0]:
+        raise ExportSourceUnreadable("源文件在导出期间变短，已取消导出")
+
+
+@dataclass(frozen=True)
+class _ExportSource:
+    directory: Path
+    album_name: str
+    expected_pages: int | None
+    snapshot_job: str | None
+
+
 def _export_directory(job_id=None, album_id=None):
-    """任务导出认这次下载；专辑导出与阅读器一样认资源目录里最近一次成功记录。"""
+    """Only completed tasks may export snapshots. Album reads always follow the public catalog."""
+    snapshot = None
     if album_id is not None:
         if not validate_numeric(album_id):
             return None, (jsonify(status="error", message="album_id 必须是纯数字"), 400)
@@ -155,20 +174,33 @@ def _export_directory(job_id=None, album_id=None):
             return None, (jsonify(status="error", message="任务不存在"), 404)
         if record["status"] != "completed":
             return None, (jsonify(status="error", message="任务未完成"), 400)
-    if record.get("superseded_at"):
+        try:
+            snapshot = publication.job_snapshot(job_id, DOWNLOAD_ROOT)
+        except (OSError, ValueError) as error:
+            raise ExportSourceUnreadable() from error
+    if snapshot is None and record.get("superseded_at"):
         # 目录被删除后又被后来的下载重新建出（core.local_availability）：里面已不是这次下载的完整内容
         return None, (jsonify({"status": "error", "message": "这次下载的文件已不在（目录已被重新下载），请从最新的下载任务导出"}), 404)
     output_path = record.get("output_path")
-    if not output_path:
+    if snapshot is None and not output_path:
         return None, (jsonify({"status": "error", "message": "任务无输出路径"}), 404)
-    output_dir = Path(output_path)
-    if not is_safe_path(output_dir) or output_dir.resolve() == DOWNLOAD_ROOT.resolve():
+    output_dir = Path(output_path) if snapshot is None else snapshot
+    if snapshot is None:
+        allowed = published_path(output_dir, DOWNLOAD_ROOT, directory=True) is not None
+    else:
+        allowed = is_safe_path(output_dir) and output_dir.resolve() != DOWNLOAD_ROOT.resolve()
+    if not allowed:
         return None, (jsonify({"status": "error", "message": "输出路径越权"}), 403)
     if not output_dir.is_dir():
+        if snapshot is not None:
+            raise ExportSourceUnreadable("任务成品目录已不在原位置")
         return None, (jsonify(status="error", message="下载目录不存在"), 404)
     if is_link(output_dir):
         return None, (jsonify(status="error", message="输出目录不能是链接"), 403)
-    return output_dir, None
+    name = Path(output_path).name if output_path else ""
+    if name in ("", ".."):
+        name = album_id or job_id
+    return _ExportSource(output_dir, name, record.get("total_pages"), job_id if snapshot is not None else None), None
 
 
 # 压缩包打不开 / 没有图片时导出的说明
@@ -265,7 +297,7 @@ def _reader_for(index, entries):
     return nullcontext()
 
 
-def _collect_files(output_dir, budget, images_only=False):
+def _collect_files(output_dir, budget, images_only=False, *, snapshot=False):
     """Bound the scan itself, including trees containing only empty directories.
 
     safe_files sorts a fully materialized tree; even iter_safe_files may traverse
@@ -287,6 +319,9 @@ def _collect_files(output_dir, budget, images_only=False):
                 for entry in listing:
                     budget.visit()
                     if is_temporary_path(entry.name) or _entry_is_link(entry):
+                        continue
+                    if folder == output_dir and (entry.name == '.jm-view.json' or
+                                                 (snapshot and entry.name == '.jm-publication.json')):
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(Path(entry.path))
@@ -333,18 +368,41 @@ def _merge_export_pages(output_dir, files, index, budget):
     return entries
 
 
-def _export_entries(output_dir, budget, *, images_only, library):
+def _export_entries(source, budget, *, images_only, library):
     """One bounded inventory for both entry points. Do not scan again for library availability."""
-    files = _collect_files(output_dir, budget, images_only=images_only)
+    output_dir = source.directory
+    files = _collect_files(output_dir, budget, images_only=images_only, snapshot=source.snapshot_job is not None)
+    if source.snapshot_job is not None:
+        # A seal names loose pages. Archives and unrelated sidecars cannot supply missing content.
+        try:
+            digests = snapshot_page_digests(source.snapshot_job, output_dir, budget)
+        except OSError as error:
+            raise ExportSourceUnreadable() from error
+        markers = {f"{name.rsplit('/', 1)[0]}/{CHAPTER_MARKER}" for name in digests}
+        entries = []
+        for path in files:
+            name = path.relative_to(output_dir).as_posix()
+            if path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS:
+                if name not in digests:
+                    raise ExportSourceUnreadable("任务成品含有清单外的页")
+                budget.page_digests[path] = digests[name]
+            elif name not in markers:
+                continue
+            entries.append((name, path))
+        if (not digests or len(digests) != budget.pages
+                or (source.expected_pages and source.expected_pages != budget.pages)):
+            raise ExportSourceUnreadable("任务成品页数与发布记录不符")
+        return entries, None, None
     has_images = any(path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS for path in files)
     index, err = _archive_for_export(output_dir, has_images, budget)
     if err:
         return None, None, err
+    entries = _merge_export_pages(output_dir, files, index, budget)
     if not index and not has_images:
         return None, None, (jsonify(status="error", message="下载目录中没有图片"), 404)
     if library and index is None and not any(is_allowed_image(path.suffix) for path in files):
         return None, None, (jsonify(status="error", message="资源中没有可离线阅读的图片"), 404)
-    return _merge_export_pages(output_dir, files, index, budget), index, None
+    return entries, index, None
 
 
 def _read_archive_page(read, source, budget):
@@ -356,9 +414,36 @@ def _read_archive_page(read, source, budget):
     return data
 
 
-def _safe_export_name(output_dir: Path) -> str:
+def _safe_export_name(name: str) -> str:
     """生成下载文件名（去除路径分隔符和空格）"""
-    return output_dir.name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    return name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+
+
+def _zip_file_chunks(source, budget):
+    expected = budget.page_digests.get(source)
+    digest = hashlib.sha256() if expected is not None else None
+    total = 0
+    try:
+        if is_link(source) or not is_safe_path(source):
+            raise ValueError("源文件路径在导出时发生变化")
+        with source.open("rb") as handle:
+            while True:
+                budget.check()
+                chunk = handle.read(_COPY_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                budget.observe_source(source, total)
+                if digest is not None:
+                    digest.update(chunk)
+                yield chunk
+    except (OSError, ValueError) as error:
+        if expected is not None:
+            raise ExportSourceUnreadable() from error
+        raise
+    _check_complete_source(source, total, budget)
+    if digest is not None and digest.hexdigest() != expected:
+        raise ExportSourceUnreadable("任务成品页内容与发布记录不符")
 
 
 def _cleanup_tmp(tmp_path: str | None):
@@ -404,24 +489,24 @@ def _send_tmp_file(tmp_path: str, mimetype: str, download_name: str):
 @_export_capacity
 def export_zip(budget, job_id=None, album_id=None):
     """导出下载目录为 ZIP 文件"""
-    output_dir, err = _export_directory(job_id, album_id)
+    source_dir, err = _export_directory(job_id, album_id)
     if err:
         return err
     tmp_path = None
     sent = False
     try:
         # 打包出的 .cbz / .zip 不再装进导出的 ZIP；章节标记等其他文件照旧放进去；空文件（中断的下载留下的）不算页
-        entries, index, err = _export_entries(output_dir, budget, images_only=False, library=album_id is not None)
+        entries, index, err = _export_entries(source_dir, budget, images_only=False, library=album_id is not None)
         if err:
             return err
-        safe_name = _safe_export_name(output_dir)
+        safe_name = _safe_export_name(source_dir.album_name)
         # 使用临时文件避免大 ZIP 全量缓冲内存
         tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         tmp_path = tmp.name
         with tmp, zipfile.ZipFile(BudgetedWriter(tmp, budget), "w", zipfile.ZIP_DEFLATED) as zf, _reader_for(index, entries) as read:
             for name, source in entries:
                 budget.check()
-                arcname = f"{output_dir.name}/{name}"
+                arcname = f"{source_dir.album_name}/{name}"
                 with zf.open(arcname, "w", force_zip64=True) as target:
                     if isinstance(source, archive_pages.ArchivePage):
                         data = _read_archive_page(read, source, budget)
@@ -431,19 +516,9 @@ def export_zip(budget, job_id=None, album_id=None):
                             budget.check()
                         del data
                     else:
-                        if is_link(source) or not is_safe_path(source):
-                            raise ValueError("源文件路径在导出时发生变化")
-                        total = 0
-                        with source.open("rb") as handle:
-                            while True:
-                                budget.check()
-                                chunk = handle.read(_COPY_CHUNK)
-                                if not chunk:
-                                    break
-                                total += len(chunk)
-                                budget.observe_source(source, total)
+                        with closing(_zip_file_chunks(source, budget)) as chunks:
+                            for chunk in chunks:
                                 target.write(chunk)
-                                budget.check()
         budget.check()
         response = _send_tmp_file(tmp_path, "application/zip", f"{safe_name}.zip")
         sent = True
@@ -458,7 +533,7 @@ def _check_pixels(image, budget):
         raise ExportLimit("单页图片像素数超过导出限制")
 
 
-def _needs_pillow_conversion(img_path: Path, budget=None) -> bool:
+def _needs_pillow_conversion(image_source, budget=None) -> bool:
     """判断图片是否需要经 Pillow 预处理才能嵌入 PDF。
 
     img2pdf 拒绝带 alpha 通道的图片（AlphaChannelError），动图只应取首帧。
@@ -467,7 +542,7 @@ def _needs_pillow_conversion(img_path: Path, budget=None) -> bool:
     budget = budget or ExportBudget()
     try:
         from PIL import Image
-        with Image.open(img_path) as im:
+        with Image.open(image_source) as im:
             _check_pixels(im, budget)
             im.load()  # Decode pixels too: a readable header alone does not prove a complete image.
             budget.check()
@@ -483,12 +558,12 @@ def _needs_pillow_conversion(img_path: Path, budget=None) -> bool:
         return True
 
 
-def _image_to_jpeg_file(img_path: Path, folder: Path, budget) -> Path | None:
+def _image_to_jpeg_file(img_path: Path, folder: Path, budget, *, stream=None) -> Path | None:
     """Normalize one complete image to a budgeted JPEG file, never a book of bytes."""
     target = None
     try:
         from PIL import Image
-        with Image.open(img_path) as im:
+        with Image.open(img_path if stream is None else stream) as im:
             budget.check()
             _check_pixels(im, budget)
             im.load()
@@ -541,6 +616,7 @@ class _PdfInput:
         budget.check_size(len(data), True)
         key = budget.input_sources.get(str(self.path), self.path)
         if key is not None:
+            _check_complete_source(key, len(data), budget)
             budget.observe_source(key, len(data))
         return data
 
@@ -565,7 +641,34 @@ def _clear_conversions(folder, budget):
         budget.input_sources.pop(str(path), None)
 
 
-def _write_pdf_pages(pages, writer, folder, budget):
+@contextmanager
+def _pdf_page_input(path, folder, budget, force_jpeg):
+    expected = budget.page_digests.get(path)
+    if expected is None:
+        yield _PdfPages([path], budget)
+        return
+    # Decode, embed or transcode these same authenticated bytes. Keep at most one
+    # source page in memory; a fallback that rereads a snapshot authenticates it again.
+    try:
+        data = _PdfInput(path, budget).read_bytes()
+    except (OSError, ValueError) as error:
+        raise ExportSourceUnreadable() from error
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise ExportSourceUnreadable("任务成品页内容与发布记录不符")
+    with io.BytesIO(data) as stream:
+        del data
+        normalize = force_jpeg or _needs_pillow_conversion(stream, budget)
+        stream.seek(0)
+        if normalize:
+            converted = _image_to_jpeg_file(path, folder, budget, stream=stream)
+            if converted is None:
+                raise IncompletePdfError([path])
+            yield _PdfPages([converted], budget)
+        else:
+            yield stream
+
+
+def _write_pdf_pages(pages, writer, folder, budget, *, force_jpeg=False):
     """Spool one image PDF at a time, then assemble with disk-backed streams.
 
     img2pdf.convert(all_pages, outputstream=...) retains the whole book before
@@ -580,8 +683,8 @@ def _write_pdf_pages(pages, writer, folder, budget):
         budget.check()
         with tempfile.NamedTemporaryFile(dir=folder, suffix=".pdf", delete=False) as tmp:
             target = Path(tmp.name)
-            img2pdf.convert(_PdfPages([path], budget),
-                            outputstream=BudgetedWriter(tmp, budget, str(target)), first_frame_only=True)
+            with _pdf_page_input(path, folder, budget, force_jpeg) as page_input:
+                img2pdf.convert(page_input, outputstream=BudgetedWriter(tmp, budget, str(target)), first_frame_only=True)
             budget.check()
         sources.append({"file": str(target), "range": "1-z"})
     job = document = None
@@ -629,9 +732,14 @@ def _build_pdf(images: list[Path], out_stream, budget=None) -> int:
             pages, failed = [], []
             for path in images:
                 budget.check()
+                if path in budget.page_digests:
+                    pages.append(path)  # Read and prepare a sealed page once, at its single-page PDF write.
+                    continue
                 key = budget.input_sources.get(str(path), path)
                 if key is not None:
-                    budget.observe_source(key, path.stat().st_size)
+                    size = path.stat().st_size
+                    _check_complete_source(key, size, budget)
+                    budget.observe_source(key, size)
                 if _needs_pillow_conversion(path, budget):
                     converted = _image_to_jpeg_file(path, folder, budget)
                     if converted is None:
@@ -650,7 +758,7 @@ def _build_pdf(images: list[Path], out_stream, budget=None) -> int:
                 _write_pdf_pages(pages, writer, folder, budget)
                 budget.check()
                 return len(pages)
-            except (ExportLimit, ExportTimeout, OSError):
+            except (ExportLimit, ExportTimeout, ExportSourceUnreadable, IncompletePdfError, OSError):
                 raise
             except Exception as e:
                 log.warning(f"PDF 直接嵌入失败，回退全量转换 error={e}")
@@ -665,6 +773,9 @@ def _build_pdf(images: list[Path], out_stream, budget=None) -> int:
             failed = []
             for path in images:
                 budget.check()
+                if path in budget.page_digests:
+                    pages.append(path)
+                    continue
                 converted = _image_to_jpeg_file(path, folder, budget)
                 if converted is None:
                     failed.append(path)
@@ -672,7 +783,7 @@ def _build_pdf(images: list[Path], out_stream, budget=None) -> int:
                     pages.append(converted)
             if failed:
                 raise IncompletePdfError(failed)
-            _write_pdf_pages(pages, writer, folder, budget)
+            _write_pdf_pages(pages, writer, folder, budget, force_jpeg=True)
             budget.check()
             return len(pages)
         finally:
@@ -684,7 +795,7 @@ def _build_pdf(images: list[Path], out_stream, budget=None) -> int:
 @_export_capacity
 def export_pdf(budget, job_id=None, album_id=None):
     """导出下载目录为 PDF 文件（每张图片一页，按文件名排序）"""
-    output_dir, err = _export_directory(job_id, album_id)
+    source_dir, err = _export_directory(job_id, album_id)
     if err:
         return err
 
@@ -694,7 +805,7 @@ def export_pdf(budget, job_id=None, album_id=None):
     sent = False
     try:
         try:
-            entries, index, err = _export_entries(output_dir, budget, images_only=True, library=album_id is not None)
+            entries, index, err = _export_entries(source_dir, budget, images_only=True, library=album_id is not None)
         except (ValueError, OSError):
             return jsonify(status="error", message="无法安全读取下载目录"), 403
         if err:
@@ -730,7 +841,7 @@ def export_pdf(budget, job_id=None, album_id=None):
         if page_count != len(pages):
             return jsonify(status="error", message="PDF 页数不完整，已取消导出，请检查原图"), 422
 
-        safe_name = _safe_export_name(output_dir)
+        safe_name = _safe_export_name(source_dir.album_name)
         log.info(f"PDF 导出完成 album_id={album_id} job_id={job_id} pages={page_count}/{len(pages)}")
         response = _send_tmp_file(tmp_path, "application/pdf", f"{safe_name}.pdf")
         sent = True

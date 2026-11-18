@@ -27,11 +27,11 @@ import posixpath
 import re
 from pathlib import Path
 
-from . import archive_pages
+from . import archive_pages, path_guard
 from . import database as db
 from .file_tree import iter_safe_files
 from .local_availability import has_local_pages, local_state
-from .path_guard import is_safe_path
+from .publication_access import published_path
 from .validation import is_allowed_image, validate_numeric
 
 MARKER = ".jm-chapter.json"
@@ -118,9 +118,13 @@ def _other_folders(album_id: str, job_id: str, folder: Path) -> bool:
             continue
         seen.add(key)
         other = Path(row["output_path"])
-        if other.is_dir() and is_safe_path(other) and has_local_pages(other):
+        if _public_folder(other) and has_local_pages(other):
             return True
     return False
+
+
+def _public_folder(folder: Path) -> bool:
+    return published_path(folder, path_guard.DOWNLOAD_ROOT, directory=True) is not None and folder.is_dir()
 
 
 def partial_chapters(album_id: str) -> tuple[dict | None, str]:
@@ -128,14 +132,14 @@ def partial_chapters(album_id: str) -> tuple[dict | None, str]:
     都在（这里不据此说“全部已下载”）/ not_readable / no_chapter_list / single_chapter / other_folders /
     unattributed / unknown_chapter / incomplete_chapter。"""
     album_id = str(album_id)
-    state = local_state(album_id)
-    if not state or not state.readable:
-        return None, "not_readable"
     job = db.get_completed_job_by_album_id(album_id)
     if not job or not job.get("output_path") or job.get("superseded_at"):
         return None, "not_readable"
     folder = Path(job["output_path"])
-    if not folder.is_dir() or not is_safe_path(folder):
+    if not _public_folder(folder):
+        return None, "not_readable"
+    state = local_state(album_id)
+    if not state or not state.readable:
         return None, "not_readable"
     upstream = _snapshot(album_id)
     if upstream is None:

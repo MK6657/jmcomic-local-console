@@ -14,10 +14,12 @@ from PIL import Image
 @pytest.fixture
 def output_dir(client, tmp_path, monkeypatch):
     from core import path_guard
+    from routes import api_export
     root = tmp_path / "downloads"
     album = root / "Album"
     album.mkdir(parents=True)
     monkeypatch.setattr(path_guard, "DOWNLOAD_ROOT", root)
+    monkeypatch.setattr(api_export, "DOWNLOAD_ROOT", root)
     return album
 
 
