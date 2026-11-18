@@ -10,6 +10,7 @@ from pathlib import Path
 import secrets
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -221,11 +222,23 @@ def publication_checks(port, fixture):
                             f'{base}: wrong PDF page contents')
 
 
-def exercise(command, fingerprint):
+@contextmanager
+def disposable_home():
     home = Path(tempfile.mkdtemp(prefix='jmcomic-lifecycle-')).resolve()
     nonce, processes = secrets.token_hex(32), []
     try:
         (home / MARKER).write_text(json.dumps({'format': 1, 'nonce': nonce}), encoding='utf-8')
+        yield home, nonce, processes
+    finally:
+        live = [p.pid for p in processes if p.poll() is None]
+        if live:
+            print(f'Unverified exit: preserved temporary home {home}; owned PID(s) {live}', file=sys.stderr)
+        else:
+            shutil.rmtree(home)
+
+
+def exercise(command, fingerprint):
+    with disposable_home() as (home, nonce, processes):
         # No source schema initializer: an old executable must fail here, before a fixture is written.
         with foreground(command, home, nonce, processes) as record:
             require(record['code_fingerprint'] == fingerprint, 'server fingerprint differs from selected program')
@@ -249,29 +262,134 @@ def exercise(command, fingerprint):
                 publication_checks(port, fixture)
             private_receipt(home, fixture)
         schema(home)
+
+
+def bundle_hashes(exe):
+    require(exe.name.lower() == 'jmcomic.exe' and exe.is_file(), 'expected extracted JMComic.exe')
+    manifest = (exe.parent / '_internal/release.json').read_bytes()
+    with exe.open('rb') as stream:
+        digest = hashlib.file_digest(stream, 'sha256')
+    exe_sha = digest.hexdigest()
+    digest.update(manifest)  # frozen startup record hashes EXE followed by release.json
+    return exe_sha, digest.hexdigest(), json.loads(manifest)['source_sha256']
+
+
+@contextmanager
+def observe_shutdown(token):
+    """Hold the real manual-reset event across launch. Waiting with zero timeout never signals it."""
+    import ctypes
+    from ctypes import wintypes
+    import _winapi
+    open_event = ctypes.WinDLL('kernel32', use_last_error=True).OpenEventW
+    open_event.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+    open_event.restype = wintypes.HANDLE
+    handle = open_event(0x00100000, False, 'Local\\JMConsoleShutdown_' + token)  # SYNCHRONIZE only
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    def check():
+        require(_winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT, 'old service shutdown event signaled')
+    try:
+        check()
+        yield
+        check()
     finally:
-        live = [p.pid for p in processes if p.poll() is None]
-        if live:
-            print(f'Unverified exit: preserved temporary home {home}; owned PID(s) {live}', file=sys.stderr)
-        else:
-            shutil.rmtree(home)
+        _winapi.CloseHandle(handle)
+
+
+def check_busy_launch(exe, home, proc, record):
+    port, token = record['port'], record['launch_token']
+    def paused_only():
+        require(identity(home, proc, token) == record, 'original server identity changed')
+        health = json.loads(request(port, '/api/system/health?activity=1'))
+        require(health['jobs'] == dict(paused=1, queued=0, running=0, executors=0) and health['jm_active_clients'] == 0,
+                'expected paused task to be the only upgrade blocker')
+        job = json.loads(request(port, f'/api/jobs/{A}'))['job']
+        require(job['job_id'] == A and job['status'] == 'paused', 'original task is no longer paused')
+
+    paused_only()
+    # webbrowser's first choice is a non-networking recorder; no desktop browser or user profile needed.
+    python = Path(sys._base_executable).resolve(strict=True).as_posix()
+    require(';' not in python and '%s' not in python, 'interpreter path not representable in BROWSER')
+    (home / 'record_browser.py').write_text(
+        "import sys\ntry:\n    with open('browser-calls', 'a', encoding='utf-8') as log: print(sys.argv[1], file=log)\n"
+        "except OSError: pass\n", encoding='utf-8')  # even on write failure, never fall back to the real browser
+    browser = f'"{python}" -I -S record_browser.py %s'
+    # launch_flask opens launcher.log for append before Popen. An accidental spawn attempt must fail
+    # here rather than start an unguarded server. This does not block attach or the real shutdown event.
+    guard = home / 'runtime/logs/launcher.log'
+    guard.touch(exist_ok=False)
+    guard.chmod(stat.S_IREAD)
+    try:
+        with observe_shutdown(token):
+            launch = subprocess.run([str(exe), 'launch'], cwd=home, env=dict(environment(home), BROWSER=browser),
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=35,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+        require(launch.returncode == 0, f'ordinary launch failed (exit {launch.returncode}); did not attach')
+        output = launch.stdout.decode('utf-8')
+        require('程序或运行依赖已更新' in output and '已暂缓升级：排队 0、运行 0、暂停 1' in output
+                and f'已打开既有实例（PID {proc.pid}）' in output, 'missing explicit outdated/paused/attach decision')
+        require((home / 'browser-calls').read_text(encoding='utf-8').splitlines() == [f'http://127.0.0.1:{port}'],
+                'launcher did not open exactly the original loopback URL')
+        require(guard.stat().st_size == 0, 'launcher wrote a server-start record')
+        paused_only()
+    finally:
+        guard.chmod(stat.S_IWRITE)
+
+
+def busy_upgrade(exe, candidate_fp, previous):
+    with disposable_home() as (home, nonce, processes):
+        synthetic = previous is None
+        if synthetic:
+            # Only copy packaged program resources. Never copy runtime, downloads or a personal instance.
+            # JSON whitespace changes the fingerprint computed by the old process itself; PID/tokens are real.
+            previous = home / 'old-bundle' / exe.name
+            shutil.copytree(exe.parent / '_internal', previous.parent / '_internal')
+            shutil.copyfile(exe, previous)
+            with (previous.parent / '_internal/release.json').open('ab') as manifest:
+                manifest.write(b'\n')
+        old_sha, old_fp, _ = bundle_hashes(previous)
+        require(old_fp != candidate_fp, 'old and candidate fingerprints match; upgrade path cannot be tested')
+        command = [str(previous)]
+        with foreground(command, home, nonce, processes) as record:
+            require(record['code_fingerprint'] == old_fp, 'running code does not match supplied old bundle')
+        db = (home / 'runtime/data/app.db').as_uri()
+        with closing(sqlite3.connect(db + '?mode=rw', uri=True)) as connection, connection:
+            old_schema, = connection.execute('PRAGMA user_version').fetchone()
+            connection.execute('INSERT INTO jobs(job_id,album_id,title,selected_photo_ids,status) VALUES(?,?,?,?,?)',
+                               (A, ALBUM, 'Busy upgrade fixture', '[]', 'paused'))
+            connection.executemany('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)',
+                                   [('auto_update_check', 'false'), ('schedule_enabled', 'true'),
+                                    ('schedule_start', '0'), ('schedule_end', '0')])
+        with foreground(command, home, nonce, processes) as record:
+            require(record['code_fingerprint'] == old_fp, 'old service fingerprint changed')
+            check_busy_launch(exe, home, processes[-1], record)
+        with closing(sqlite3.connect(db + '?mode=ro', uri=True)) as connection:
+            require(connection.execute('PRAGMA user_version').fetchone() == (old_schema,), 'launcher upgraded live DB')
+        return dict(mode='synthetic-old-fingerprint' if synthetic else 'two-bundles', old_exe_sha256=old_sha,
+                    old_fingerprint=old_fp, launcher_fingerprint=candidate_fp, old_schema=old_schema,
+                    paused=1, original_pid=record['pid'], shutdown_signaled=False, replacement_started=False)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('executable', type=Path)
-    exe = parser.parse_args().executable.resolve(strict=True)
-    require(sys.platform == 'win32' and exe.name.lower() == 'jmcomic.exe', 'expected extracted Windows JMComic.exe')
-    manifest = (exe.parent / '_internal/release.json').read_bytes()
-    with exe.open('rb') as stream:
-        digest = hashlib.file_digest(stream, 'sha256')
-    exe_sha = digest.hexdigest()
-    digest.update(manifest)  # frozen startup record hashes EXE followed by its embedded release manifest
-    exercise([str(exe)], digest.hexdigest())
-    print(json.dumps(dict(status='ok', exe=str(exe), exe_sha256=exe_sha,
-                          source_sha256=json.loads(manifest)['source_sha256'], schema=5,
-                          checks=['fresh_schema', 'paused_A_private', 'reader_B_only', 'task_and_album_zip_pdf',
-                                  'proxy_save', 'restart_readback', 'verified_exits', 'temp_cleanup'])))
+    parser.add_argument('--previous-exe', type=Path, help='use this extracted old EXE as server (default: synthetic old fingerprint)')
+    parser.add_argument('--busy-upgrade-only', action='store_true', help='only exercise ordinary launch against a paused outdated server')
+    args = parser.parse_args()
+    require(sys.platform == 'win32', 'requires Windows')
+    exe = args.executable.resolve(strict=True)
+    exe_sha, fingerprint, source_sha = bundle_hashes(exe)
+    checks = []
+    report = dict(exe=str(exe), exe_sha256=exe_sha, source_sha256=source_sha, checks=checks)
+    if not args.busy_upgrade_only:
+        exercise([str(exe)], fingerprint)
+        report['schema'] = 5
+        checks.extend(['fresh_schema', 'paused_A_private', 'reader_B_only', 'task_and_album_zip_pdf',
+                       'proxy_save', 'restart_readback', 'verified_exits', 'temp_cleanup'])
+    previous = args.previous_exe.resolve(strict=True) if args.previous_exe else None
+    report['busy_upgrade'] = busy_upgrade(exe, fingerprint, previous)
+    checks.append('outdated_launcher_preserved_paused_service')
+    print(json.dumps(dict(report, status='ok')))
 
 
 if __name__ == '__main__':
