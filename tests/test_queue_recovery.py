@@ -194,6 +194,9 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
                 state.counts[path] += 1
                 attempt = state.counts[path]
             try:
+                if path == getattr(state, 'hold_page', None):
+                    state.entered.set()
+                    assert state.release.wait(10)
                 if state.faults and path == "/images/100/00001.webp":
                     if attempt == state.block_on_slow_attempt:
                         state.entered.set()
@@ -223,11 +226,15 @@ def real_download_pipeline(client, tmp_path, monkeypatch):
         def __init__(self, album_id):
             photo = Photo(album_id)
             super().__init__([photo])
+            if album_id == '100' and getattr(state, 'two_chapters', False):
+                other = Photo('second')
+                other.photo_id, other.name = '72', 'Second'
+                self.append(other)
             self.album_id = album_id
             self.name = state.first_title if album_id == "100" else "Normal"
             self.author = "Fixture"
             self.tags = []
-            self.episode_list = [(photo.photo_id, 1, photo.name)]
+            self.episode_list = [(p.photo_id, n, p.name) for n, p in enumerate(self, 1)]
 
     class Client:
         def __init__(self):
@@ -673,3 +680,50 @@ def test_quick_resume_wins_before_flat_files_and_skips_confirmed_pages(real_down
     assert manager.stop(timeout=3) and state.order == ["100", "200", "100"]
     assert len(list((downloads / "Blocked_100").glob("*.webp"))) == 3
     assert [state.counts[f"/images/100/{page:05d}.webp"] for page in (1, 2, 3)] == [1, 1, 1]
+def test_same_album_pause_publishes_only_finished_chapters(real_download_pipeline, client, monkeypatch):
+    """A pauses after one page; B may publish chapter 72 and unrelated C must run."""
+    import io
+    import zipfile
+    import pikepdf
+    from core import database as db
+    from core.settings import update_settings
+    from core.task_commands import enqueue_download
+    from routes import api_export, api_preview
+    manager, state, downloads = real_download_pipeline
+    for module in (api_export, api_preview):
+        monkeypatch.setattr(module, 'DOWNLOAD_ROOT', downloads)
+    state.two_chapters, state.faults = True, False
+    state.hold_page = '/images/100/00002.webp'
+    update_settings({'skip_existing': False, 'auto_pack': True, 'delete_originals': True})
+    a = enqueue_download('100', 'A', ['71']).job_id
+    b = enqueue_download('100', 'B', ['72']).job_id
+    c = enqueue_download('200', 'C', ['71']).job_id
+    manager.start()
+    try:
+        assert state.entered.wait(5)
+        assert db.get_job(a)['done_pages'] == 1
+        assert manager.pause_job(a)[0]
+    finally:
+        state.release.set()
+    _await_status(b, 'completed')
+    _await_status(c, 'completed')
+    assert db.get_job(a)['status'] == 'paused'
+    preview = client.get('/api/preview/100')
+    assert preview.status_code == 200
+    assert [p['photo_id'] for p in preview.json['pages']] == ['72']
+    for endpoint in (f'/api/export/{b}', '/api/library/100/export'):
+        with client.post(endpoint + '/zip') as response:
+            assert response.status_code == 200
+            with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+                names = [n for n in archive.namelist() if n.lower().endswith('.webp')]
+                assert len(names) == 1 and '__72/' in names[0]
+        with client.post(endpoint + '/pdf') as response:
+            assert response.status_code == 200
+            with pikepdf.open(io.BytesIO(response.data)) as document:
+                assert len(document.pages) == 1
+    assert manager.resume_job(a)[0]
+    _await_status(a, 'completed')
+    assert state.counts['/images/100/00001.webp'] == 1
+    assert sorted(p['photo_id'] for p in client.get('/api/preview/100').json['pages']) == ['71'] * 3 + ['72']
+
+
