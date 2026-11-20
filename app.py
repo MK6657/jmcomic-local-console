@@ -7,14 +7,13 @@ import sys
 import time
 from pathlib import Path
 
-# 使用 Windows 命名互斥体实现原子级单实例锁（防止双进程竞争，参见 THREAD_SAFETY_REVIEW.md P1-3）
-_MUTEX_NAME = "Local\\JMComicDownloader_AppInstance"
-
 # 确保项目根目录在 sys.path 中
 # 打包后：sys._MEIPASS，开发时：项目根目录
 from core.path_utils import get_resource_root, get_data_dir, get_download_root, ensure_dirs
-from core.instance_lock import acquire_instance_lock, InstanceBusyError
+from core.instance_lock import DEFAULT_MUTEX_NAME, acquire_instance_lock, InstanceBusyError
 from core.interface import classic_ui, render_page
+
+_MUTEX_NAME = DEFAULT_MUTEX_NAME
 
 
 def _instance_lease():
@@ -52,11 +51,10 @@ _mutex_handle = None
 _shutdown_control = None
 
 
-def _acquire_lock():
+def _acquire_lock(instance_lease=None):
     """A live named mutex cannot be stale; protect startup before any port is bound."""
-    global _mutex_handle, _source_lease
-    mutex = _source_lease or _instance_lease()
-    _source_lease = None
+    global _mutex_handle
+    mutex = _instance_lease() if instance_lease is None else instance_lease
     _mutex_handle = mutex
     try:
         _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -177,33 +175,65 @@ def create_app() -> Flask:
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000
 
     _static_root = Path(app.static_folder)
+    _asset_mtime_cache: dict[str, tuple[float, int]] = {}
 
     @app.template_global()
     def asset_url(filename: str) -> str:
         """带版本参数的静态资源 URL：/static/<file>?v=<mtime>。
 
-        本地应用 stat() 开销微秒级，每次请求实时取 mtime，
-        保证开发/热替换 JS 后浏览器立即生效，同时享受一年强缓存。
+        2 秒短 TTL 内存缓存避免每次页面渲染对同一静态资源重复 stat()，
+        开发热替换仍能在 2 秒内自动失效，同时享受一年 immutable 强缓存。
         """
         if classic_ui() and filename.startswith(('js/', 'css/')):
             filename = 'classic/' + filename
+        now = time.monotonic()
+        cached = _asset_mtime_cache.get(filename)
+        if cached is not None and (now - cached[0]) < 2.0:
+            return f"/static/{filename}?v={cached[1]}"
         try:
             version = int((_static_root / filename).stat().st_mtime)
         except OSError:
             version = 0
+        if len(_asset_mtime_cache) > 256:
+            _asset_mtime_cache.clear()
+        _asset_mtime_cache[filename] = (now, version)
         return f"/static/{filename}?v={version}"
 
     @app.context_processor
     def _inject_ui_theme() -> dict:
-        """直出当前持久化的矿物护眼主题（从设置内存缓存读取，异常兜底 paper），实现零闪屏渲染。"""
+        """直出当前持久化的主题与动效配置（异常兜底默认），实现零闪屏渲染。"""
+        from core.ui_themes import (
+            DEFAULT_UI_FX_PRESET,
+            DEFAULT_UI_THEME,
+            DARK_THEMES,
+            FX_PRESET_SPECS,
+            THEME_SPECS,
+            is_dark_theme,
+            normalize_fx_enabled,
+            normalize_fx_preset,
+            normalize_theme,
+            resolve_fx,
+        )
         try:
-            from core.settings import UI_THEMES, get_settings
-            theme = get_settings().get("ui_theme", "paper")
-            if theme not in UI_THEMES:
-                theme = "paper"
+            from core.settings import get_settings
+            saved = get_settings()
+            theme = normalize_theme(saved.get("ui_theme"))
+            fx_enabled = normalize_fx_enabled(saved.get("ui_fx_enabled"))
+            fx_preset = normalize_fx_preset(saved.get("ui_fx_preset"))
         except Exception:
-            theme = "paper"
-        return {"ui_theme": theme}
+            theme = DEFAULT_UI_THEME
+            fx_enabled = True
+            fx_preset = DEFAULT_UI_FX_PRESET
+        return {
+            "ui_theme": theme,
+            "ui_themes": THEME_SPECS,
+            "ui_dark_themes": DARK_THEMES,
+            "ui_theme_is_dark": is_dark_theme(theme),
+            "ui_fx_enabled": fx_enabled,
+            "ui_fx_preset": fx_preset,
+            "ui_fx_presets": FX_PRESET_SPECS,
+            "ui_fx_active": resolve_fx(theme, fx_preset, fx_enabled),
+        }
 
     # ── 请求 ID + 计时初始化（每个请求执行一次） ──
     from core.logger import set_request_id, clear_request_id
@@ -304,17 +334,21 @@ def create_app() -> Flask:
     @app.after_request
     def _security_headers(response):
         # Separate from logging so quiet paths and early error responses are covered.
+        from flask import request
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         if app.config.get('ATELIER_DEMO'):
             response.headers['Content-Security-Policy'] += "; img-src 'self' blob: data:; connect-src 'self'"
         if response.mimetype == 'text/html':
-            from flask import request
             response.vary.add('Cookie')
             if request.endpoint in ('page.index', 'page.search'):
                 response.headers['Cache-Control'] = 'no-store'
             else:
                 response.headers.setdefault('Cache-Control', 'no-cache')
+        elif response.status_code == 200 and request.path.startswith("/static/"):
+            ver = request.args.get("v", "")
+            if (ver and ver != "0") or request.path.startswith("/static/vendor/"):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
@@ -367,7 +401,7 @@ class _ShutdownRequested(BaseException):
     """Unwind serving/startup once; cleanup runs in main's single finally block."""
 
 
-def main():
+def main(*, instance_lease=None):
     import signal
     global _shutdown_control
     install_process_hooks()
@@ -396,7 +430,7 @@ def main():
     safe = True
     try:
         try:
-            _acquire_lock()
+            _acquire_lock(instance_lease)
             acquired = True
         except SystemExit as exc:
             log.error(f"启动中止：{exc}")
@@ -513,4 +547,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(instance_lease=_source_lease))

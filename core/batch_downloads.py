@@ -32,6 +32,7 @@ MAX_ALBUMS = 50      # 一次确认最多这么多部（与收藏批量下载的
 MAX_PHOTOS = 1000    # 一个任务最多这么多话（与 POST /api/jobs 相同）
 MAX_TITLE = 500
 MAX_REVIEW = 50
+MAX_SKIPPED_DETAILS = 50
 LOCK_WAIT = 30       # 秒：同一时间只处理一次确认
 
 _CONFIRM_LOCK = threading.Lock()
@@ -262,7 +263,8 @@ def preview(kind: str, album_ids: list | None = None) -> dict:
         out_of_scope = {"changed": plan["changed"]}
     return {
         "status": "ok", "kind": kind, "token": plan["token"], "limit": MAX_ALBUMS,
-        "items": plan["items"], "counts": _counts(kind, plan["items"]), "skipped": plan["skipped"],
+        "items": plan["items"], "counts": _counts(kind, plan["items"]),
+        "skipped": plan["skipped"][:MAX_SKIPPED_DETAILS], "skipped_total": len(plan["skipped"]),
         "more": plan["more"], "review": plan["review"], "out_of_scope": out_of_scope,
     }
 

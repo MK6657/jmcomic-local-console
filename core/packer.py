@@ -82,7 +82,7 @@ class CbzPacker(Packer):
           旧包有被跳过的页（带不过来）、或读不出旧包的页时整个打包失败，旧包原样保留。
         - 打包的页数记在 self.packed_count（散图 + 带过来的页），调用方可据此核对新包。
         - 流式写入同盘隔离暂存文件，目录扫描器不可见
-        - 使用 ZIP_DEFLATED 压缩
+        - 使用 ZIP_STORED 零重压缩直存（图片本身已压缩，大幅降低打包 CPU 并保证 CBZ 阅读器秒级翻页）
         - 如果 on_progress 可调用，每处理一张图调用 on_progress(current, total)
         - 完成并验证 ZIP 页数和 CRC 后原子发布
         - 上下文退出时清理本次暂存文件，失败保留已有压缩包
@@ -124,7 +124,7 @@ class CbzPacker(Packer):
         with staged_file(output_path) as staged:
             tmp_path = staged.path
             with zipfile.ZipFile(
-                str(tmp_path), "w", zipfile.ZIP_DEFLATED
+                str(tmp_path), "w", zipfile.ZIP_STORED
             ) as zf:
                 # 写入 ComicInfo.xml
                 comic_info_xml = self._build_comic_info(
@@ -163,6 +163,10 @@ class CbzPacker(Packer):
 
             def complete_archive(path):
                 checkpoint()
+                index = archive_pages.read_staged_index(path)
+                if index.status not in ("ok", "empty") or index.skipped or len(index.pages) != total:
+                    raise ValueError(f"新压缩包核对不通过（{index.status}，{len(index.pages)}/{total} 页），"
+                                     "旧包和原图保留")
                 with _VerifyingArchive(path, checkpoint) as archive:
                     if verified_inputs is not None:
                         for source, digest in verified_inputs.items():

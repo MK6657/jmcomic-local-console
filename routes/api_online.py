@@ -53,6 +53,10 @@ def online_image(photo_id: str, index: int):
             return jsonify(status='error', error_kind='local_file', message='无法写入本地图片缓存，请检查空间和权限'), 500
         return jsonify({"status": "error", "message": "图片加载失败"}), 500
     try:
-        return send_file(path, mimetype=online_reader.image_mime(path), max_age=86400)
+        mime = online_reader.image_mime(path)
+        with online_reader.serving_page(path):
+            response = send_file(path, mimetype=mime, max_age=0)
+        response.cache_control.no_store = True
+        return response
     except FileNotFoundError:
         return jsonify(status="error", error_kind="cache_changed", message="图片缓存已刷新，请重试"), 503

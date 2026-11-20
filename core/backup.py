@@ -17,7 +17,7 @@ import tempfile
 import time
 import zipfile
 import zlib
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -26,12 +26,16 @@ from .backup_paths import BackupPathError, output_parts, output_path_tables, par
 from .database_schema import SchemaError, validate_schema
 from .file_tree import is_link
 from .storage import STAGING_DIRECTORY, is_temporary_path, staged_file
+from .validation import validate_numeric
+from .zip_preflight import BoundedZipFile, ZipMetadataLimit
 
 FORMAT = "jmcomic-local-console-backup"
 FORMAT_VERSION = 1
+_MOVE_FORMAT_VERSION = 2
 DATABASE_MEMBER = "app.db"
 MANIFEST_MEMBER = "manifest.json"
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_DIRECTORY_BYTES = 64 * 1024 * 1024
 MAX_DATABASE_BYTES = 2 * 1024**3
 MAX_RESOURCE_BYTES = 32 * 1024**3
 MAX_TOTAL_BYTES = 1024**4
@@ -64,6 +68,33 @@ class BackupInfo:
     @property
     def includes_downloads(self):
         return self.manifest["resources"]["included"]
+
+
+@dataclass(frozen=True)
+class _MaintenanceMove:
+    album_id: str
+    payload: dict
+    source: tuple[str, ...]
+    target: tuple[str, ...]
+    retained: tuple[str, ...] | None
+    identity: tuple[int, int]
+    old_identity: tuple[int, int] | None
+
+    def placements(self, phase):
+        """Map each archived directory to its restored location, or None if absent."""
+        if phase == "at_target":
+            locations = (None, self.target, self.retained)
+        elif phase == "old_retained" and self.retained:
+            locations = (self.source, None, self.target)
+        elif phase == "at_source":
+            locations = (self.source, self.target if self.retained else None, None)
+        else:
+            raise BackupError("备份中的目录整理阶段与记录不一致")
+        return ((parts, location) for parts, location in zip((self.source, self.target, self.retained), locations)
+                if parts is not None)
+
+
+_MOVE_PHASES = {"at_source", "old_retained", "at_target"}
 
 
 class _Budget:
@@ -235,6 +266,97 @@ def _has_running_jobs(connection):
     return connection.execute("SELECT 1 FROM jobs WHERE status='running' LIMIT 1").fetchone() is not None
 
 
+def _move_parts(value):
+    if not isinstance(value, str) or is_temporary_path(value):
+        raise BackupError("备份中的目录整理记录无效")
+    parts = safe_parts(value.replace("\\", "/").split("/"), context="目录整理记录")
+    if any(part.casefold() == ".jmcomic-work" for part in parts):
+        raise BackupError("备份中的目录整理指向私有任务目录")
+    return parts
+
+
+def _move_identity(value):
+    if (not isinstance(value, list) or len(value) != 2 or any(type(item) is not int for item in value)
+            or value[0] < 0 or value[1] <= 0):
+        raise BackupError("备份中的目录整理缺少文件系统标识")
+    return tuple(value)
+
+
+def _maintenance_moves(connection, version, check):
+    """Read durable move intents from the validated snapshot without loading the app."""
+    if version < 5:
+        return
+    rows = connection.execute("SELECT album_id,payload FROM album_maintenance WHERE CASE WHEN json_valid(payload) "
+                              "THEN json_type(payload,'$._move')='object' ELSE 0 END")
+    for album_id, raw in rows:
+        check()
+        payload = json.loads(raw)
+        intent = payload["_move"]
+        if not validate_numeric(album_id) or ("displaced" in intent) != ("old_identity" in intent):
+            raise BackupError("备份中的目录整理记录无效")
+        try:
+            source, target = _move_parts(payload["directory"]), _move_parts(intent["to"])
+            retained = _move_parts(intent["displaced"]) if "displaced" in intent else None
+            old_identity = _move_identity(intent["old_identity"]) if retained else None
+            identity = _move_identity(intent["identity"])
+        except KeyError:
+            raise BackupError("备份中的目录整理记录不完整") from None
+        yield _MaintenanceMove(album_id, payload, source, target, retained, identity, old_identity)
+
+
+def _move_placements(moves, phases, check):
+    if {move.album_id for move in moves} != phases.keys():
+        raise BackupError("备份中的目录整理阶段与数据库不一致")
+    placements = {}
+    for move in moves:
+        check()
+        for parts, location in move.placements(phases[move.album_id]):
+            key = PureWindowsPath(*parts)
+            if key in placements:
+                raise BackupError("备份中的目录整理路径重叠")
+            placements[key] = (parts, location)
+    for path in placements:
+        check()
+        if any(parent in placements for parent in path.parents):
+            raise BackupError("备份中的目录整理路径重叠")
+    return placements
+
+
+def _move_resource_path(parts, placements, *, source_windows):
+    if not placements:
+        return parts
+    key = PureWindowsPath(*parts)
+    if key in placements:
+        raise BackupError("目录整理路径与文件清单冲突")
+    for depth, parent in enumerate(key.parents, start=1):
+        if parent in placements:
+            original, location = placements[parent]
+            if location is None or (not source_windows and original != parts[:-depth]):
+                raise BackupError("目录整理阶段与文件清单冲突")
+            return (*location, *parts[-depth:])
+    return parts
+
+
+def _move_phase(root, move):
+    def identity(parts):
+        if parts is None:
+            return None
+        try:
+            info = _plain_path(root.joinpath(*parts), directory=True)
+        except FileNotFoundError:
+            return None
+        return info.st_dev, info.st_ino
+
+    observed = tuple(identity(parts) for parts in (move.source, move.target, move.retained))
+    if observed == (move.identity, move.old_identity, None):
+        return "at_source"
+    if move.retained and observed == (move.identity, None, move.old_identity):
+        return "old_retained"
+    if observed == (None, move.identity, move.old_identity):
+        return "at_target"
+    raise BackupError("无法确认中断整理的目录位置；请先恢复整理或检查资源后重新备份")
+
+
 def _check_restorable_snapshot(connection, version, root, budget):
     budget.check()
     try:
@@ -295,12 +417,25 @@ def create_backup(database_path, download_root, destination, *, include_download
             with closing(_readonly_database(database_path, budget)) as source:
                 data_version = source.execute("PRAGMA data_version").fetchone()[0]
                 schema = _snapshot(source, snapshot, budget)
+                moves = []
                 if root is not None:
                     with closing(_readonly_database(snapshot, budget)) as saved:
                         _check_restorable_snapshot(saved, schema, root, budget)
                         if include_downloads and _has_running_jobs(saved):
                             raise BackupError("数据库仍有运行中的下载任务，不能确认资源备份已停机")
+                        if include_downloads:
+                            moves = list(_maintenance_moves(saved, schema, budget.check))
+                phases = {}
+                for move in moves:
+                    budget.check()
+                    phases[move.album_id] = _move_phase(root, move)
+                placements = _move_placements(moves, phases, budget.check)
                 inventory = [] if root is None else _inventory(root, budget)
+                if placements:
+                    source_windows = isinstance(parse_source_root(str(root)), PureWindowsPath)
+                    for record in inventory:
+                        budget.check()
+                        _move_resource_path(tuple(record["path"].split("/")), placements, source_windows=source_windows)
                 db_size, db_hash = _hash_file(snapshot, budget)
                 mode = (("none" if source_root is None else "database") if root is None
                         else ("full" if include_downloads else "inventory"))
@@ -313,6 +448,9 @@ def create_backup(database_path, download_root, destination, *, include_download
                                                   "inventory": "inventory-only", "full": "service-stopped"}[mode],
                                   "source_root": "" if source_root is None else str(source_root), "files": inventory},
                 }
+                if phases:
+                    manifest["version"] = _MOVE_FORMAT_VERSION
+                    manifest["resources"]["maintenance_moves"] = phases
                 encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
                 if len(encoded) > MAX_MANIFEST_BYTES:
                     raise BackupError("备份清单超过大小上限")
@@ -329,6 +467,10 @@ def create_backup(database_path, download_root, destination, *, include_download
                 if include_downloads:
                     if _inventory(root, budget) != inventory:
                         raise BackupError("资源目录在备份过程中发生变化")
+                    for move in moves:
+                        budget.check()
+                        if _move_phase(root, move) != phases[move.album_id]:
+                            raise BackupError("目录整理阶段在备份过程中发生变化")
                     if source.execute("PRAGMA data_version").fetchone()[0] != data_version:
                         raise BackupError("数据库在资源备份过程中发生变化")
             # Inspection repeats CRC/hash/manifest/SQLite validation before replace.
@@ -366,7 +508,8 @@ def _manifest(data):
         raise BackupError("备份清单不是有效 JSON") from None
     if not isinstance(result, dict) or set(result) != {"format", "version", "created_at", "schema_version", "database", "resources"}:
         raise BackupError("备份清单结构无效")
-    if result["format"] != FORMAT or type(result["version"]) is not int or result["version"] != FORMAT_VERSION:
+    if (result["format"] != FORMAT or type(result["version"]) is not int
+            or result["version"] not in (FORMAT_VERSION, _MOVE_FORMAT_VERSION)):
         raise BackupError("不支持的备份格式或版本")
     if type(result["schema_version"]) is not int or result["schema_version"] < 0:
         raise BackupError("备份数据库版本无效")
@@ -377,7 +520,11 @@ def _manifest(data):
         raise BackupError("备份创建时间无效") from None
     _record(result["database"], database=True)
     resources = result["resources"]
-    if not isinstance(resources, dict) or set(resources) != {"mode", "included", "consistency", "source_root", "files"}:
+    fields = {"mode", "included", "consistency", "source_root", "files"}
+    has_moves = result["version"] == _MOVE_FORMAT_VERSION
+    if has_moves:
+        fields.add("maintenance_moves")
+    if not isinstance(resources, dict) or set(resources) != fields:
         raise BackupError("备份资源清单结构无效")
     modes = {"none": (False, "database-only"), "database": (False, "database-only"),
              "inventory": (False, "inventory-only"), "full": (True, "service-stopped")}
@@ -395,6 +542,13 @@ def _manifest(data):
         raise BackupError("资源备份缺少原始下载目录")
     if resources["mode"] == "database" and resources["files"]:
         raise BackupError("仅数据库快照不能声称包含资源清单")
+    if has_moves:
+        phases = resources["maintenance_moves"]
+        if (not resources["included"] or result["schema_version"] < 5 or not isinstance(phases, dict)
+                or not 0 < len(phases) <= MAX_FILES
+                or any(not validate_numeric(album) or not isinstance(phase, str) or phase not in _MOVE_PHASES
+                       for album, phase in phases.items())):
+            raise BackupError("备份中的目录整理阶段无效")
     names, total = set(), 0
     for record in resources["files"]:
         _record(record)
@@ -408,15 +562,21 @@ def _manifest(data):
     return result
 
 
+def _open_backup_zip(handle, check):
+    try:
+        return BoundedZipFile(handle, max_entries=MAX_FILES + 2, max_directory_bytes=MAX_DIRECTORY_BYTES, check=check)
+    except ZipMetadataLimit as error:
+        raise BackupError(str(error)) from None
+
+
 def _inspect_backup(path_or_stream, budget):
     archive_path = None
     if isinstance(path_or_stream, (str, os.PathLike)):
         archive_path = _absolute(path_or_stream)
         _plain_path(archive_path)
-    with zipfile.ZipFile(path_or_stream) as archive:
+    source = archive_path.open("rb") if archive_path is not None else nullcontext(path_or_stream)
+    with source as handle, _open_backup_zip(handle, budget.check) as archive:
         infos = archive.infolist()
-        if len(infos) > MAX_FILES + 2:
-            raise BackupError("备份归档条目数量超过上限")
         names, exact, total = set(), {}, 0
         for info in infos:
             budget.check()

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from flask import Blueprint, request, jsonify, Response, stream_with_context
 
-from core.database import get_all_jobs, get_job, clear_jobs_by_status
+from core.database import get_all_jobs, get_job
 import core.database as db
 from core.job_manager import job_manager
 from core.task_commands import TaskCommandError
@@ -162,6 +162,9 @@ def list_jobs():
     if 'view' in request.args:
         result['view'] = view
         result['books'] = download_folios.book_metadata(jobs)
+        download_folios.resolve_job_titles(jobs, result['books'])
+    else:
+        download_folios.resolve_job_titles(jobs)
     # 批量检查 CBZ 存在性（避免 N+1 文件系统扫描，利用 TTL 缓存）
     output_paths = list({j.get("output_path", "") for j in jobs if j.get("output_path")})
     cbz_map = {p: _check_cbz_path(p) for p in output_paths}
@@ -183,6 +186,7 @@ def get_single_job(job_id: str):
     job = get_job(job_id)
     if not job:
         return jsonify({"status": "error", "message": "任务不存在"}), 404
+    download_folios.resolve_job_titles([job])
     if isinstance(job.get("selected_photo_ids"), str):
         try:
             job["selected_photo_ids"] = json.loads(job["selected_photo_ids"])
@@ -391,7 +395,7 @@ def open_folder(job_id: str):
 @api_jobs_bp.post("/api/jobs/clear/completed")
 def clear_completed():
     """清空所有 completed 状态的任务记录(只删记录,不删文件)"""
-    deleted = clear_jobs_by_status("completed")
+    deleted = job_manager.clear_jobs("completed")
     log.info(f"API清空已完成任务 deleted={deleted}")
     return jsonify({"status": "ok", "deleted": deleted})
 
@@ -399,7 +403,7 @@ def clear_completed():
 @api_jobs_bp.post("/api/jobs/clear/failed")
 def clear_failed():
     """清空所有 failed 状态的任务记录"""
-    deleted = clear_jobs_by_status("failed")
+    deleted = job_manager.clear_jobs("failed")
     log.info(f"API清空失败任务 deleted={deleted}")
     return jsonify({"status": "ok", "deleted": deleted})
 
@@ -407,7 +411,7 @@ def clear_failed():
 @api_jobs_bp.post("/api/jobs/clear/canceled")
 def clear_canceled():
     """清空所有 canceled 状态的任务记录"""
-    deleted = clear_jobs_by_status("canceled")
+    deleted = job_manager.clear_jobs("canceled")
     log.info(f"API清空已取消任务 deleted={deleted}")
     return jsonify({"status": "ok", "deleted": deleted})
 
@@ -415,6 +419,6 @@ def clear_canceled():
 @api_jobs_bp.post("/api/jobs/clear/finished")
 def clear_finished():
     """清空所有已完成或已结束的记录(completed/failed/canceled), 保留 queued/running"""
-    deleted = clear_jobs_by_status(["completed", "failed", "canceled"])
+    deleted = job_manager.clear_jobs(["completed", "failed", "canceled"])
     log.info(f"API清空已结束任务 deleted={deleted}")
     return jsonify({"status": "ok", "deleted": deleted})

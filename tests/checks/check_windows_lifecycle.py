@@ -15,7 +15,7 @@ def main(argv=None):
     parser.add_argument("--executable", type=Path)
     args = parser.parse_args(argv)
     command = ([str(args.executable.resolve())] if args.executable else
-               [sys.executable, str(Path(__file__).resolve().parent.parent / "desktop.py")])
+               [sys.executable, str(Path(__file__).resolve().parents[2] / "desktop.py")])
     result = subprocess.run([*command, "lifecycle-check"], capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=150)
     try:
@@ -23,7 +23,12 @@ def main(argv=None):
     except (ValueError, IndexError):
         raise RuntimeError("生命周期自检没有返回JSON结果") from None
     print(json.dumps(report, ensure_ascii=True))
-    return 0 if result.returncode == 0 and report.get("status") == "ok" else 1
+    if not isinstance(report, dict):
+        return 1
+    exit_code = report.get("exit_code")
+    success = (result.returncode == 0 and report.get("status") == "ok"
+               and type(exit_code) is int and exit_code == 0)
+    return 0 if success else 1
 
 
 if __name__ == "__main__":

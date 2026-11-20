@@ -15,7 +15,7 @@ import sys
 import tempfile
 import zipfile
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 PATH_KEYS = ("JMCONSOLE_HOME", "JMCONSOLE_DOWNLOAD_DIR", "JMCONSOLE_CACHE_DIR", "JMCONSOLE_BACKUP_DIR")
 
@@ -101,7 +101,7 @@ def check(release, check_launcher=False, check_restore=False, check_vnext=False)
             verify_bundle_licenses(executable.parent, manifest['license_sha256'])
         publication = None
         if check_vnext:
-            result = subprocess.run([sys.executable, str(ROOT / 'tests/check_vnext_portable.py'), str(executable)],
+            result = subprocess.run([sys.executable, str(ROOT / 'tests/checks/check_vnext_portable.py'), str(executable)],
                                     check=True, stdout=subprocess.PIPE, timeout=200)
             publication = json.loads(result.stdout.splitlines()[-1])
             assert publication['status'] == 'ok' and publication['source_sha256'] == manifest['source_sha256']
@@ -176,8 +176,10 @@ def check(release, check_launcher=False, check_restore=False, check_vnext=False)
                                          encoding="utf-8", errors="replace", timeout=15)
                 assert process.returncode == 1, "busy mutex must stop the owned child"
                 log = (launch_home / "runtime/logs/launcher.log").read_text(encoding="utf-8")
-                assert "Another JMComic instance" in log
+                assert "程序或维护操作已在运行" in log, log
                 assert not (launch_home / "runtime/data/flask.json").exists()
+                assert not (launch_home / "runtime/data/app.db").exists()
+                assert not (launch_home / "runtime/logs/app.log").exists()
                 launcher_checked = True
             finally:
                 if lease is not None:

@@ -10,10 +10,12 @@ JMComic 命令行工具
 """
 
 import argparse
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+import sqlite3
 import uuid
-from jmcomic import JmMagicConstants
+from jmcomic import JmMagicConstants, JmcomicText
 from core import database as db, sdk_adapter
 from core.jm_service import close_client
 
@@ -59,10 +61,35 @@ def cmd_restore(args):
     return 0
 
 
-def get_client():
+def _read_only_settings():
+    from core.settings import merge_stored_settings
+
+    try:
+        if db.DB_PATH.stat().st_size == 0:
+            return merge_stored_settings(())
+    except FileNotFoundError:
+        return merge_stored_settings(())
+    uri = db.DB_PATH.resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        has_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'"
+        ).fetchone()
+        if not has_table:
+            return merge_stored_settings(())
+        rows = connection.execute("SELECT key, value FROM settings").fetchall()
+    return merge_stored_settings(rows)
+
+
+def get_client(*, read_only=True):
     """Use the same saved settings and construction policy as the Web application."""
-    db.init_db()
-    option = sdk_adapter.build_option()
+    if read_only:
+        from core.settings import build_jmcomic_option
+        option = sdk_adapter.build_option(build_jmcomic_option(_read_only_settings()))
+    else:
+        db.init_db()
+        option = sdk_adapter.build_option()
     client = sdk_adapter.cached_client(option)
     return client, option
 
@@ -126,7 +153,7 @@ def cmd_info(args):
 
 def cmd_download(args):
     """下载漫画"""
-    client, option = get_client()
+    client, option = get_client(read_only=False)
     try:
         print(f"📥 正在下载 {args.album_id} ...")
 
@@ -204,17 +231,26 @@ def cmd_browse(args):
 
 def cmd_batch(args):
     """批量下载多个漫画"""
-    ids = args.ids.split(",")
-    ids = list(dict.fromkeys(i.strip() for i in ids if i.strip()))
+    ids = list(dict.fromkeys(JmcomicText.parse_to_jm_id(value.strip())
+                             for value in args.ids.split(",") if value.strip()))
+    if not ids:
+        print("批量下载至少需要一个车号。")
+        return 1
 
     print(f"📥 批量下载 {len(ids)} 个漫画: {', '.join(ids)}")
 
     from jmcomic import download_batch, download_album
 
-    client, option = get_client()
+    client, option = get_client(read_only=False)
     try:
         results = download_batch(download_album, ids, option=option)
+        if results.failed or len(results) != len(ids):
+            print(f"\n批量下载未全部完成: {len(results)}/{len(ids)}")
+            if results.failed:
+                print(f"失败车号: {', '.join(results.failed)}")
+            return 1
         print(f"\n✅ 批量下载完成: {len(results)}/{len(ids)}")
+        return 0
     finally:
         close_client(client)
 
@@ -286,7 +322,7 @@ def main(argv=None):
         from core.instance_lock import maintenance_lock, InstanceBusyError
         try:
             with maintenance_lock():
-                {"download": cmd_download, "batch": cmd_batch}[args.command](args)
+                return {"download": cmd_download, "batch": cmd_batch}[args.command](args)
         except InstanceBusyError as error:
             print(f"操作未完成：{error}")
             return 1

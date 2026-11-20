@@ -29,7 +29,7 @@ from PIL import Image
 
 from check_vnext_portable import bundle_hashes, environment, identity, paths, request, require
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ALBUM = '810001'
 PHOTOS = ('810011', '810012')
 TITLE = '典藏 日本語 Atlas 📚 ' * 12

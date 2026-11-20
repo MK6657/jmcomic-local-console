@@ -101,7 +101,7 @@ def _skip(album_id, title, reason):
 
 
 def _preview(kind, items=(), skipped=(), review=(), out=None, more=0, window=None, ahead=0, max_running=1,
-             skip_existing=True, token="a" * 32):
+             skip_existing=True, token="a" * 32, skipped_total=None):
     items = list(items)
     if out is None:
         out = ({"changed": len(review)} if kind == "new_chapters" else {} if kind == "selected_favourites"
@@ -109,7 +109,8 @@ def _preview(kind, items=(), skipped=(), review=(), out=None, more=0, window=Non
     return {"status": "ok", "kind": kind, "token": token, "limit": 50, "items": items,
             "counts": {"albums": len(items),
                        "chapters": sum(len(i["photo_ids"]) for i in items) if kind == "new_chapters" else None},
-            "skipped": list(skipped), "more": more, "review": list(review), "out_of_scope": out,
+            "skipped": list(skipped), "skipped_total": len(skipped) if skipped_total is None else skipped_total,
+            "more": more, "review": list(review), "out_of_scope": out,
             "window": window or OFF, "queue": {"ahead": ahead, "max_running": max_running},
             "settings": {"skip_existing": skip_existing}}
 
@@ -469,6 +470,14 @@ def test_copy_per_kind():
     assert view["extra"] == ["设置里关闭了「跳过已存在的文件」：本地已有的页也会重新下载。",
                              "另有 5 部这次不下载（一次最多 50 部）；加入队列后可以再点一次。"]
     assert view["outside"] is None                          # nothing outside: no line at all
+
+
+def test_skipped_preview_shows_total_even_when_only_a_sample_is_listed():
+    kind = "new_chapters"
+    preview = _preview(kind, A1_ITEMS, skipped=A1_SKIPPED[:2], skipped_total=75)
+    view = _dialog([{"name": "sample", "steps": _opened(kind, preview)}])["sample"][1]
+    assert view["skippedTitle"] == "这些不会下载（75 部），列出前 2 部"
+    assert len(view["skipped"]) == 2 and view["confirm"]["disabled"] is False
 
 
 WINDOW_COPY = {

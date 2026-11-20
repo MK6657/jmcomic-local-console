@@ -82,6 +82,30 @@
       });
     }
 
+    // 最近下载 / 进行中任务缩略图加载失败时隐藏 img，回退到序号底纹
+    document.addEventListener('error', function (event) {
+      var image = event.target;
+      if (image.tagName === 'IMG' && image.closest('.desk-thumb')) image.hidden = true;
+    }, true);
+
+    // 轻量异步填充首页书阁概览数字（无额外后端接口，不阻塞首屏渲染）
+    var statReadable = document.getElementById('home-stat-readable');
+    if (statReadable && window.apiFetch) {
+      window.apiFetch('/api/library/stats', { timeoutMs: 8000, abortKey: 'home-stats' })
+        .then(function (data) {
+          if (!data || data.status !== 'ok') return;
+          var setText = function (id, val) {
+            var node = document.getElementById(id);
+            if (node && val !== undefined && val !== null) node.textContent = String(val);
+          };
+          setText('home-stat-readable', data.readable_count || 0);
+          setText('home-stat-wishlist', data.wishlist_count || 0);
+          setText('home-stat-downloaded', data.downloaded_count || 0);
+          setText('home-stat-tags', data.tag_count || 0);
+        })
+        .catch(function () { /* 静默忽略，保持占位符 */ });
+    }
+
     // 最近下载：打开文件夹
     document.addEventListener('click', function (event) {
       var btn = event.target.closest('button[data-action="open-folder"]');

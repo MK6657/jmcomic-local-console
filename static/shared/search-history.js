@@ -97,7 +97,7 @@
     const keyword = button.dataset.historyDelete;
     if (!confirm(keyword ? '确定删除这条搜索历史？' : '确定清空全部搜索历史？')) return;
     try {
-      await window.apiFetch(keyword ? endpoint + '/' + encodeURIComponent(keyword) : endpoint + '/clear', {
+      await window.apiFetch(keyword ? endpoint + '?keyword=' + encodeURIComponent(keyword) : endpoint + '/clear', {
         method: keyword ? 'DELETE' : 'POST', timeoutMs: 15000,
       });
       load();

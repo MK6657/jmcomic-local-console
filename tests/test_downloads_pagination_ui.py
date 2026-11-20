@@ -14,7 +14,8 @@ const list=document.getElementById('folio-list'),pager=document.getElementById('
 global.location={hash:'#all'};
 const summaries=[];document.addEventListener('atelier-jobs-summary',e=>summaries.push(e.detail));
 let poll=null;const calls=[],held=[],synced=[];
-global.setInterval=f=>{poll=f;return 1;};global.clearInterval=()=>{poll=null;};
+global.setTimeout=(fn,delay)=>{poll={fn,delay};return poll;};
+global.clearTimeout=timer=>{if(timer===poll)poll=null;};
 global.showToast=()=>{};global.confirm=()=>true;window._jobTitleMap={};
 window.setSSECallbacks=()=>{};window.disconnectAllSSE=()=>{};window.syncSSE=ids=>synced.push(ids);
 eval(fs.readFileSync(utilsPath,'utf8'));
@@ -39,13 +40,14 @@ function deliver(index){held[index].answer=answer(held[index].url);held[index].r
 function page(number){const button=pager.children.find(n=>n.getAttribute('data-page')===String(number));
  if(!button)throw Error('missing pager');(content.handlers.click||[]).forEach(f=>f({target:button}));}
 (async()=>{
- (docHandlers.DOMContentLoaded||[]).forEach(f=>f());deliver(0);await flush();
+ (docHandlers.DOMContentLoaded||[]).forEach(f=>f());
+ const initialPoll=poll;deliver(0);await flush();
  const initial={requests:calls.filter(c=>c.url.startsWith('/api/jobs?')).map(c=>c.url),runningCount:summaries[0].counts.running,
- sameResponse:summaries[0]===held[0].answer,html:list.innerHTML,synced:synced[0]};
+ sameResponse:summaries[0]===held[0].answer,html:list.innerHTML,synced:synced[0],initialPoll,pollDelay:poll.delay};
  tab('completed');deliver(1);await flush();page(2);deliver(2);await flush();
  const second={url:held[2].url,html:list.innerHTML,pager:pager.textContent};
- poll();tab('failed');deliver(4);await flush();const beforeLate=list.innerHTML;deliver(3);await flush();
- const afterLate={failed:list.innerHTML,unchanged:beforeLate===list.innerHTML&&!summaries.includes(held[3].answer)};
+ poll.fn();tab('failed');deliver(4);await flush();const beforeLate=list.innerHTML;const currentPoll=poll;deliver(3);await flush();
+ const afterLate={failed:list.innerHTML,unchanged:beforeLate===list.innerHTML&&!summaries.includes(held[3].answer)&&poll===currentPoll};
  tab('completed');deliver(5);await flush();
  const mutations=calls.filter(c=>c.method!=='GET'&&/\/api\/(jobs|albums)\//.test(c.url));
  const retry=el('button');retry.setAttribute('data-action','retry-maintenance');retry.setAttribute('data-album-id','123');content.appendChild(retry);
@@ -59,9 +61,11 @@ def test_downloads_page_counts_navigation_late_responses_and_read_only_polling()
     result = _node(SCRIPT, ROOT / "static/js/utils.js", ROOT / "static/js/downloads.js")
     assert result["initial"]["runningCount"] == 7 and result['initial']['sameResponse']
     assert result["initial"]["requests"] == ["/api/jobs?page=1&page_size=8&status=all&view=folios"]
+    assert result["initial"]["initialPoll"] is None and result["initial"]["pollDelay"] == 5000
     folio = result['initial']['html'].split('</article>')[0]
     assert 'data-job-id="A"' in folio and 'data-job-id="B"' in folio and 'data-job-id="run0"' not in folio
-    assert all(f'data-action="{action}"' in folio for action in ('resume','cancel','read-chapter','export-zip','export-pdf'))
+    assert all(f'data-action="{action}"' in folio for action in ('resume', 'cancel', 'read-chapter', 'export-selected'))
+    assert 'export-format-select' in folio and 'value="cbz"' in folio and 'value="zip"' in folio and 'value="pdf"' in folio
     assert 'data-job-id="run0"' in result['initial']['html'] and 'data-action="pause"' in result['initial']['html']
     assert len(result["initial"]["synced"]) == 5
     assert "page=2" in result["second"]["url"] and "status=completed" in result["second"]["url"]

@@ -6,10 +6,10 @@
 
 {% block content %}
 
-{% set chapters = [('palette','矿物色谱'), ('general','基础设置'), ('network','网络设置'), ('download','下载设置'), ('archive','下载后处理'), ('schedule','定时下载'), ('update-check','检查新章节'), ('interface','界面操作'), ('logs','日志与诊断')] %}
+{% set chapters = [('palette','主题与动效'), ('general','基础设置'), ('network','网络设置'), ('download','下载设置'), ('archive','下载后处理'), ('schedule','定时下载'), ('update-check','检查新章节'), ('interface','界面操作'), ('logs','日志与诊断')] %}
 <header class="pref-head">
-    <p class="pref-kicker" lang="en">Atelier Preferences &amp; Colophon</p>
-    <h1>偏好与矿物色谱</h1>
+    <p class="pref-kicker" lang="en">Studio Preferences &amp; Themes</p>
+    <h1>偏好与主题工坊</h1>
 </header>
 
 <div class="pref-layout">
@@ -21,15 +21,54 @@
 </nav>
 <div class="pref-pages">
 <section class="settings-section" id="palette" aria-labelledby="palette-heading">
-    <h2 id="palette-heading">矿物色谱</h2>
-    <p class="pref-note">选一组纸色与墨色。选定后即刻应用，重新打开书阁时沿用。</p>
-    <div id="pref-palettes" class="pref-palettes" role="group" aria-label="全站主题">
-        {% for key, title, subtitle in [('paper','宣纸','古籍暖米'), ('sage','青瓷','宋韵粉青'), ('linen','白麻','画册晨光'), ('night','玄墨','暗房夜读')] %}
-        <button type="button" class="pref-palette" data-pref-theme="{{ key }}" aria-pressed="{{ 'true' if key == ui_theme else 'false' }}">
-            <span class="pref-swatches" aria-hidden="true"><i></i><i></i><i></i></span>
-            <strong>{{ title }}</strong><span>{{ subtitle }}</span>
+    <div class="pref-section-head">
+        <h2 id="palette-heading">主题与动效工坊</h2>
+        <button type="button" id="pref-reset-appearance-btn" class="btn btn-outline-secondary btn-sm">
+            <i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i> 还原默认外观
         </button>
-        {% endfor %}
+    </div>
+    <p class="pref-note">内置 6 套清新护眼色谱与 3 套高辨识度个性风格，全部通过 WCAG AAA/AA 对比度校验；主题与动效可任意跨风格混搭并即刻持久化。</p>
+    <div id="pref-palettes" role="group" aria-label="全站主题">
+        <p class="pref-group-label">清新护眼 · 6 套</p>
+        <div class="pref-palettes">
+            {% for spec in ui_themes if spec.group == 'eyecare' %}
+            <button type="button" class="pref-palette" data-pref-theme="{{ spec.key }}" aria-pressed="{{ 'true' if spec.key == ui_theme else 'false' }}" data-theme-label="{{ spec.full_label }}">
+                <span class="pref-swatches" aria-hidden="true"><i></i><i></i><i></i></span>
+                <strong>{{ spec.title }}</strong><span>{{ spec.subtitle }}</span>
+            </button>
+            {% endfor %}
+        </div>
+        <p class="pref-group-label">个性风格 · 3 套（像素 / 科技 / 二次元）</p>
+        <div class="pref-palettes">
+            {% for spec in ui_themes if spec.group == 'style' %}
+            <button type="button" class="pref-palette" data-pref-theme="{{ spec.key }}" aria-pressed="{{ 'true' if spec.key == ui_theme else 'false' }}" data-theme-label="{{ spec.full_label }}">
+                <span class="pref-swatches" aria-hidden="true"><i></i><i></i><i></i></span>
+                <strong>{{ spec.title }}</strong><span>{{ spec.subtitle }}</span>
+            </button>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="pref-fx-box" aria-labelledby="fx-studio-heading">
+        <div class="pref-fx-bar">
+            <div class="form-check form-switch m-0">
+                <input type="checkbox" id="ui-fx-enabled-toggle" class="form-check-input" role="switch"
+                       {% if ui_fx_enabled %}checked{% endif %}>
+                <label class="form-check-label" for="ui-fx-enabled-toggle" id="fx-studio-heading">
+                    <strong>开启界面过渡与点击特效</strong>
+                </label>
+            </div>
+            <span class="pref-fx-combo" id="pref-fx-combo" role="status" aria-live="polite">当前搭配加载中…</span>
+        </div>
+        <p class="pref-note mb-2">特效与主题完全解耦，你可以自由混搭（例如：二次元主题配科技终端特效，或青岚护眼配樱风动效）；关闭总开关可零延迟切回静止模式。</p>
+        <div id="pref-fx-presets" class="pref-fx-grid{% if not ui_fx_enabled %} is-fx-off{% endif %}" role="group" aria-label="特效风格搭配">
+            {% for fx in ui_fx_presets %}
+            <button type="button" class="pref-fx-card" data-pref-fx="{{ fx.key }}" data-fx-label="{{ fx.title }}" aria-pressed="{{ 'true' if fx.key == ui_fx_preset else 'false' }}">
+                <span class="pref-fx-card-head"><i class="bi {{ fx.icon }}" aria-hidden="true"></i><strong>{{ fx.title }}</strong></span>
+                <span>{{ fx.subtitle }}</span>
+            </button>
+            {% endfor %}
+        </div>
     </div>
 </section>
 
@@ -41,7 +80,7 @@
     <section class="settings-section" id="general">
         <h2>基础设置</h2>
         <div class="row g-3">
-            <div class="col-12" data-setting-key="download_root">
+            <div class="col-12 col-lg-9" data-setting-key="download_root">
                 <label for="download_root" class="form-label">下载目录</label>
                 <div class="input-group">
                     <input type="text" id="download_root" name="download_root"
@@ -65,7 +104,7 @@
     <section class="settings-section" id="network">
         <h2>网络设置</h2>
         <div class="row g-3">
-            <div class="col-12 col-md-6" data-setting-key="proxy">
+            <div class="col-12 col-md-7" data-setting-key="proxy">
                 <label for="proxy" class="form-label">代理地址</label>
                 <div class="input-group has-validation">
                     <input type="password" id="proxy" name="proxy" class="form-control"
@@ -75,29 +114,29 @@
                 </div>
                 <div class="form-text" id="proxy-help">支持 HTTP(S) 和 SOCKS5。清空并保存即可恢复直连；日志会隐藏认证信息。</div>
             </div>
-            <div class="col-6 col-md-3" data-setting-key="timeout">
-                <label for="timeout" class="form-label">超时（秒）</label>
-                <input type="number" id="timeout" name="timeout" class="form-control"
-                       min="5" max="120" value="{{ settings.timeout or 30 }}">
-                <div class="form-text">建议范围：<strong>10-60</strong> 秒。网络较差时可适当调高。同时限制在线阅读每一页的加载时间（至少 15 秒）</div>
-                <div class="invalid-feedback"></div>
-            </div>
-            <div class="col-6 col-md-3" data-setting-key="retry_times">
-                <label for="retry_times" class="form-label">重试次数</label>
-                <input type="number" id="retry_times" name="retry_times" class="form-control"
-                       min="0" max="20" value="{{ settings.retry_times|default(2) }}">
-                <div class="form-text">建议范围：<strong>1-5</strong> 次。设为 0 表示不重试</div>
-                <div class="invalid-feedback"></div>
-            </div>
-            <div class="col-12 col-md-6" data-setting-key="client_type">
+            <div class="col-12 col-md-5" data-setting-key="client_type">
                 <label for="client_type" class="form-label">客户端类型</label>
                 <select id="client_type" name="client_type" class="form-select">
+                    <option value="api"  {% if settings.client_type == 'api' %}selected{% endif %}>API（接口端 · 推荐）</option>
                     <option value="html" {% if settings.client_type == 'html' %}selected{% endif %}>HTML（网页端）</option>
-                    <option value="api"  {% if settings.client_type == 'api' %}selected{% endif %}>API（接口端）</option>
                 </select>
                 <div class="form-text">
                     两种客户端各自使用对应的上游域名。
                 </div>
+            </div>
+            <div class="col-6 col-sm-4" data-setting-key="timeout">
+                <label for="timeout" class="form-label">超时（秒）</label>
+                <input type="number" id="timeout" name="timeout" class="form-control"
+                       min="5" max="120" value="{{ settings.timeout or 30 }}">
+                <div class="form-text">建议 <strong>10-60</strong> 秒；同时限制在线阅读单页加载（至少 15 秒）。</div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="col-6 col-sm-4" data-setting-key="retry_times">
+                <label for="retry_times" class="form-label">重试次数</label>
+                <input type="number" id="retry_times" name="retry_times" class="form-control"
+                       min="0" max="20" value="{{ settings.retry_times|default(2) }}">
+                <div class="form-text">建议 <strong>1-5</strong> 次；设为 0 表示不重试。</div>
+                <div class="invalid-feedback"></div>
             </div>
         </div>
     </section>
@@ -106,39 +145,42 @@
     <section class="settings-section" id="download">
         <h2>下载设置</h2>
         <div class="row g-3">
-            <div class="col-12 col-md-6" data-setting-key="max_running_jobs">
+            <div class="col-12 col-sm-4" data-setting-key="max_running_jobs">
                 <label for="max_running_jobs" class="form-label">最大同时任务数</label>
                 <input type="number" id="max_running_jobs" name="max_running_jobs"
                        class="form-control" min="1" max="5"
                        value="{{ settings.max_running_jobs or 1 }}">
                 <div class="form-text">
-                    建议范围：<strong>1-3</strong>。<br>
-                    <span class="text-warning"><i class="bi bi-exclamation-triangle"></i> 建议保持为 1，避免触发风控</span>
+                    范围 <strong>1-5</strong>；<span class="text-warning"><i class="bi bi-exclamation-triangle"></i> 建议保持为 1，避免风控</span>
                 </div>
                 <div class="invalid-feedback"></div>
             </div>
-            <div class="col-6 col-md-3" data-setting-key="image_threads">
+            <div class="col-6 col-sm-4" data-setting-key="image_threads">
                 <label for="image_threads" class="form-label">图片并发数</label>
                 <input type="number" id="image_threads" name="image_threads"
                        class="form-control" min="1" max="50"
                        value="{{ settings.image_threads or 20 }}">
-                <div class="form-text">所有下载任务和章节共用这个上限；在线阅读单独计数。</div>
+                <div class="form-text">所有下载任务共用上限；在线阅读单独计数。</div>
                 <div class="invalid-feedback"></div>
             </div>
-            <div class="col-6 col-md-3" data-setting-key="photo_threads">
+            <div class="col-6 col-sm-4" data-setting-key="photo_threads">
                 <label for="photo_threads" class="form-label">章节并发数</label>
                 <input type="number" id="photo_threads" name="photo_threads"
                        class="form-control" min="1" max="10"
                        value="{{ settings.photo_threads or 1 }}">
-                <div class="form-text">同时下载的章节数量，建议保持为 1</div>
+                <div class="form-text">同时下载的章节数，建议保持为 1。</div>
                 <div class="invalid-feedback"></div>
             </div>
-            <div class="col-12 col-md-6">
-                <label class="form-label">图片格式</label>
-                <input type="text" class="form-control" value="WebP" readonly>
-                <div class="form-text">第一版统一保存为 WebP 格式</div>
+            <div class="col-12 col-md-5" data-setting-key="image_format">
+                <label for="image_format" class="form-label">图片保存格式</label>
+                <select id="image_format" name="image_format" class="form-select">
+                    <option value="webp" {% if (settings.image_format or 'webp') == 'webp' %}selected{% endif %}>WebP（推荐 · 体积小画质高）</option>
+                    <option value="jpg"  {% if settings.image_format == 'jpg' %}selected{% endif %}>JPG（通用兼容 · 传统阅读器友好）</option>
+                    <option value="png"  {% if settings.image_format == 'png' %}selected{% endif %}>PNG（无损原图 · 体积较大）</option>
+                </select>
+                <div class="form-text">新下载漫画页将按所选格式保存；多帧动图自动保留为动画 WebP 以防丢帧。</div>
             </div>
-            <div class="col-12 col-md-6" data-setting-key="organize_mode">
+            <div class="col-12 col-md-7" data-setting-key="organize_mode">
                 <label for="organize_mode" class="form-label">下载后自动整理目录</label>
                 <select id="organize_mode" name="organize_mode" class="form-select">
                     <option value="none" {% if settings.organize_mode == 'none' %}selected{% endif %}>不整理（保持现有结构）</option>
@@ -146,10 +188,9 @@
                     <option value="flat" {% if settings.organize_mode == 'flat' %}selected{% endif %}>扁平化（去掉章节子目录）</option>
                 </select>
                 <div class="form-text">
-                    下载完成后自动调整目录结构。<br>
-                    <strong>不整理：</strong>保持 <code>downloads/漫画名/章节/图片</code> 结构；<br>
-                    <strong>按作者整理：</strong>重组为 <code>downloads/作者名/漫画名/章节/图片</code>；<br>
-                    <strong>扁平化：</strong>按章节和页号命名。重下同一页时复用相同内容，遇到不同版本则分别保留。
+                    <strong>不整理：</strong><code>downloads/漫画名/章节/图片</code>；
+                    <strong>按作者：</strong><code>downloads/作者名/漫画名/章节/图片</code>；
+                    <strong>扁平化：</strong>按章节和页号命名，重下同页自动复用。
                 </div>
             </div>
         </div>
@@ -160,24 +201,39 @@
         <h2>下载后处理</h2>
         <div class="row g-3">
             <div class="col-12" data-setting-key="auto_pack">
-                <div class="form-text mb-3">下载完成后自动将漫画打包为 .cbz 格式</div>
-                <div class="form-check form-switch mb-3">
+                <div class="form-check form-switch">
                     <input type="checkbox" id="auto_pack" name="auto_pack"
                            class="form-check-input" role="switch" value="true"
                            {% if settings.auto_pack == 'true' %}checked{% endif %}>
                     <label class="form-check-label" for="auto_pack">
-                        <strong>自动打包 CBZ</strong>
+                        <strong>下载完成后自动打包漫画压缩包</strong>
                     </label>
                 </div>
-                <div class="form-check form-switch ms-4" id="delete_originals_wrapper" data-setting-key="delete_originals">
-                    <input type="checkbox" id="delete_originals" name="delete_originals"
-                           class="form-check-input" role="switch" value="true"
-                           {% if settings.delete_originals == 'true' %}checked{% endif %}
-                           {% if settings.auto_pack != 'true' %}disabled{% endif %}>
-                    <label class="form-check-label" for="delete_originals">
-                        打包后删除原文件
-                    </label>
-                    <div class="form-text text-muted small">仅在自动打包开启时可配置</div>
+                <div class="form-text mt-1">自动采用零重压缩直存（ZIP_STORED）封装整本图片，低 CPU 开销且外部 CBZ 漫画阅读器翻页零卡顿。</div>
+            </div>
+            <div class="col-12">
+                <div class="pref-subpanel row g-3 align-items-start" id="pack-options-panel">
+                    <div class="col-12 col-sm-6 col-md-5" data-setting-key="pack_format">
+                        <label for="pack_format" class="form-label">自动打包格式</label>
+                        <select id="pack_format" name="pack_format" class="form-select"
+                                {% if settings.auto_pack != 'true' %}disabled{% endif %}>
+                            <option value="cbz" {% if (settings.pack_format or 'cbz') == 'cbz' %}selected{% endif %}>CBZ（推荐 · 漫画阅读器直读）</option>
+                            <option value="zip" {% if settings.pack_format == 'zip' %}selected{% endif %}>ZIP（通用压缩归档）</option>
+                        </select>
+                        <div class="form-text">仅在自动打包开启时可配置</div>
+                    </div>
+                    <div class="col-12 col-sm-6 col-md-7 pt-sm-4" id="delete_originals_wrapper" data-setting-key="delete_originals">
+                        <div class="form-check form-switch">
+                            <input type="checkbox" id="delete_originals" name="delete_originals"
+                                   class="form-check-input" role="switch" value="true"
+                                   {% if settings.delete_originals == 'true' %}checked{% endif %}
+                                   {% if settings.auto_pack != 'true' %}disabled{% endif %}>
+                            <label class="form-check-label" for="delete_originals">
+                                打包后删除原文件
+                            </label>
+                        </div>
+                        <div class="form-text text-muted small">仅在自动打包开启时可配置；删除后本地仍可直接从 CBZ / ZIP 阅读。</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -201,7 +257,7 @@
                     未启用时，queued 任务会立即自动开始下载（现有行为）。
                 </div>
             </div>
-            <div class="col-6 col-md-3" data-setting-key="schedule_start">
+            <div class="col-6 col-sm-4" data-setting-key="schedule_start">
                 <label for="schedule_start" class="form-label">开始时间（时）</label>
                 <select id="schedule_start" name="schedule_start" class="form-select">
                     {% for h in range(24) %}
@@ -211,7 +267,7 @@
                 <div class="form-text">下载窗口的起始小时（24小时制）</div>
                 <div class="invalid-feedback"></div>
             </div>
-            <div class="col-6 col-md-3" data-setting-key="schedule_end">
+            <div class="col-6 col-sm-4" data-setting-key="schedule_end">
                 <label for="schedule_end" class="form-label">结束时间（时）</label>
                 <select id="schedule_end" name="schedule_end" class="form-select">
                     {% for h in range(24) %}
@@ -279,16 +335,19 @@
     </section>
 
     <!-- ===== 操作按钮 ===== -->
-    <p class="pref-note">保存只更新修改过的设置。导出文件不包含代理地址。</p>
-    <div class="d-grid gap-2 d-md-flex flex-wrap mb-4">
-        <button type="button" id="export-settings-btn" class="btn btn-outline-secondary btn-lg px-4">
+    <p class="pref-note">保存只更新修改过的设置。导出文件不包含代理地址；「还原默认配置」可将全部参数与外观恢复为出厂默认值。</p>
+    <div class="pref-actions mb-4">
+        <button type="button" id="export-settings-btn" class="btn btn-outline-secondary px-3">
             <i class="bi bi-download"></i> 导出设置
         </button>
-        <button type="button" id="import-settings-btn" class="btn btn-outline-info btn-lg px-4">
+        <button type="button" id="import-settings-btn" class="btn btn-outline-info px-3">
             <i class="bi bi-upload"></i> 导入设置
         </button>
+        <button type="button" id="settings-reset-btn" class="btn btn-outline-danger px-3">
+            <i class="bi bi-arrow-counterclockwise"></i> 还原默认配置
+        </button>
         <input type="file" id="import-settings-file" accept=".json,application/json" style="display:none">
-        <button type="button" id="save-settings-btn" class="btn btn-primary btn-lg px-5">
+        <button type="button" id="save-settings-btn" class="btn btn-primary px-4 ms-md-auto">
             <i class="bi bi-floppy"></i> 保存设置
         </button>
     </div>

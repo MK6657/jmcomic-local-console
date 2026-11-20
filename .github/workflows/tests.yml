@@ -59,7 +59,7 @@ jobs:
         run: |
           node --version
           status=0
-          for file in static/js/*.js static/classic/js/*.js static/atelier-ui/*.js; do
+          for file in static/js/*.js static/classic/js/*.js static/atelier-ui/*.js static/shared/*.js; do
             if ! node --check "$file"; then
               echo "::error file=$file::node --check failed"
               status=1
@@ -67,9 +67,7 @@ jobs:
           done
           exit $status
 
-      - name: Rebuild local Vue assets and verify the shipped files
+      - name: Verify lightweight zero-dependency atelier-ui bundle
         run: |
-          cd frontend
-          npm ci --no-audit --no-fund
-          npm run build
-          git diff --exit-code -- ../static/atelier-ui
+          python -c "from pathlib import Path; b = Path('static/atelier-ui/transfer.js').read_bytes(); assert len(b) < 4096, len(b)"
+          node --check static/atelier-ui/transfer.js

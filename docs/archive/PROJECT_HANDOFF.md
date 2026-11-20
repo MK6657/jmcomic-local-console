@@ -22,9 +22,9 @@
 | 原审计交付版 | `e4a6057`，审计修复增量从此之后查看 |
 | 完整重构差异 | `c310e3f..72783a2` |
 | 四批审计修复差异 | `e4a6057..72783a2` |
-| 本机开发目录 | `C:\Users\ggy\.codex\worktrees\windows-backend-refactor\jmcomic-local-console` |
+| 本机开发目录 | `<worktree-dir>` |
 
-文档交接提交可能晚于`72783a2`，不表示产品代码又发生变化。克隆后记录自己的完整HEAD与工作区状态；若后续出现产品修复，以实际差异为准。`main`仍保留原版本，日常实例`D:\jmcomic-local-console`不是待审工作区。
+文档交接提交可能晚于`72783a2`，不表示产品代码又发生变化。克隆后记录自己的完整HEAD与工作区状态；若后续出现产品修复，以实际差异为准。`main`仍保留原版本，日常实例`<daily-instance-dir>`不是待审工作区。
 
 ```powershell
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review

@@ -23,7 +23,7 @@ import core.path_utils as paths
 paths.get_app_root = lambda: Path(sys.argv[1])
 import app
 app._MUTEX_NAME = 'Local\\\\JMComic_StartupCheck_' + str(os.getpid())
-app.main()
+raise SystemExit(app.main())
 """
 
 
@@ -56,13 +56,14 @@ def check_case(occupied):
                     proc.jm_launch_token = token
                     try:
                         port = launcher.wait_until_ready(proc)
-                        assert launcher.get_running_port(expected_token=token) == port
+                        verified = launcher.get_running_server(expected_token=token)
+                        assert verified is not None and verified[0] == port
                         if occupied:
                             assert port in (5001, 5002, 5003)
                             assert holder.getsockname()[1] == 5000
-                        print(f"PASS {'fallback' if occupied else 'startup'}: verified port {port}, PID {proc.pid}")
                     finally:
                         launcher.cleanup(proc)
+                    print(f"PASS {'fallback' if occupied else 'startup'}: verified port {port}, PID {verified[1]['pid']}")
     finally:
         if holder is not None:
             holder.close()

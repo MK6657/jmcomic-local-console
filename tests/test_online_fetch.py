@@ -223,7 +223,7 @@ def test_page_that_needs_no_descrambling_keeps_the_upstream_bytes(env, monkeypat
         raise AssertionError("the page was re-encoded")
     monkeypatch.setattr(Image.Image, "save", no_encoding)
     assert _read(env, photo_id, 0) == payload
-    path = env.reader.CACHE_ROOT / photo_id / "00001.webp"
+    path = env.reader._page_path(photo_id, 0)
     assert env.reader.image_mime(path) == f"image/{fmt.lower()}"
     assert [p.name for p in path.parent.iterdir()] == ["00001.webp"]
 
@@ -262,7 +262,7 @@ def test_scrambled_page_is_restored_like_jmcomic_and_stored_as_jpeg(env, tmp_pat
         num = JmImageTool.get_num_by_url(220980, url.split("?")[0])
         assert env.reader._scramble_num(photo[index], url) == num
         nums.append(num)
-        stored = env.reader.CACHE_ROOT / "300000" / f"{index + 1:05d}.webp"
+        stored = env.reader._page_path("300000", index)
         env.reader.image_file("300000", index)
         assert env.reader.image_mime(stored) == "image/jpeg"
         expected_path = tmp_path / f"expected-{index}.png"
@@ -288,7 +288,7 @@ def test_truncated_upstream_image_is_not_cached(env):
     with pytest.raises(UpstreamFailure) as caught:
         env.reader.image_file("100001", 0)
     assert caught.value.kind == "invalid_response"
-    assert not (env.reader.CACHE_ROOT / "100001").exists()
+    assert not env.reader._page_path("100001", 0).parent.exists()
 
 
 # ── host fallback ──────────────────────────────────────
@@ -559,7 +559,7 @@ def test_concurrent_fetches_never_share_a_client(env):
 # ── prefetch ───────────────────────────────────────────
 
 def _cached(env, photo_id, index):
-    return (env.reader.CACHE_ROOT / photo_id / f"{index + 1:05d}.webp").is_file()
+    return env.reader._page_path(photo_id, index).is_file()
 
 
 def test_prefetch_fetches_the_next_pages_once_with_at_most_two_at_a_time(env, monkeypatch):
@@ -674,7 +674,7 @@ def test_clear_cache_stops_prefetch_and_closes_clients(env, monkeypatch):
     finally:
         release.set()
     assert wait_until(lambda: not env.reader._prefetch_active)
-    assert not env.reader.CACHE_ROOT.exists() or not any(env.reader.CACHE_ROOT.rglob("*.*"))
+    assert not any(env.reader.CACHE_ROOT.rglob("*.webp"))
     assert len(env.cdn.urls()) == 3  # pages 4 and 5 were still queued: never fetched
     assert sorted(map(id, env.closed)) == sorted(map(id, env.created))  # in-flight clients closed on return
     assert env.reader._idle_clients == []
@@ -695,7 +695,7 @@ def test_failed_prefetch_leaves_no_files(env, monkeypatch):
     monkeypatch.setattr(os, "replace", refuse)
     _read(env, "100013", 2)  # prefetches page 4, whose write fails
     assert wait_until(lambda: len(env.cdn.urls()) == 4 and not env.reader._prefetch_active)
-    names = sorted(p.name for p in (env.reader.CACHE_ROOT / "100013").iterdir())
+    names = sorted(p.name for p in env.reader._page_path("100013", 0).parent.iterdir())
     assert names == ["00001.webp", "00002.webp", "00003.webp"]
 
 
@@ -705,7 +705,7 @@ def test_prefetch_waits_while_every_image_host_is_failing(env, monkeypatch):
     with pytest.raises(UpstreamFailure) as caught:
         env.reader.image_file("100014", 0)
     assert caught.value.kind == "connection"
-    folder = env.reader.CACHE_ROOT / "100014"
+    folder = env.reader._page_path("100014", 1).parent
     folder.mkdir(parents=True)
     (folder / "00002.webp").write_bytes(page_bytes("https://x/media/photos/100014/00002.webp"))
     env.cdn.calls.clear()
@@ -719,9 +719,9 @@ def test_prefetch_waits_while_every_image_host_is_failing(env, monkeypatch):
 
 def _cache_page(env, photo_id, index):
     """A page already on disk, e.g. read before the server restarted."""
-    folder = env.reader.CACHE_ROOT / photo_id
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"{index + 1:05d}.webp").write_bytes(page_bytes(f"https://x/media/photos/{photo_id}/{index + 1:05d}.webp"))
+    page = env.reader._page_path(photo_id, index)
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_bytes(page_bytes(f"https://x/media/photos/{photo_id}/{index + 1:05d}.webp"))
 
 
 def test_requests_for_an_unknown_chapter_share_one_lookup_and_prefetch_never_looks_up(env, monkeypatch):

@@ -19,8 +19,8 @@ global.EventSource = class extends EventTarget {
 global.setTimeout = callback => { const id = Symbol(); timers.set(id, callback); return id; };
 global.clearTimeout = id => timers.delete(id);
 global.showToast = () => {};
-require(path.join(__dirname, '../static/js/sse-client.js'));
-require(path.join(__dirname, '../static/js/home.js'));
+require(path.join(__dirname, '../../static/js/sse-client.js'));
+require(path.join(__dirname, '../../static/js/home.js'));
 
 document.dispatchEvent(new Event('DOMContentLoaded'));
 assert.equal(sources[0].url, '/api/jobs/book/events');

@@ -304,7 +304,7 @@ def entry(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "background_services", ())
     monkeypatch.setattr(app, "start_log_maintenance", lambda: events.append("maintenance"))
     monkeypatch.setattr(app, "shutdown_logging", lambda: events.append("shutdown_logging"))
-    monkeypatch.setattr(app, "_acquire_lock", lambda: events.append("lock"))
+    monkeypatch.setattr(app, "_acquire_lock", lambda lease: events.append("lock"))
     marker = tmp_path / "flask.json"
     monkeypatch.setattr(app, "_PORT_FILE", marker)
     def release(*, keep_process_lock=False):

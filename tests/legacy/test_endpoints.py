@@ -2,6 +2,7 @@
 端到端测试脚本 —— 测试所有 API 和页面路由（v2）
 """
 import json
+from pathlib import Path
 import sys
 import requests
 
@@ -258,7 +259,8 @@ if errors:
         print(f"  - {e}")
 
 # 确认 app.py 中使用 host="127.0.0.1"
-with open("D:/Hermes/禁漫下载搜索插件/app.py", "r", encoding="utf-8") as f:
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+with open(_PROJECT_ROOT / "app.py", "r", encoding="utf-8") as f:
     content = f.read()
 if 'host="127.0.0.1"' in content:
     print("\n✅ app.py 中 host=\"127.0.0.1\" 确认")
@@ -268,7 +270,7 @@ else:
 
 # 检查 launcher.py 中是否也使用 host="127.0.0.1"
 try:
-    with open("D:/Hermes/禁漫下载搜索插件/launcher.py", "r", encoding="utf-8") as f:
+    with open(_PROJECT_ROOT / "launcher.py", "r", encoding="utf-8") as f:
         launcher_content = f.read()
     if 'host="127.0.0.1"' in launcher_content:
         print("✅ launcher.py 中 host=\"127.0.0.1\" 确认")

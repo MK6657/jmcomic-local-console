@@ -1,7 +1,9 @@
 """Shared SDK/CLI construction contracts. All transports are blocked offline."""
+from contextlib import closing, nullcontext
 from copy import deepcopy
 import logging
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -152,25 +154,98 @@ def test_cli_and_web_use_matching_saved_settings(client, impl):
         _close(command)
 
 
-def test_cli_initializes_a_fresh_database_before_reading_settings(tmp_path, monkeypatch):
+@pytest.mark.parametrize("existing", ["missing", "empty"])
+def test_cli_reads_default_settings_without_creating_or_initializing_database(tmp_path, monkeypatch, existing):
     import jmcomic_cli as cli
     from core import database as db, settings
-    monkeypatch.setattr(db, "DB_DIR", tmp_path)
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "fresh.db")
-    settings.invalidate_settings_cache()
-    assert not db.DB_PATH.exists()
+    folder = tmp_path / "empty-instance"
+    monkeypatch.setattr(db, "DB_DIR", folder)
+    monkeypatch.setattr(db, "DB_PATH", folder / "fresh.db")
+    if existing == "empty":
+        folder.mkdir()
+        db.DB_PATH.touch()
+    monkeypatch.setattr(db, "init_db", Mock(side_effect=AssertionError("must not initialize a database")))
     instance, _ = cli.get_client()
     try:
-        assert db.DB_PATH.exists()
         assert instance.client_key == settings.DEFAULT_SETTINGS["client_type"]
-        conn = db.get_db()
-        try:
-            assert conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0] == 0
-        finally:
-            conn.close()
+        if existing == "empty":
+            assert list(folder.iterdir()) == [db.DB_PATH] and not db.DB_PATH.stat().st_size
+        else:
+            assert not folder.exists()
     finally:
         _close(instance)
-        settings.invalidate_settings_cache()
+
+
+def test_cli_read_only_snapshot_includes_committed_wal_settings(tmp_path, monkeypatch):
+    import jmcomic_cli as cli
+    from core import database as db, instance_lock
+
+    database = tmp_path / "settings # 日常.db"
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "init_db", Mock(side_effect=AssertionError("must not migrate or backfill")))
+    monkeypatch.setattr(instance_lock, "maintenance_lock", Mock(side_effect=instance_lock.InstanceBusyError("busy")))
+    with closing(sqlite3.connect(database)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        writer.execute("INSERT INTO settings VALUES ('timeout', '47')")
+        writer.commit()
+        initial = database.read_bytes()
+        wal = database.with_name(f"{database.name}-wal")
+        initial_wal = wal.read_bytes()
+        instance, _ = cli.get_client()
+        try:
+            assert instance.get_meta_data("timeout") == 47
+        finally:
+            _close(instance)
+        assert database.read_bytes() == initial and wal.read_bytes() == initial_wal
+    db.init_db.assert_not_called()
+    instance_lock.maintenance_lock.assert_not_called()
+
+
+def test_cli_read_only_settings_handles_missing_table_and_invalid_values(tmp_path, monkeypatch):
+    import jmcomic_cli as cli
+    from core import database as db, settings
+
+    monkeypatch.setattr(db, "init_db", Mock(side_effect=AssertionError("must not initialize a database")))
+
+    no_table = tmp_path / "no-settings-table.db"
+    with closing(sqlite3.connect(no_table)) as conn:
+        conn.execute("CREATE TABLE other (x TEXT)")
+        conn.commit()
+    monkeypatch.setattr(db, "DB_PATH", no_table)
+    instance, _ = cli.get_client()
+    try:
+        assert instance.get_meta_data("timeout") == int(settings.DEFAULT_SETTINGS["timeout"])
+    finally:
+        _close(instance)
+
+    dirty = tmp_path / "dirty-settings.db"
+    with closing(sqlite3.connect(dirty)) as conn:
+        conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany(
+            "INSERT INTO settings VALUES (?, ?)",
+            [
+                ("timeout", ""),
+                ("retry_times", "abc"),
+                ("image_format", "invalid_fmt"),
+                ("pack_format", "rar"),
+                ("download_root", str(tmp_path / "hijacked")),
+            ],
+        )
+        conn.commit()
+    monkeypatch.setattr(db, "DB_PATH", dirty)
+    loaded = cli._read_only_settings()
+    assert loaded["image_format"] == "webp"
+    assert loaded["pack_format"] == "cbz"
+    assert loaded["download_root"] == str(settings.DOWNLOAD_ROOT)
+    instance, option = cli.get_client()
+    try:
+        assert instance.get_meta_data("timeout") == int(settings.DEFAULT_SETTINGS["timeout"])
+        assert instance.retry_times == int(settings.DEFAULT_SETTINGS["retry_times"])
+        assert option.dir_rule.base_dir == str(settings.DOWNLOAD_ROOT)
+    finally:
+        _close(instance)
 
 
 @pytest.mark.parametrize("command", ["search", "info", "browse", "download", "batch"])
@@ -178,7 +253,8 @@ def test_cli_commands_share_one_explicit_option_and_close_the_client(client, mon
     import jmcomic
     import jmcomic_cli as cli
     instance, option = Mock(), SimpleNamespace(dir_rule=SimpleNamespace())
-    monkeypatch.setattr(cli, "get_client", lambda: (instance, option))
+    get_client = Mock(return_value=(instance, option))
+    monkeypatch.setattr(cli, "get_client", get_client)
     close = Mock()
     monkeypatch.setattr(cli, "close_client", close)
     instance.search.return_value = SimpleNamespace(content=[], total=0)
@@ -191,13 +267,17 @@ def test_cli_commands_share_one_explicit_option_and_close_the_client(client, mon
     album = Album()
     instance.get_album_detail.return_value = album
     download = Mock(return_value=(album, SimpleNamespace(all_success=True, download_failed_image=[], option=option)))
-    batch = Mock(return_value=[])
+    batch = Mock(return_value=jmcomic.BatchResult())
     monkeypatch.setattr(jmcomic, "download_album", download)
     monkeypatch.setattr(jmcomic, "download_batch", batch)
     args = SimpleNamespace(keyword="fixture", page=1, album_id="123", show_chapters=False,
                            category="all", order="latest", time="all", ids="123,456,123")
     getattr(cli, f"cmd_{command}")(args)
     close.assert_called_once_with(instance)
+    if command in {"batch", "download"}:
+        get_client.assert_called_once_with(read_only=False)
+    else:
+        get_client.assert_called_once_with()
     if command == "download":
         download.assert_called_once_with("123", option=option)
     elif command == "batch":
@@ -205,3 +285,44 @@ def test_cli_commands_share_one_explicit_option_and_close_the_client(client, mon
     else:
         download.assert_not_called()
         batch.assert_not_called()
+
+
+@pytest.mark.parametrize("dispatch", ["source", "portable"])
+@pytest.mark.parametrize("succeeds,expected", [(2, 0), (1, 1), (0, 1), (None, 1)])
+def test_batch_exit_codes_with_real_sdk_scheduler(monkeypatch, capsys, dispatch, succeeds, expected):
+    import desktop
+    import jmcomic
+    import jmcomic_cli as cli
+    from core import instance_lock
+
+    option, instance = object(), object()
+    acquire = Mock(return_value=(instance, option))
+    close = Mock()
+    monkeypatch.setattr(cli, "get_client", acquire)
+    monkeypatch.setattr(cli, "close_client", close)
+    monkeypatch.setattr(instance_lock, "maintenance_lock", nullcontext)
+
+    def download(album_id, passed, downloader):
+        assert passed is option
+        if int(album_id) > succeeds:
+            raise OSError("synthetic failure")
+        return jmcomic.DownloadResult(SimpleNamespace(id=album_id), None)
+
+    batch_item = Mock(side_effect=download)
+    monkeypatch.setattr(jmcomic, "download_album", batch_item)
+    arguments = ["batch", " , , " if succeeds is None else " JM1,2,1 "]
+    result = cli.main(arguments) if dispatch == "source" else desktop.main(["cli", *arguments])
+    assert result == expected
+    output = capsys.readouterr().out
+    if succeeds is None:
+        assert "至少需要一个车号" in output
+        acquire.assert_not_called()
+        batch_item.assert_not_called()
+        close.assert_not_called()
+    else:
+        assert f"{succeeds}/2" in output
+        assert ("失败车号" in output) == (succeeds != 2)
+        assert {call.args[0] for call in batch_item.call_args_list} == {"1", "2"}
+        assert batch_item.call_count == 2
+        acquire.assert_called_once_with(read_only=False)
+        close.assert_called_once_with(instance)

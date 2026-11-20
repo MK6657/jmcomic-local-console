@@ -959,8 +959,8 @@ for (const id of ['downloadTabs', 'downloadTabsContent', 'folio-list']) {
 }
 const calls = [];
 global.showToast = () => {};
-global.setInterval = () => 1;
-global.clearInterval = () => {};
+global.setTimeout = () => 1;
+global.clearTimeout = () => {};
 window._jobTitleMap = {};
 window.setSSECallbacks = () => {};
 window.connectSSE = () => {};
@@ -1298,8 +1298,8 @@ for (const id of ['downloadTabs', 'downloadTabsContent', 'folio-list']) {
 let phase = 0;
 let sse = null;
 global.showToast = () => {};
-global.setInterval = () => 1;
-global.clearInterval = () => {};
+global.setTimeout = () => 1;
+global.clearTimeout = () => {};
 window._jobTitleMap = {};
 window.setSSECallbacks = (cb) => { sse = cb; };
 window.connectSSE = () => {};

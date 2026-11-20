@@ -37,12 +37,12 @@ def _job(job_id, folder, status="completed"):
     assert db.transition_job_status(job_id, ["queued"], status, output_path=str(folder))
 
 
-def prepare_publication(root, job_id, green=0, *, chapters=("71",), mode="RGB"):
+def prepare_publication(root, job_id, green=0, *, chapters=("71",), mode="RGB", extension="webp", name="Chapter"):
     from core import publication
     from core.download_layout import chapter_output_dir
 
     class Chapter(list):
-        name, photo_id = "Chapter", "71"
+        photo_id = "71"
 
     album = root / "Album"
     _job(job_id, album, "running")
@@ -51,12 +51,13 @@ def prepare_publication(root, job_id, green=0, *, chapters=("71",), mode="RGB"):
     for chapter_id in chapters:
         photo = Chapter([1, 2])
         photo.photo_id = chapter_id
+        photo.name = name
         photos.append(photo)
         chapter = chapter_output_dir(workspace.work, photo)
         for number in photo:
             color = (number * 63, green, 255) + ((128,) if mode == "RGBA" else ())
             with Image.new(mode, (12, 12), color) as image:
-                image.save(chapter / f"{number:05d}.webp", lossless=True)
+                image.save(chapter / f"{number:05d}.{extension}", lossless=True)
     manifest = workspace.seal(photos, lambda: None)
     target, evidence = workspace.project(manifest, SimpleNamespace(author="Author"), {}, lambda: None)
     return workspace, target, evidence
@@ -128,6 +129,41 @@ def test_registered_unreadable_snapshot_never_exports_album(client, root, monkey
     with client.post(f"/api/export/older/{fmt}") as response:
         assert response.status_code == 503 and response.json["reason"] == "export_source_unreadable"
         assert "Content-Disposition" not in response.headers
+
+
+def test_renamed_chapter_replaces_same_logical_pages_across_formats(client, root):
+    older, target, evidence = prepare_publication(root, "older", chapters=("71", "72"))
+    finish_publication("older", target, evidence)
+    newer, target, evidence = prepare_publication(root, "newer", green=255, extension="png", name="Renamed")
+    finish_publication("newer", target, evidence)
+    _check_export(client, "/api/export/older", "zip", sorted(older.snapshot.glob("*/*.webp")))
+    pages = client.get("/api/preview/123").json["pages"]
+    assert sorted(page["photo_id"] for page in pages) == ["71", "71", "72", "72"]
+    for page in pages:
+        if page["photo_id"] == "71":
+            assert page["chapter"] == "Renamed__71" and page["url"].endswith(".png")
+            expected = newer.snapshot / "Renamed__71" / f"{page['offset'] + 1:05d}.png"
+            with client.get(page["url"]) as response:
+                assert response.data == expected.read_bytes()
+
+
+@pytest.mark.parametrize("replacement", [("71",), ("71", "72")], ids=["partial", "complete"])
+def test_missing_snapshot_only_blocks_when_its_pages_are_still_needed(client, root, replacement):
+    import shutil
+
+    older, target, evidence = prepare_publication(root, "older", chapters=("71", "72"))
+    finish_publication("older", target, evidence)
+    shutil.rmtree(older.snapshot)
+    if len(replacement) == 1:
+        with pytest.raises(OSError, match="任务成品已不在原位置"):
+            prepare_publication(root, "replacement", chapters=replacement, extension="png")
+        assert db.get_completed_job_by_album_id("123")["job_id"] == "older"
+    else:
+        _, target, evidence = prepare_publication(root, "replacement", chapters=replacement, extension="png")
+        finish_publication("replacement", target, evidence)
+        pages = client.get("/api/preview/123").json["pages"]
+        assert len(pages) == 4 and all(page["url"].endswith(".png") for page in pages)
+    assert client.post("/api/export/older/cbz").status_code == 503
 
 
 def test_guessed_private_preview_is_not_visible(client, root):

@@ -53,7 +53,7 @@ def schema(home):
 
 def seed_fixture(home, nonce):
     """Only this short-lived subprocess imports the source publication writer. No server or SDK requests."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from core.release_lifecycle import _guard_network, _verify_root
     _verify_root(home, nonce)
     require(all(os.environ.get(k) == v for k, v in paths(home).items()), 'fixture paths not isolated')
@@ -171,7 +171,7 @@ def foreground(command, home, nonce, processes):
     finally:
         require(identity(home, proc, token) == record, 'identity changed before stop')
         # Shared Win32 event primitive only; it does not look up ports, processes or instances.
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         try:
             from core.process_control import request_shutdown
         finally:

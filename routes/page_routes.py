@@ -5,7 +5,7 @@ from contextlib import closing
 
 from flask import Blueprint, request, abort, redirect, current_app
 from core.interface import render_page as render_template
-from core import local_availability
+from core import download_folios, local_availability
 from core.database import get_db, get_job
 from core.logger import log
 from core.settings import get_settings
@@ -32,9 +32,11 @@ def index():
     with closing(get_db()) as conn:
         running_jobs = [dict(row) for row in conn.execute(
             "SELECT * FROM jobs WHERE status = 'running' ORDER BY created_at DESC, id DESC LIMIT 5")]
-        recent_jobs = conn.execute(
+        recent_jobs = [dict(row) for row in conn.execute(
             "SELECT * FROM jobs WHERE status IN ('completed', 'failed') ORDER BY created_at DESC, id DESC LIMIT 10"
-        ).fetchall() if show_recent else []
+        ).fetchall()] if show_recent else []
+
+    download_folios.resolve_job_titles(running_jobs + recent_jobs)
 
     # 给 running_jobs 计算百分比
     for job in running_jobs:

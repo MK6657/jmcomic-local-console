@@ -116,6 +116,13 @@ def get_backup_dir() -> Path:
     return get_path_config().backups
 
 
+EXPORT_DIR_NAME = "导出"
+
+
+def get_export_dir() -> Path:
+    return get_path_config().home / EXPORT_DIR_NAME
+
+
 def ensure_dirs() -> None:
     """Create current runtime roots; backups are created only by an explicit backup."""
     paths = get_path_config()

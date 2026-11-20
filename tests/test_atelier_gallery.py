@@ -15,7 +15,9 @@ def chromium():
     with playwright.sync_playwright() as engine:
         if not Path(engine.chromium.executable_path).exists():
             pytest.skip("needs the optional local Chromium test browser")
-        browser = engine.chromium.launch(headless=True)
+        browser = engine.chromium.launch(
+            headless=True, args=["--no-proxy-server", "--host-resolver-rules=MAP * ~NOTFOUND"],
+        )
         yield browser
         browser.close()
 
@@ -86,13 +88,21 @@ def test_real_archive_far_jump_mode_return_and_themes(gallery):
     frame.click(position={'x': frame.bounding_box()['width'] - 20, 'y': 30})
     page.wait_for_function('document.querySelector("#preview-image").naturalWidth === 440')
     page.keyboard.press('ArrowLeft')
-    for theme in ('sage', 'night', 'linen', 'paper'):
+    for theme in ('sage', 'mint', 'apricot', 'night', 'linen', 'paper', 'pixel', 'cyber', 'anime'):
         page.locator(f'[data-set-theme="{theme}"]').click()
         assert page.locator('html').get_attribute('data-theme') == theme
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
         assert page.locator('#reader-tools').evaluate('el => getComputedStyle(el).backgroundColor') != 'rgba(0, 0, 0, 0)'
     page.locator('#preview-continuous').click()
     wait_sheet(page, 429)
+    # Verify collapsible reader FAB opens on click, toggles tools without closing accidentally, and jumps cleanly
+    fab_toggle = page.locator('#reader-fab .reader-fab-toggle')
+    assert fab_toggle.get_attribute('aria-expanded') == 'false'
+    fab_toggle.click()
+    assert fab_toggle.get_attribute('aria-expanded') == 'true'
+    assert page.locator('#reader-fab').evaluate('el => el.classList.contains("is-open")')
+    page.keyboard.press('Escape')
+    assert fab_toggle.get_attribute('aria-expanded') == 'false'
     page.keyboard.press('m')
     page.locator('#reader-back').click()
     page.wait_for_url('**/downloads')
@@ -145,3 +155,90 @@ def test_hidden_gallery_cancels_then_resumes(gallery, mode):
     }''')
     selector = '#reader-page-429 img' if mode == 'read' else '#preview-image'
     page.wait_for_function('selector => document.querySelector(selector)?.naturalWidth === 439', arg=selector)
+
+
+def test_all_button_variants_stay_high_contrast_on_hover_across_all_nine_themes(gallery):
+    """Real Chromium hover audit: no button text or icon may vanish or dip below WCAG AA (4.5:1) in any theme."""
+    page, _ = gallery
+    page.set_viewport_size({'width': 1280, 'height': 900})
+    page.goto('http://gallery.test/downloads')
+    page.wait_for_selector('.atelier-main')
+    page.evaluate('''() => {
+      const box = document.createElement('div');
+      box.id = 'hover-audit-rack';
+      box.style.cssText = 'position:fixed;inset:12px auto auto 12px;z-index:9999;display:flex;flex-wrap:wrap;gap:8px;padding:12px;background:var(--bg-card);';
+      const specs = [
+        ['btn-primary', '主按钮'],
+        ['btn-info', '信息'],
+        ['btn-success', '成功'],
+        ['btn-warning', '提醒'],
+        ['btn-danger', '危险'],
+        ['btn-secondary', '次要'],
+        ['btn-outline-primary', '详情'],
+        ['btn-outline-info', '预览'],
+        ['btn-outline-success', '下载'],
+        ['btn-outline-warning', '暂停'],
+        ['btn-outline-danger', '删除'],
+        ['btn-outline-secondary', '取消'],
+        ['btn-light', '浅色'],
+        ['btn-outline-light', '描边浅'],
+        ['wishlist-btn btn-outline-warning', '<i class="bi bi-star"></i>'],
+        ['wishlist-btn btn-warning', '<i class="bi bi-star-fill"></i>'],
+      ];
+      for (const [cls, html] of specs) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn btn-sm ' + cls;
+        b.dataset.auditKey = cls;
+        b.innerHTML = html;
+        box.appendChild(b);
+      }
+      const picker = document.createElement('span');
+      picker.className = 'export-picker';
+      picker.innerHTML = '<select class="form-select form-select-sm export-format-select"><option value="zip">ZIP</option></select>'
+        + '<button type="button" class="btn btn-outline-secondary btn-sm export-run-btn" data-audit-key="export-run-btn">导出</button>';
+      box.appendChild(picker);
+      document.body.appendChild(box);
+    }''')
+
+    def _contrast(fg_rgb, bg_rgb):
+        def _lum(rgb):
+            vals = []
+            for ch in rgb:
+                c = ch / 255.0
+                vals.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
+            return 0.2126 * vals[0] + 0.7152 * vals[1] + 0.0722 * vals[2]
+        lo, hi = sorted((_lum(fg_rgb), _lum(bg_rgb)))
+        return (hi + 0.05) / (lo + 0.05)
+
+    for theme in ('sage', 'mint', 'paper', 'linen', 'apricot', 'night', 'pixel', 'cyber', 'anime'):
+        page.evaluate('t => { document.documentElement.dataset.theme = t; document.documentElement.dataset.bsTheme = (t === "night" || t === "cyber") ? "dark" : "light"; document.documentElement.dataset.fx = "none"; }', theme)
+        buttons = page.locator('#hover-audit-rack [data-audit-key]')
+        count = buttons.count()
+        assert count == 17
+        for i in range(count):
+            btn = buttons.nth(i)
+            key = btn.get_attribute('data-audit-key')
+            # Move cursor away first for rest check, then hover for hover check
+            page.mouse.move(0, 0)
+            for state in ('rest', 'hover'):
+                if state == 'hover':
+                    btn.hover()
+                colors = btn.evaluate('''el => {
+                  const parse = s => {
+                    const m = s.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)(?:,\\s*([\\d.]+))?\\)/);
+                    return m ? [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]] : [0, 0, 0, 0];
+                  };
+                  const cs = getComputedStyle(el);
+                  const icon = el.querySelector('i');
+                  const fg = parse(icon ? getComputedStyle(icon).color : cs.color);
+                  let bg = parse(cs.backgroundColor);
+                  if (bg[3] < 0.99) {
+                    const p = parse(getComputedStyle(el.parentElement).backgroundColor);
+                    const a = bg[3];
+                    bg = [Math.round(bg[0]*a + p[0]*(1-a)), Math.round(bg[1]*a + p[1]*(1-a)), Math.round(bg[2]*a + p[2]*(1-a)), 1];
+                  }
+                  return { fg: fg.slice(0, 3), bg: bg.slice(0, 3) };
+                }''')
+                ratio = _contrast(colors['fg'], colors['bg'])
+                assert ratio >= 4.5, f'Low contrast {ratio:.2f}:1 on theme={theme} btn="{key}" state={state} colors={colors}'

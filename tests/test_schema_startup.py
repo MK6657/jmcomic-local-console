@@ -195,6 +195,87 @@ def test_supported_historical_versions_migrate_from_real_column_layout(instance,
     assert len(list(backups.glob("*.zip"))) == 1
 
 
+@pytest.mark.parametrize("version", [0, 1, 2])
+def test_preflight_rejects_queued_column_without_superseded_column(instance, monkeypatch, version):
+    path, backups = instance
+    mutate(path, DROP_PUBLICATION_SQL + "DROP TRIGGER catalog_completed_job_insert; "
+           "DROP TRIGGER catalog_completed_job_update; DROP TRIGGER catalog_revoked_completion; "
+           "DROP TABLE resource_catalog; ALTER TABLE jobs DROP COLUMN superseded_at; "
+           f"PRAGMA user_version={version}")
+    before = path.read_bytes()
+    writer = Mock(side_effect=AssertionError("preflight must refuse the layout before opening a writer"))
+    monkeypatch.setattr(db, "get_db", writer)
+    with pytest.raises(RuntimeError, match="数据库结构校验失败.*jobs"):
+        db.init_db()
+    writer.assert_not_called()
+    assert path.read_bytes() == before and not backups.exists()
+
+
+@pytest.mark.parametrize("stage", ["validate", "backfill"])
+def test_failed_migration_leaves_original_version_schema_and_data(instance, monkeypatch, stage):
+    path, backups = instance
+    mutate(path, DROP_PUBLICATION_SQL + "DROP TRIGGER catalog_completed_job_insert; "
+           "DROP TRIGGER catalog_completed_job_update; DROP TRIGGER catalog_revoked_completion; "
+           "DROP TABLE resource_catalog; DROP INDEX idx_jobs_queue; "
+           "ALTER TABLE jobs DROP COLUMN queued_at; ALTER TABLE jobs DROP COLUMN superseded_at; "
+           "DROP TABLE album_meta; DROP TABLE album_update_checks; "
+           "INSERT INTO jobs(job_id,album_id,status,title,created_at) "
+           "VALUES('legacy','123','completed','Original title','2026-01-01'); PRAGMA user_version=2")
+    with closing(sqlite3.connect(path)) as original:
+        before = list(original.iterdump())
+
+    original_backfill = db.backfill_missing_meta
+
+    def check_staged_migration(connection):
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("SELECT queued_at FROM jobs").fetchone()[0] == "2026-01-01"
+        assert connection.execute("SELECT title FROM resource_catalog").fetchone()[0] == "Original title"
+        assert connection.execute("SELECT COUNT(*) FROM published_tasks").fetchone()[0] == 0
+
+    def fail_validation(connection, version):
+        validate_schema(connection, version)
+        if version == db.CURRENT_SCHEMA_VERSION:
+            check_staged_migration(connection)
+            raise RuntimeError("injected final validation failure")
+
+    def fail_backfill(*, conn):
+        check_staged_migration(conn)
+        assert original_backfill(conn=conn) == 1
+        raise RuntimeError("injected metadata backfill failure")
+
+    with monkeypatch.context() as failure:
+        if stage == "validate":
+            failure.setattr(db, "validate_schema", fail_validation)
+        else:
+            failure.setattr(db, "backfill_missing_meta", fail_backfill)
+        with pytest.raises(RuntimeError, match="injected .* failure"):
+            db.init_db()
+
+    with closing(sqlite3.connect(path)) as old:
+        assert old.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert list(old.iterdump()) == before
+        validate_schema(old, 2)
+    assert len(list(backups.glob("pre-migration-v2-*.zip"))) == 1
+
+    db.init_db()
+    with closing(db.get_db()) as current:
+        assert current.execute("PRAGMA user_version").fetchone()[0] == db.CURRENT_SCHEMA_VERSION
+        assert current.execute("SELECT title FROM album_meta WHERE album_id='123'").fetchone()[0] == "Original title"
+        validate_schema(current, db.CURRENT_SCHEMA_VERSION)
+
+
+def test_fresh_initialization_can_retry_after_rolled_back_ddl(client, tmp_path, monkeypatch):
+    path = tmp_path / "fresh.db"
+    monkeypatch.setattr(db, "DB_PATH", path)
+    with monkeypatch.context() as failure:
+        failure.setattr(db, "validate_schema", Mock(side_effect=RuntimeError("injected init failure")))
+        with pytest.raises(RuntimeError, match="injected init failure"):
+            db.init_db()
+    assert db._existing_schema() is None
+    db.init_db()
+    assert db._existing_schema() == db.CURRENT_SCHEMA_VERSION
+
+
 def test_current_schema_checks_committed_wal_before_opening_writer(instance, monkeypatch):
     path, _ = instance
     with closing(sqlite3.connect(path)) as writer:

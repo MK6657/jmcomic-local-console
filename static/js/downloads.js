@@ -23,12 +23,16 @@
 
   /** @type {number|null} */
   var pollTimer = null;
+  var pollIntervalMs = 5000;
+  var pageHidden = false;
   var activeGroup = 'all';
   var groupPages = new Map();
   var labels = { all: '同册传输卷宗', running: '进行中', paused: '已暂停', queued: '排队', completed: '已完成', failed: '失败', canceled: '已取消' };
   var current = null;
   var refreshSerial = 0;
   var pageSize = 50;
+  var liveProgress = Object.create(null);
+  var folioListSettled = false;
 
   // ── 操作函数 ──
 
@@ -118,7 +122,26 @@
 
   // openFolder 由 utils.js 提供（window.openFolder，首页也在用）
 
-  // ── 导出 ZIP / PDF ──
+  // ── 导出 CBZ / ZIP / PDF ──
+
+  function getSavedExportFormat() {
+    try {
+      var stored = window.localStorage && window.localStorage.getItem('jm_export_format');
+      if (stored === 'cbz' || stored === 'zip' || stored === 'pdf') return stored;
+    } catch (_) {}
+    return 'cbz';
+  }
+
+  function saveExportFormat(fmt) {
+    if (fmt !== 'cbz' && fmt !== 'zip' && fmt !== 'pdf') return;
+    try {
+      if (window.localStorage) window.localStorage.setItem('jm_export_format', fmt);
+    } catch (_) {}
+  }
+
+  function exportCbz(jobId) {
+    window.downloadExport('/api/export/' + encodeJobId(jobId) + '/cbz', 'CBZ');
+  }
 
   function exportZip(jobId) {
     window.downloadExport('/api/export/' + encodeJobId(jobId) + '/zip', 'ZIP');
@@ -218,8 +241,20 @@
     'retry-maintenance': retryMaintenance,
     'delete': function (el) { deleteJob(el.getAttribute('data-job-id')); },
     'open-folder': function (el) { window.openFolder(el.getAttribute('data-job-id')); },
-    'export-zip': function (el) { exportZip(el.getAttribute('data-job-id')); },
-    'export-pdf': function (el) { exportPdf(el.getAttribute('data-job-id')); },
+    'open-export-folder': function () { if (window.openExportFolder) window.openExportFolder(); },
+    'export-cbz': function (el) { saveExportFormat('cbz'); exportCbz(el.getAttribute('data-job-id')); },
+    'export-zip': function (el) { saveExportFormat('zip'); exportZip(el.getAttribute('data-job-id')); },
+    'export-pdf': function (el) { saveExportFormat('pdf'); exportPdf(el.getAttribute('data-job-id')); },
+    'export-selected': function (el) {
+      var jobId = el.getAttribute('data-job-id');
+      var picker = el.closest('.export-picker');
+      var select = picker && picker.querySelector('.export-format-select');
+      var format = select ? String(select.value || '').toLowerCase() : getSavedExportFormat();
+      saveExportFormat(format);
+      if (format === 'pdf') exportPdf(jobId);
+      else if (format === 'zip') exportZip(jobId);
+      else exportCbz(jobId);
+    },
     'batch-retry': batchRetryFailed,
     'jobs-page': function (el) {
       var page = Number(el.getAttribute('data-page'));
@@ -251,6 +286,15 @@
       if (!el || !tabsContent.contains(el) || el.disabled) return;
       var action = el.getAttribute('data-action');
       if (Object.prototype.hasOwnProperty.call(ACTIONS, action)) ACTIONS[action](el);
+    });
+    tabsContent.addEventListener('change', function (event) {
+      var select = event.target && event.target.closest ? event.target.closest('.export-format-select') : null;
+      if (!select || !tabsContent.contains(select)) return;
+      var fmt = String(select.value || '').toLowerCase();
+      saveExportFormat(fmt);
+      tabsContent.querySelectorAll('.export-format-select').forEach(function (other) {
+        if (other !== select) other.value = fmt;
+      });
     });
   }
 
@@ -378,13 +422,15 @@
   // ── 刷新任务列表 ──
 
   function refreshJobs() {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+    if (pageHidden || document.hidden) return;
     var group = activeGroup;
     var serial = ++refreshSerial;
     var album = group.startsWith('album-') ? group.slice(6) : '';
     var query = new URLSearchParams({ page: String(groupPages.get(group) || 1), page_size: group === 'all' ? '8' : String(pageSize),
       status: album ? 'all' : group, view: album ? 'album' : group === 'all' ? 'folios' : 'jobs' });
     if (album) query.set('album_id', album);
-    // abortKey：轮询/操作触发的连续刷新自动中止上一次未完成的请求，避免堆积
     apiFetch('/api/jobs?' + query.toString(), { abortKey: 'downloads-refresh' })
       .then(function (data) {
         if (serial !== refreshSerial || group !== activeGroup) return;
@@ -404,11 +450,15 @@
         renderJobs(jobs);
         if (Number.isInteger(data.pages)) renderJobPagination(group, data);
         reconnectSSE(jobs);
+        syncPollInterval(data);
       })
       .catch(function (err) {
         if (serial !== refreshSerial || (err && err.name === 'AbortError')) return;
         var errorBox = document.getElementById('transfer-error');
         if (errorBox) { errorBox.hidden = false; errorBox.textContent = '加载传输记录失败：' + err.message + '。稍后将自动重试。'; }
+      })
+      .finally(function () {
+        if (serial === refreshSerial && !document.hidden) pollTimer = setTimeout(refreshJobs, pollIntervalMs);
       });
   }
 
@@ -481,18 +531,223 @@
     return window.readLink.stateFor(readableAlbums[key], (localInfo[key] || {}).state);
   }
 
+  function resolvedProgress(job) {
+    var done = Number(job.done_pages) || 0;
+    var total = Number(job.total_pages) || 0;
+    if (job.status === 'running') {
+      var live = liveProgress[job.job_id];
+      if (live) {
+        if (live.total >= total && live.done >= done) {
+          done = live.done;
+          total = live.total;
+        } else {
+          liveProgress[job.job_id] = { done: done, total: total };
+        }
+      }
+    } else {
+      delete liveProgress[job.job_id];
+    }
+    return {
+      done: done,
+      total: total,
+      hasTotal: total > 0,
+      pct: total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0,
+    };
+  }
+
+  function patchRunningProgress(row, job) {
+    var progress = resolvedProgress(job);
+    var infoEl = row.querySelector('.folio-state span');
+    var nextText = progress.hasTotal ? (progress.done + ' / ' + progress.total + ' 页') : '总页数待确认';
+    if (infoEl && infoEl.textContent !== nextText) infoEl.textContent = nextText;
+    var barEl = row.querySelector('.folio-meter .progress-bar');
+    if (barEl) {
+      var nextWidth = progress.pct + '%';
+      if (barEl.style.width !== nextWidth) barEl.style.width = nextWidth;
+      var nextNow = String(progress.pct);
+      if (barEl.getAttribute('aria-valuenow') !== nextNow) barEl.setAttribute('aria-valuenow', nextNow);
+    }
+  }
+
+  function parseElement(html) {
+    var tpl = document.createElement('template');
+    tpl.innerHTML = html.trim();
+    return tpl.content.firstElementChild;
+  }
+
+  function canReconcileDom(box) {
+    return typeof HTMLTemplateElement !== 'undefined'
+      && box && box.nodeType === 1 && typeof box.insertBefore === 'function';
+  }
+
   function replaceMarkup(box, markup) {
     if (box._folioMarkup === markup) return;
     var focus = document.activeElement;
-    var controls = 'a,button';
     var old = focus && box.contains(focus) && focus.closest('.job-card');
-    var index = old ? Array.from(old.querySelectorAll(controls)).indexOf(focus) : -1;
     box.innerHTML = markup;
     box._folioMarkup = markup;
-    if (index >= 0) {
-      var row = Array.from(box.querySelectorAll('.job-card')).find(function (item) { return item.dataset.jobId === old.dataset.jobId; });
-      var replacement = row && row.querySelectorAll(controls)[index];
-      if (replacement && replacement.getAttribute('data-action') === focus.getAttribute('data-action')) replacement.focus({ preventScroll: true });
+    box._folioEmptyMarkup = null;
+    if (!old) return;
+    var row = Array.from(box.querySelectorAll('.job-card')).find(function (item) { return item.dataset.jobId === old.dataset.jobId; });
+    if (!row) return;
+    var formatSelect = focus.matches('.export-format-select');
+    var replacement = formatSelect ? row.querySelector('.export-format-select') : Array.from(row.querySelectorAll('a,button')).find(function (control) {
+      return control.tagName === focus.tagName && control.getAttribute('data-action') === focus.getAttribute('data-action')
+        && control.getAttribute('href') === focus.getAttribute('href');
+    });
+    if (!replacement) return;
+    if (formatSelect) replacement.value = focus.value;
+    replacement.focus({ preventScroll: true });
+  }
+
+  function reconcileFolios(list, descriptors, emptyHtml) {
+    var focus = document.activeElement;
+    var oldFocusedRow = focus && list.contains(focus) ? focus.closest('.job-card') : null;
+    var focusMeta = oldFocusedRow ? {
+      jobId: oldFocusedRow.dataset.jobId,
+      isFormatSelect: focus.matches('.export-format-select'),
+      selectValue: focus.matches('.export-format-select') ? focus.value : null,
+      tagName: focus.tagName,
+      action: focus.getAttribute('data-action'),
+      href: focus.getAttribute('href'),
+    } : null;
+
+    if (!descriptors.length) {
+      if (list._folioEmptyMarkup === emptyHtml) return;
+      list.innerHTML = emptyHtml;
+      list._folioEmptyMarkup = emptyHtml;
+      list._folioMarkup = emptyHtml;
+      return;
+    }
+
+    list._folioEmptyMarkup = null;
+    list._folioMarkup = null;
+    var shouldEnter = !folioListSettled;
+
+    var existingCards = new Map();
+    Array.from(list.children).forEach(function (child) {
+      if (child.matches && child.matches('article.folio-card[data-album-id]')) {
+        existingCards.set(child.getAttribute('data-album-id'), child);
+      }
+    });
+
+    var nextCards = [];
+    var nextCardSet = new Set();
+
+    descriptors.forEach(function (desc) {
+      var card = existingCards.get(desc.id);
+      if (!card) {
+        card = document.createElement('article');
+        card.className = 'folio-card';
+        card.setAttribute('data-album-id', desc.id);
+        if (shouldEnter && document.documentElement && document.documentElement.dataset.fx !== 'none') {
+          card.setAttribute('data-enter', 'true');
+          var clearEnter = function () { card.removeAttribute('data-enter'); };
+          card.addEventListener('animationend', clearEnter, { once: true });
+          setTimeout(clearEnter, 460);
+        }
+      }
+
+      // 1. Header (preserve live cover <img> when src is unchanged)
+      var headEl = card.querySelector(':scope > header.folio-book-head');
+      if (card._headHtml !== desc.headHtml || !headEl) {
+        var nextHead = parseElement(desc.headHtml);
+        if (headEl) {
+          var oldImg = headEl.querySelector('.folio-cover img');
+          var newImg = nextHead.querySelector('.folio-cover img');
+          if (oldImg && newImg && oldImg.getAttribute('src') === newImg.getAttribute('src')) {
+            newImg.replaceWith(oldImg);
+          }
+          headEl.replaceWith(nextHead);
+        } else {
+          card.insertBefore(nextHead, card.firstChild);
+        }
+        headEl = nextHead;
+        card._headHtml = desc.headHtml;
+      }
+
+      // 2. Maintenance ribbon
+      var ribbonEl = card.querySelector(':scope > .folio-ribbon');
+      if (card._ribbonHtml !== desc.ribbonHtml) {
+        if (desc.ribbonHtml) {
+          var nextRibbon = parseElement(desc.ribbonHtml);
+          if (ribbonEl) ribbonEl.replaceWith(nextRibbon);
+          else card.insertBefore(nextRibbon, headEl.nextSibling);
+          ribbonEl = nextRibbon;
+        } else if (ribbonEl) {
+          ribbonEl.remove();
+          ribbonEl = null;
+        }
+        card._ribbonHtml = desc.ribbonHtml;
+      }
+
+      // 3. Job cards (reuse unchanged rows & patch running/paused progress in place)
+      var existingRows = new Map();
+      Array.from(card.children).forEach(function (child) {
+        if (child.matches && child.matches('.job-card[data-job-id]')) {
+          existingRows.set(child.getAttribute('data-job-id'), child);
+        }
+      });
+
+      var nextRows = [];
+      var nextRowSet = new Set();
+      desc.jobs.forEach(function (item) {
+        var row = existingRows.get(item.job.job_id);
+        if (row && row._structKey === item.structKey) {
+          if (item.isLive) patchRunningProgress(row, item.job);
+        } else {
+          row = parseElement(item.html);
+          row._structKey = item.structKey;
+        }
+        nextRows.push(row);
+        nextRowSet.add(row);
+      });
+
+      Array.from(card.children).forEach(function (child) {
+        if (child !== headEl && child !== ribbonEl && !nextRowSet.has(child)) {
+          child.remove();
+        }
+      });
+
+      var rowCursor = (ribbonEl || headEl).nextSibling;
+      nextRows.forEach(function (row) {
+        if (row !== rowCursor) card.insertBefore(row, rowCursor);
+        else rowCursor = rowCursor.nextSibling;
+      });
+
+      nextCards.push(card);
+      nextCardSet.add(card);
+    });
+
+    Array.from(list.children).forEach(function (child) {
+      if (!nextCardSet.has(child)) child.remove();
+    });
+
+    var cardCursor = list.firstChild;
+    nextCards.forEach(function (card) {
+      if (card !== cardCursor) list.insertBefore(card, cardCursor);
+      else cardCursor = cardCursor.nextSibling;
+    });
+
+    folioListSettled = true;
+
+    if (focusMeta && !oldFocusedRow.isConnected) {
+      var replacementRow = Array.from(list.querySelectorAll('.job-card')).find(function (item) {
+        return item.dataset.jobId === focusMeta.jobId;
+      });
+      if (replacementRow) {
+        var replacement = focusMeta.isFormatSelect
+          ? replacementRow.querySelector('.export-format-select')
+          : Array.from(replacementRow.querySelectorAll('a,button')).find(function (control) {
+            return control.tagName === focusMeta.tagName
+              && control.getAttribute('data-action') === focusMeta.action
+              && control.getAttribute('href') === focusMeta.href;
+          });
+        if (replacement) {
+          if (focusMeta.isFormatSelect) replacement.value = focusMeta.selectValue;
+          replacement.focus({ preventScroll: true });
+        }
+      }
     }
   }
 
@@ -504,7 +759,8 @@
       if (!groups.has(job.album_id)) groups.set(job.album_id, []);
       groups.get(job.album_id).push(job);
     });
-    var html = '';
+    var emptyHtml = '<div class="folio-empty"><span class="folio-kicker">传输卷宗</span><p>这里还没有' + (activeGroup === 'all' || activeGroup.startsWith('album-') ? '任务记录' : labels[activeGroup] + '的任务') + '。</p><a href="' + (activeGroup === 'all' ? '/search' : '#all') + '">' + (activeGroup === 'all' ? '去查找书目' : '返回同册全景') + '</a></div>';
+    var descriptors = [];
     groups.forEach(function (items, id) {
       var book = (current.books || {})[id] || {};
       var title = book.title || (items.find(function (job) { return job.title && job.title !== id; }) || {}).title || '书目 ' + id;
@@ -512,22 +768,44 @@
       var total = (current.album_totals || {})[id];
       var maintenance = (items.find(function (job) { return job.maintenance; }) || {}).maintenance;
       var ribbon = maintenance && { pending: maintenance.error ? '等待重试整册整理' : '等待整册整理', running: '正在整理整册', failed: '整册整理失败', completed: '整册整理完成' }[maintenance.state];
-      html += '<article class="folio-card" data-album-id="' + escapeHtmlAttr(id) + '"><header class="folio-book-head">'
+      var headHtml = '<header class="folio-book-head">'
         + '<a class="bound-book folio-cover" href="/album/' + path + '" aria-label="查看书目：' + escapeHtmlAttr(title) + '"><span aria-hidden="true">藏</span><img alt="" src="/api/cover/' + path + '/portrait" loading="lazy" decoding="async"></a>'
         + '<div class="folio-book-caption"><p class="folio-kicker">馆藏卷宗 <b>JM ' + escapeHtml(id) + '</b></p>'
         + '<h3><a href="/album/' + path + '">' + escapeHtml(title) + '</a></h3>'
         + (book.author ? '<p class="folio-author">' + escapeHtml(book.author) + '</p>' : '') + '</div>'
         + (activeGroup.startsWith('album-') ? '' : '<a class="folio-history" href="#album-' + path + '">本册记录' + (Number.isInteger(total) ? ' · ' + total : '') + ' →</a>')
         + '</header>';
-      if (ribbon) html += '<div class="folio-ribbon" data-state="' + escapeHtmlAttr(maintenance.state) + '"><strong>合卷</strong> ' + ribbon
-        + (maintenance.error ? '：' + escapeHtml(maintenance.error) : '') + (maintenance.state === 'failed' ? maintenanceButton(id) : '') + '</div>';
-      html += items.map(function (job) {
-        if (job.status === 'completed') return renderCompletedCard(job);
-        if (job.status === 'failed' || job.status === 'canceled') return renderFailedCard(job);
-        return renderRunningCard(job);
-      }).join('') + '</article>';
+      var ribbonHtml = ribbon
+        ? '<div class="folio-ribbon" data-state="' + escapeHtmlAttr(maintenance.state) + '"><strong>合卷</strong> ' + ribbon
+          + (maintenance.error ? '：' + escapeHtml(maintenance.error) : '') + (maintenance.state === 'failed' ? maintenanceButton(id) : '') + '</div>'
+        : '';
+      var jobEntries = items.map(function (job) {
+        var html = renderJobCard(job);
+        var isLive = job.status === 'running' || job.status === 'paused';
+        var structKey = isLive ? renderRunningCard(job, true) : html;
+        return { job: job, isLive: isLive, structKey: structKey, html: html };
+      });
+      descriptors.push({ id: String(id), headHtml: headHtml, ribbonHtml: ribbonHtml, jobs: jobEntries });
     });
-    replaceMarkup(list, html || '<div class="folio-empty"><span class="folio-kicker">传输卷宗</span><p>这里还没有' + (activeGroup === 'all' || activeGroup.startsWith('album-') ? '任务记录' : labels[activeGroup] + '的任务') + '。</p><a href="' + (activeGroup === 'all' ? '/search' : '#all') + '">' + (activeGroup === 'all' ? '去查找书目' : '返回同册全景') + '</a></div>');
+
+    if (canReconcileDom(list)) {
+      reconcileFolios(list, descriptors, emptyHtml);
+      return;
+    }
+
+    var fullHtml = descriptors.map(function (desc) {
+      return '<article class="folio-card" data-album-id="' + escapeHtmlAttr(desc.id) + '">'
+        + desc.headHtml + desc.ribbonHtml
+        + desc.jobs.map(function (item) { return item.html; }).join('')
+        + '</article>';
+    }).join('');
+    replaceMarkup(list, fullHtml || emptyHtml);
+  }
+
+  function renderJobCard(job) {
+    if (job.status === 'completed') return renderCompletedCard(job);
+    if (job.status === 'failed' || job.status === 'canceled') return renderFailedCard(job);
+    return renderRunningCard(job, false);
   }
 
   function chapterTitle(job) {
@@ -543,12 +821,10 @@
     return '<h4 class="folio-chapter">' + escapeHtml(scope) + '</h4><small class="folio-job-id">' + escapeHtml(job.job_id + created) + '</small>';
   }
 
-  function renderRunningCard(job) {
+  function renderRunningCard(job, structuralOnly) {
     var isPaused = job.status === 'paused';
     var isQueued = job.status === 'queued';
-    var total = Number(job.total_pages) || 0;
-    var done = Number(job.done_pages) || 0;
-    var pct = total > 0 ? Math.min(100, Math.round(done / total * 100)) : null;
+    var progress = structuralOnly ? { hasTotal: false, done: 0, total: 0, pct: 0 } : resolvedProgress(job);
     var jobIdAttr = escapeHtmlAttr(job.job_id);
 
     var actionButtons = '';
@@ -564,9 +840,16 @@
         + jobButton('cancel', job, 'btn-outline-danger', '取消', '<i class="bi bi-x-circle"></i> 取消');
     }
 
+    var infoText = structuralOnly
+      ? ''
+      : (progress.hasTotal ? progress.done + ' / ' + progress.total + ' 页' : '总页数待确认');
+    var meterHtml = isQueued
+      ? ''
+      : '<div class="folio-meter"><div id="progress-' + jobIdAttr + '" class="progress-bar" role="progressbar" aria-label="任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + progress.pct + '" style="width:' + progress.pct + '%"></div></div>';
+
     return '<div class="card job-card chapter-item" data-job-id="' + jobIdAttr + '" data-status="' + escapeHtmlAttr(job.status) + '"><div class="folio-task-info">'
-      + chapterTitle(job) + '<div class="folio-state">' + labels[job.status] + ' · <span id="info-' + jobIdAttr + '">' + (total ? done + ' / ' + total + ' 页' : '总页数待确认') + '</span></div>'
-      + (pct === null ? '' : '<div class="folio-meter"><div id="progress-' + jobIdAttr + '" class="progress-bar" role="progressbar" aria-label="任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '" style="width:' + pct + '%"></div></div>')
+      + chapterTitle(job) + '<div class="folio-state">' + labels[job.status] + ' · <span id="info-' + jobIdAttr + '">' + infoText + '</span></div>'
+      + meterHtml
       + '</div><div class="job-card-actions">' + actionButtons + '</div></div>';
   }
 
@@ -609,8 +892,18 @@
       + '<div class="job-card-actions">'
       + readBtn
       + (readable && job.output_path ? '<a class="btn btn-sm btn-outline-info" href="/preview/' + albumPath + '" title="单页翻页预览本地文件">预览</a>' : '')
-      + (job.output_path ? jobButton('export-zip', job, 'btn-outline-secondary', '导出本任务 ZIP', '导出 ZIP') + jobButton('export-pdf', job, 'btn-outline-secondary', '导出本任务 PDF', 'PDF')
-        + jobButton('open-folder', job, 'btn-outline-secondary', '打开文件夹', '<i class="bi bi-folder2-open"></i>', true) : '')
+      + (job.output_path
+        ? (function () {
+          var preferred = getSavedExportFormat();
+          return '<div class="export-picker"><select class="form-select form-select-sm export-format-select" aria-label="选择导出格式">'
+            + '<option value="cbz"' + (preferred === 'cbz' ? ' selected' : '') + '>CBZ</option>'
+            + '<option value="zip"' + (preferred === 'zip' ? ' selected' : '') + '>ZIP</option>'
+            + '<option value="pdf"' + (preferred === 'pdf' ? ' selected' : '') + '>PDF</option></select>'
+            + jobButton('export-selected', job, 'btn-outline-secondary export-run-btn', '按所选格式导出本任务', '<i class="bi bi-box-arrow-up" aria-hidden="true"></i> 导出')
+            + '</div>';
+        })()
+          + jobButton('open-folder', job, 'btn-outline-secondary', '打开文件夹', '<i class="bi bi-folder2-open"></i>', true)
+        : '')
       + jobButton('retry', job, 'btn-outline-primary', '重新下载', '<i class="bi bi-arrow-counterclockwise"></i>', true)
       + jobButton('delete', job, 'btn-outline-danger', '删除记录', '<i class="bi bi-trash"></i>', true)
       + '</div></div>';
@@ -628,20 +921,34 @@
       + '</div></div>';
   }
 
-  // ── SSE 事件回调（连接建立后刷新列表） ──
+  // ── SSE 事件回调（实时进度写入单调缓存，终态刷新列表） ──
   window.setSSECallbacks({
-    onCompleted: function () { refreshJobs(); },
-    onFailed: function () { refreshJobs(); },
-    onCanceled: function () { refreshJobs(); },
+    onProgress: function (data) {
+      if (!data || !data.job_id) return;
+      var done = Number(data.done_pages) || 0;
+      var total = Number(data.total_pages) || 0;
+      var prev = liveProgress[data.job_id];
+      if (!prev || total > prev.total || done >= prev.done) {
+        liveProgress[data.job_id] = { done: done, total: total };
+      }
+    },
+    onCompleted: function (e, jobId) { if (jobId) delete liveProgress[jobId]; refreshJobs(); },
+    onFailed: function (e, jobId) { if (jobId) delete liveProgress[jobId]; refreshJobs(); },
+    onCanceled: function (e, jobId) { if (jobId) delete liveProgress[jobId]; refreshJobs(); },
   });
 
-  // ── 轮询：离开页面（含进入 bfcache）时停止，返回时立即刷新并恢复 ──
-  function startPolling() {
-    if (!pollTimer) pollTimer = setInterval(refreshJobs, 5000);
+  // ── 自适应轮询：有活动任务/整理时 5 秒轮询，空闲时自动降频至 20 秒降低系统开销 ──
+  function syncPollInterval(data) {
+    var counts = (data && data.counts) || {};
+    var active = (Number(counts.running) || 0) + (Number(counts.paused) || 0) + (Number(counts.queued) || 0);
+    var hasPendingMaint = Array.isArray(data && data.jobs) && data.jobs.some(function (job) {
+      return job && job.maintenance && (job.maintenance.state === 'pending' || job.maintenance.state === 'running');
+    });
+    pollIntervalMs = (active > 0 || hasPendingMaint) ? 5000 : 20000;
   }
   function stopPolling() {
     refreshSerial++;
-    if (pollTimer) clearInterval(pollTimer);
+    clearTimeout(pollTimer);
     pollTimer = null;
   }
 
@@ -650,6 +957,7 @@
     var group = (window.location && window.location.hash || '#all').slice(1);
     activeGroup = Object.hasOwn(labels, group) || /^album-[0-9]{1,20}$/.test(group) ? group : 'all';
     current = null;
+    folioListSettled = false;
     renderMaintenanceFailures([]);
     var list = document.getElementById('folio-list');
     if (list) replaceMarkup(list, '<p class="folio-empty" role="status">正在读取传输记录…</p>');
@@ -672,17 +980,19 @@
     var list = document.getElementById('folio-list');
     if (list) list.addEventListener('error', function (event) { if (event.target.tagName === 'IMG') event.target.hidden = true; }, true);
     selectView();
-    startPolling();
   });
   window.addEventListener('hashchange', selectView);
 
-  window.addEventListener('pagehide', stopPolling);
+  window.addEventListener('pagehide', function () {
+    pageHidden = true;
+    stopPolling();
+  });
   window.addEventListener('pageshow', function (event) {
     if (!event.persisted) return;
+    pageHidden = false;
     readableKey = null; // 回到本页：重新判断哪些可以离线阅读、哪些有已确认的新章节
     updatesKey = null;
     refreshJobs();
-    startPolling();
   });
   // 切回本标签页时重新判断（文件可能在别处被移动/删除）
   document.addEventListener('visibilitychange', function () {
@@ -695,6 +1005,5 @@
     readableKey = null;
     updatesKey = null;   // 可能刚在详情页点过“立即检查”
     refreshJobs();
-    startPolling();
   });
 })();

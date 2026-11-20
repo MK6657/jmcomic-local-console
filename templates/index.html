@@ -5,44 +5,92 @@
 {% block content %}
 <div class="atelier-collection">
     <header class="shelf-heading">
-        <div><p class="shelf-kicker">ATELIER / 01</p><h1>书斋总览</h1></div>
-        <span class="shelf-caption">藏书阁 · 本地书斋</span>
+        <div><p class="shelf-kicker">STUDIO / 01</p><h1>书斋总览</h1></div>
+        <span class="shelf-caption">藏书阁 · 本地护眼阅读工作台</span>
     </header>
     <section class="desk-front" aria-labelledby="desk-search-title">
         <div class="desk-search">
-            <p class="shelf-kicker">BOOK FINDER</p>
-            <h2 id="desk-search-title">找一本书</h2>
+            <div>
+                <p class="shelf-kicker">QUICK SEARCH</p>
+                <h2 id="desk-search-title">检索书目或直达车号</h2>
+            </div>
+            <p class="desk-lead">支持关键词、作者、原生标签语法，或输入数字车号直接打开书目扉页。</p>
             <form id="hero-search-form" action="/search" method="GET" class="desk-form">
                 <label class="visually-hidden" for="hero-keyword">搜索关键词或车号</label>
-                <input type="search" id="hero-keyword" name="keyword" class="form-control" placeholder="输入书名、作者、标签或车号" maxlength="200" required>
+                <input type="search" id="hero-keyword" name="keyword" class="form-control" placeholder="输入书名、作者、标签或车号（如 JM123456）" maxlength="200" required>
                 <button type="submit" class="btn btn-primary"><i class="bi bi-search" aria-hidden="true"></i> 搜索</button>
                 <button type="button" id="hero-download-btn" class="btn btn-outline-primary">按车号查书</button>
             </form>
-            <nav class="desk-links" aria-label="书斋快捷入口">
-                <a href="/library" data-nav-memory="/library">私人书阁 ↗</a>
-                <a href="/wishlist" data-nav-memory="/wishlist">心愿典藏 ↗</a>
-                <a href="/downloads">传输中心 ↗</a>
-            </nav>
+            <div class="desk-hints" aria-label="标签搜索语法提示">
+                <span>语法提示：</span>
+                <code>全彩 短篇</code><span>任一</span>
+                <code>+全彩 +短篇</code><span>同时</span>
+                <code>全彩 -短篇</code><span>排除</span>
+            </div>
         </div>
-        <div class="desk-folio bound-book" aria-hidden="true"><span>EX LIBRIS</span><b>藏書閣</b><span>JM / ATELIER</span></div>
+        <nav class="desk-shortcuts" aria-label="书斋快捷入口">
+            <a class="desk-tile" href="/library" data-nav-memory="/library">
+                <div class="desk-tile-head">
+                    <span class="desk-tile-icon" aria-hidden="true"><i class="bi bi-collection"></i></span>
+                    <span class="desk-tile-metric" id="home-stat-readable">—</span>
+                </div>
+                <div><strong>私人书阁</strong><small>可离线阅读与标签筛选</small></div>
+            </a>
+            <a class="desk-tile" href="/wishlist" data-nav-memory="/wishlist">
+                <div class="desk-tile-head">
+                    <span class="desk-tile-icon" aria-hidden="true"><i class="bi bi-bookmark-heart"></i></span>
+                    <span class="desk-tile-metric" id="home-stat-wishlist">—</span>
+                </div>
+                <div><strong>心愿典藏</strong><small>收藏清单与批量导入下载</small></div>
+            </a>
+            <a class="desk-tile" href="/downloads">
+                <div class="desk-tile-head">
+                    <span class="desk-tile-icon" aria-hidden="true"><i class="bi bi-list-ul"></i></span>
+                    <span class="desk-tile-metric" id="home-stat-downloaded">—</span>
+                </div>
+                <div><strong>传输中心</strong><small>队列进度、归档与导出</small></div>
+            </a>
+            <a class="desk-tile" href="/settings#palette">
+                <div class="desk-tile-head">
+                    <span class="desk-tile-icon" aria-hidden="true"><i class="bi bi-palette2"></i></span>
+                    <span class="desk-tile-metric">{{ ui_themes|length }} 套</span>
+                </div>
+                <div><strong>偏好与主题</strong><small>多风格主题、动效混搭与日志</small></div>
+            </a>
+        </nav>
     </section>
     <div class="desk-columns{% if not show_recent_downloads %} desk-columns-single{% endif %}">
         <section class="desk-ledger">
-            <div class="shelf-subhead"><div><p class="shelf-kicker">IN PROGRESS</p><h2>当前任务</h2></div><a href="/downloads">查看全部</a></div>
+            <div class="shelf-subhead"><div><p class="shelf-kicker">IN PROGRESS</p><h2>当前任务</h2></div><a href="/downloads">查看全部 ↗</a></div>
             {% for job in running_jobs %}
             <div class="desk-entry" data-job-id="{{ job.job_id }}" data-status="running">
-                <div class="desk-line"><strong>{{ job.title or job.album_id }}</strong><span id="pct-{{ job.job_id }}" class="badge bg-primary">{{ job.percentage }}%</span></div>
-                <div class="progress"><div id="progress-{{ job.job_id }}" class="progress-bar" role="progressbar" aria-label="下载进度" style="width: {{ job.percentage }}%" aria-valuenow="{{ job.percentage }}" aria-valuemin="0" aria-valuemax="100"></div></div>
-                <small id="info-{{ job.job_id }}" class="shelf-caption">{{ job.current_page }} / {{ job.total_pages }} 页</small>
+                {% if job.album_id %}
+                <a class="desk-thumb" href="/album/{{ job.album_id }}" tabindex="-1" aria-hidden="true">
+                    <span>{{ '%02d'|format(loop.index) }}</span>
+                    <img src="/api/cover/{{ job.album_id }}/portrait?w=180" alt="" loading="lazy" decoding="async">
+                </a>
+                {% endif %}
+                <div class="desk-entry-body">
+                    <div class="desk-line"><strong>{{ job.title or job.album_id }}</strong><span id="pct-{{ job.job_id }}" class="badge bg-primary">{{ job.percentage }}%</span></div>
+                    <div class="progress"><div id="progress-{{ job.job_id }}" class="progress-bar" role="progressbar" aria-label="下载进度" style="width: {{ job.percentage }}%" aria-valuenow="{{ job.percentage }}" aria-valuemin="0" aria-valuemax="100"></div></div>
+                    <small id="info-{{ job.job_id }}" class="shelf-caption">{{ job.current_page }} / {{ job.total_pages }} 页</small>
+                </div>
             </div>
-            {% else %}<p class="desk-empty">当前没有进行中的任务</p>{% endfor %}
+            {% else %}<p class="desk-empty"><i class="bi bi-check2-circle" aria-hidden="true"></i> 当前没有进行中的下载任务，可以从上方搜索或前往私人书阁继续阅读。</p>{% endfor %}
         </section>
         {% if show_recent_downloads %}
         <section class="desk-ledger" id="home-recent-downloads">
-            <div class="shelf-subhead"><div><p class="shelf-kicker">ACQUISITIONS</p><h2>最近下载</h2></div><a href="/downloads">查看全部</a></div>
+            <div class="shelf-subhead"><div><p class="shelf-kicker">ACQUISITIONS</p><h2>最近下载</h2></div><a href="/downloads">查看全部 ↗</a></div>
             {% for job in recent_jobs %}
             <div class="desk-entry desk-recent">
+                {% if job.album_id %}
+                <a class="desk-thumb" href="/album/{{ job.album_id }}" tabindex="-1" aria-hidden="true">
+                    <span class="desk-number">{{ '%02d'|format(loop.index) }}</span>
+                    <img src="/api/cover/{{ job.album_id }}/portrait?w=180" alt="" loading="lazy" decoding="async">
+                </a>
+                {% else %}
                 <span class="desk-number" aria-hidden="true">{{ '%02d'|format(loop.index) }}</span>
+                {% endif %}
                 <div><strong>{{ job.title or job.album_id }}</strong><small class="shelf-caption">{{ job.completed_at or '' }}</small></div>
                 <div class="desk-buttons">
                     {% if job.status == 'completed' %}<span class="badge bg-success">已完成</span>{% else %}<span class="badge bg-danger">失败</span>{% endif %}
@@ -50,7 +98,7 @@
                     {% if job.output_path %}<button type="button" class="btn btn-sm btn-outline-secondary" data-action="open-folder" data-job-id="{{ job.job_id }}" title="打开文件夹" aria-label="打开文件夹"><i class="bi bi-folder2-open" aria-hidden="true"></i></button>{% endif %}
                 </div>
             </div>
-            {% else %}<p class="desk-empty">暂无下载记录</p>{% endfor %}
+            {% else %}<p class="desk-empty"><i class="bi bi-inbox" aria-hidden="true"></i> 暂无下载记录</p>{% endfor %}
         </section>
         {% endif %}
     </div>

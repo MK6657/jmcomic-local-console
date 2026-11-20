@@ -1,11 +1,93 @@
 """Bounded, album-first views of the local transfer ledger."""
 from contextlib import closing
 import json
+from pathlib import Path
+import re
 
 from . import database as db
 
 
 STATES = ('running', 'paused', 'queued', 'completed', 'failed', 'canceled')
+
+
+def _is_placeholder_title(title: object, album_id: object) -> bool:
+    text = str(title or '').strip()
+    aid = str(album_id or '').strip()
+    if not text:
+        return True
+    if aid and (text == aid or re.fullmatch(rf'(?:JM[\s/_-]*)?{re.escape(aid)}', text, re.IGNORECASE)):
+        return True
+    return False
+
+
+def _title_from_output_path(output_path: object, album_id: object) -> str:
+    raw = str(output_path or '').strip()
+    if not raw:
+        return ''
+    name = Path(raw).name.strip()
+    if not name:
+        return ''
+    aid = str(album_id or '').strip()
+    if aid:
+        suffix = '_' + aid
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[:-len(suffix)].strip()
+    return '' if _is_placeholder_title(name, aid) else name
+
+
+def resolve_job_titles(jobs: list[dict], books: dict | None = None) -> list[dict]:
+    """Backfill missing or numeric-ID job titles from album_meta, detail cache, or folder name."""
+    missing_ids: list[str] = []
+    for job in jobs:
+        aid = str(job.get('album_id') or '').strip()
+        if aid and _is_placeholder_title(job.get('title'), aid):
+            book_title = (books.get(aid, {}).get('title') or '').strip() if books else ''
+            if book_title and not _is_placeholder_title(book_title, aid):
+                job['title'] = book_title
+            else:
+                missing_ids.append(aid)
+
+    meta_titles: dict[str, str] = {}
+    if missing_ids:
+        unique_ids = tuple(dict.fromkeys(missing_ids))
+        placeholders = ','.join('?' for _ in unique_ids)
+        with closing(db.get_db()) as conn:
+            for row in conn.execute(
+                f'SELECT album_id, title FROM album_meta WHERE album_id IN ({placeholders})',
+                unique_ids,
+            ):
+                candidate = (row['title'] or '').strip()
+                if candidate and not _is_placeholder_title(candidate, row['album_id']):
+                    meta_titles[row['album_id']] = candidate
+            still_missing = [aid for aid in unique_ids if aid not in meta_titles]
+            if still_missing:
+                p2 = ','.join('?' for _ in still_missing)
+                for aid, raw in conn.execute(
+                    f'SELECT album_id, detail_json FROM album_detail_cache WHERE album_id IN ({p2}) '
+                    'AND length(CAST(detail_json AS BLOB)) <= 262144',
+                    tuple(still_missing),
+                ):
+                    try:
+                        detail = json.loads(raw)
+                    except (TypeError, ValueError, RecursionError):
+                        continue
+                    if isinstance(detail, dict):
+                        candidate = str(detail.get('title') or '').strip()
+                        if candidate and not _is_placeholder_title(candidate, aid):
+                            meta_titles[aid] = candidate
+
+    for job in jobs:
+        aid = str(job.get('album_id') or '').strip()
+        if not aid or not _is_placeholder_title(job.get('title'), aid):
+            continue
+        resolved = meta_titles.get(aid) or _title_from_output_path(job.get('output_path'), aid)
+        if resolved:
+            job['title'] = resolved
+            if books is not None:
+                entry = books.setdefault(aid, {})
+                if _is_placeholder_title(entry.get('title'), aid):
+                    entry['title'] = resolved
+    return jobs
 
 
 def transfer_page(page, page_size, album_id=None):

@@ -18,6 +18,15 @@ from .validation import EXPORT_IMAGE_EXTENSIONS, safe_dirname
 _FLAT_PAGE = re.compile(r"__([0-9]{1,20})_p([0-9]{5,})(?:~[0-9]+)?\Z")
 
 
+def read_flat_page_name(name):
+    path = Path(name)
+    match = _FLAT_PAGE.search(path.stem)
+    if (match and match[2] != "00000" and path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS
+            and path.name == name and name.isprintable() and safe_dirname(name, max_len=255) == name):
+        return match.groups()
+    return None
+
+
 def _digest(path):
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -32,13 +41,13 @@ class _Variant:
     loose: list = field(default_factory=list)
     packed: list = field(default_factory=list)
 
-    def matches(self, size, digest, read):
+    def matches(self, size, digest, read, expected_ext=".webp"):
         for path in self.loose:
-            if (path.suffix.lower() != ".webp" or is_link(path) or not path.is_file()
+            if (path.suffix.lower() != expected_ext or is_link(path) or not path.is_file()
                     or path.stat().st_size != size or _digest(path) != digest):
                 return False
         for index, page in self.packed:
-            if (page.suffix != ".webp" or page.size != size
+            if (page.suffix != expected_ext or page.size != size
                     or hashlib.sha256(read(index, page)).digest() != digest):
                 return False
         return True
@@ -67,11 +76,9 @@ class _FlatPages:
                         variant.packed.append((index, page))
 
     def _variant(self, name):
-        path = Path(name)
-        match = _FLAT_PAGE.search(path.stem)
-        if (match and path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS and path.name == name
-                and name.isprintable() and safe_dirname(name, max_len=255) == name):
-            return self.variants[match.groups()].setdefault(path.stem.casefold(), _Variant(name))
+        identity = read_flat_page_name(name)
+        if identity:
+            return self.variants[identity].setdefault(Path(name).stem.casefold(), _Variant(name))
         return None
 
     def _read(self, index, page):
@@ -80,12 +87,13 @@ class _FlatPages:
         return self.readers[index.path](page)
 
     def place(self, source, prefix, photo_id, *, verify_source=None):
+        ext = source.suffix.lower()
         variants = self.variants[photo_id, source.stem]
         if variants:
             size, digest = source.stat().st_size, _digest(source)
             for variant in variants.values():
                 self.check_control()
-                if variant.matches(size, digest, self._read):
+                if variant.matches(size, digest, self._read, expected_ext=ext):
                     if variant.loose:
                         self.check_control()
                         if verify_source:
@@ -96,7 +104,7 @@ class _FlatPages:
             log.warning(f"扁平整理：章节 {photo_id} 第 {source.stem} 页已有不同内容，分别保留")
         for version in count(1):
             suffix = "" if version == 1 else f"~{version}"
-            target = self.directory / f"{prefix}_p{source.stem}{suffix}.webp"
+            target = self.directory / f"{prefix}_p{source.stem}{suffix}{ext}"
             if target.stem.casefold() not in variants and not os.path.lexists(target):
                 return self._move(source, target, self._variant(target.name), verify_source)
 
@@ -129,9 +137,11 @@ def flatten(directory, photos, check_control):
             photo_id = str(photo.photo_id)
             prefix = f"{folder.name.rsplit('__', 1)[0]}__{photo_id}"
             for number in range(1, len(photo) + 1):
-                source = folder / f"{number:05d}.webp"
-                if os.path.lexists(source) and not is_link(source) and source.is_file():
-                    confirmed.add(flat.place(source, prefix.replace(" ", "_"), photo_id))
+                for ext in (".webp", ".png", ".jpg"):
+                    source = folder / f"{number:05d}{ext}"
+                    if os.path.lexists(source) and not is_link(source) and source.is_file():
+                        confirmed.add(flat.place(source, prefix.replace(" ", "_"), photo_id))
+                        break
     return confirmed
 
 

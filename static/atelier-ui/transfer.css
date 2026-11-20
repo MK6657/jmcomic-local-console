@@ -1,1 +1,44 @@
-.transfer-ledger{display:flex;flex-wrap:wrap;align-items:end;column-gap:16px;row-gap:4px}.transfer-ledger a{display:flex;gap:4px;align-items:baseline;color:var(--ink-2);text-decoration:none;font-size:12px}.transfer-ledger strong{color:var(--ink);font:600 20px/1.15 var(--font-mono,monospace)}.transfer-ledger a:hover span,.transfer-ledger a:focus-visible span{color:var(--accent);text-decoration:underline}
+.transfer-ledger {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.transfer-ledger a {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-card);
+  color: var(--ink-2);
+  text-decoration: none;
+  font-size: 12px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+.transfer-ledger strong {
+  color: var(--ink);
+  font: 600 18px/1.1 var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+}
+.transfer-ledger a[data-state="running"].is-active-count {
+  border-color: var(--accent);
+  background: var(--bg-tint);
+}
+.transfer-ledger a[data-state="running"].is-active-count strong {
+  color: var(--accent);
+}
+.transfer-ledger a[data-state="paused"].is-active-count strong {
+  color: var(--warn);
+}
+.transfer-ledger a[data-state="completed"].is-active-count strong {
+  color: var(--ok);
+}
+.transfer-ledger a:hover,
+.transfer-ledger a:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-tint);
+  color: var(--accent);
+}

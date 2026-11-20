@@ -9,11 +9,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import database as db
-from . import album_maintenance
+from . import album_maintenance, path_guard
 from .download_checkpoint import discard_checkpoint
 from .logger import log, set_request_id, clear_request_id
 from .progress import progress_manager
 from .jm_service import download_album_job
+from .publication import reclaim_work_pages
 from .task_commands import (
     RETRYABLE_STATUSES, EnqueueResult, TaskCommandError, enqueue_download, retry_download,
     recover_interrupted, requeue_interrupted, resume_download, finish_download, cancel_download,
@@ -43,6 +44,7 @@ class JobManager:
         self._job_controls: dict[str, _JobControl] = {}
         self._running_jobs: dict[str, threading.Thread] = {}
         self._running_albums: dict[str, str] = {}
+        self._removed_work: dict[str, str] = {}
         self._finalizing_jobs: set[str] = set()
         self._schedule_wakeup = threading.Event()
         self._stop_event = threading.Event()
@@ -348,6 +350,9 @@ class JobManager:
                     # failed; executor ownership must still be released below.
                     log.error(f"保存中断任务状态失败 job_id={job_id} error={error}")
                 try:
+                    album = self._removed_work.pop(job_id, None)
+                    if album is not None:
+                        self._reclaim_removed_work(job_id, album)
                     progress_manager.remove_tracker(job_id)
                 finally:
                     clear_request_id()
@@ -385,7 +390,32 @@ class JobManager:
                 raise TaskCommandError("status", "任务正在下载中，请先取消后再删除", 400)
             db.delete_job(job_id)
             discard_checkpoint(job_id)
+            if job["status"] in ("failed", "canceled"):
+                self._retire_removed_work(job_id, job["album_id"])
             self._schedule_wakeup.set()
+
+    def clear_jobs(self, statuses):
+        removed = {}
+        count = db.clear_jobs_by_status(statuses, removed_work=removed)
+        for job_id, album_id in removed.items():
+            with self._job_control(job_id):
+                discard_checkpoint(job_id)
+                self._retire_removed_work(job_id, album_id)
+        return count
+
+    def _retire_removed_work(self, job_id, album_id):
+        with self._lock:
+            if job_id in self._running_jobs:
+                self._removed_work[job_id] = album_id
+                return
+        self._reclaim_removed_work(job_id, album_id)
+
+    @staticmethod
+    def _reclaim_removed_work(job_id, album_id):
+        try:
+            reclaim_work_pages(path_guard.DOWNLOAD_ROOT, job_id, album_id)
+        except Exception as error:
+            log.warning(f"任务已移除，工作页暂未回收 job_id={job_id} error={type(error).__name__}")
 
     def begin_file_finalization(self, job_id: str) -> bool:
         """Order the first non-repeatable file operation against pause, without locking I/O."""

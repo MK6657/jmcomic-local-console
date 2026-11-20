@@ -401,11 +401,16 @@ const cardIds = p => p.grid.children.filter(k => k.classList && k.classList.cont
     p.respond('/api/library?', data); await flush();
     const card = find(p.grid, hasClass('library-card'));
     out.coverSources.push(find(card, hasClass('card-cover')).src);
-    for (const action of ['export-zip', 'export-pdf']) {
-      const button = find(card, x => x.dataset.action === action);
-      if (button) p.click(button);
+    const select = find(card, hasClass('export-format-select'));
+    const exportBtn = find(card, x => x.dataset.action === 'export-selected');
+    let selectOpens = [];
+    if (select && exportBtn) {
+      selectOpens = p.click(select);
+      p.click(exportBtn); // default format (cbz)
+      select.value = 'zip'; p.click(exportBtn);
+      select.value = 'pdf'; p.click(exportBtn);
     }
-    out.localActions.push({read: !!find(card, hasClass('read-link')), exports});
+    out.localActions.push({read: !!find(card, hasClass('read-link')), hasPicker: !!(select && exportBtn), selectOpens, exports});
   }
   console.log(JSON.stringify(out));
 })().catch(err => { console.error(err && err.stack || err); process.exit(1); });
@@ -463,9 +468,12 @@ def test_the_initial_state_comes_from_data_card_click(harness):
 
 def test_read_is_available_on_both_cards_and_only_local_books_offer_export(harness):
     assert harness["localActions"] == [
-        {"read": True, "exports": []},
-        {"read": True, "exports": [["/api/library/456/export/zip", "ZIP", "JM456"],
-                                   ["/api/library/456/export/pdf", "PDF", "JM456"]]},
+        {"read": True, "hasPicker": False, "selectOpens": [], "exports": []},
+        {"read": True, "hasPicker": True, "selectOpens": [], "exports": [
+            ["/api/library/456/export/cbz", "CBZ", "JM456"],
+            ["/api/library/456/export/zip", "ZIP", "JM456"],
+            ["/api/library/456/export/pdf", "PDF", "JM456"],
+        ]},
     ]
 
 

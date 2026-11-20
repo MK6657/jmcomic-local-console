@@ -23,6 +23,7 @@
 
   /** @type {number|null} */
   var pollTimer = null;
+  var pageHidden = false;
   var activeGroup = 'running';
   var groupPages = { running: 1, queued: 1, completed: 1, failed: 1 };
   var refreshSerial = 0;
@@ -369,11 +370,13 @@
   // ── 刷新任务列表 ──
 
   function refreshJobs() {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+    if (pageHidden || document.hidden) return;
     var group = activeGroup;
     var serial = ++refreshSerial;
     var query = new URLSearchParams({ page: String(groupPages[group]), page_size: String(pageSize),
       status: group === 'running' ? 'active' : group });
-    // abortKey：轮询/操作触发的连续刷新自动中止上一次未完成的请求，避免堆积
     apiFetch('/api/jobs?' + query.toString(), { abortKey: 'downloads-refresh' })
       .then(function (data) {
         if (serial !== refreshSerial || group !== activeGroup) return;
@@ -388,6 +391,9 @@
       .catch(function (err) {
         if (serial !== refreshSerial || (err && err.name === 'AbortError')) return;
         showToast('加载任务列表失败: ' + err.message, 'danger');
+      })
+      .finally(function () {
+        if (serial === refreshSerial && !document.hidden) pollTimer = setTimeout(refreshJobs, 5000);
       });
   }
 
@@ -487,10 +493,44 @@
     var container = document.getElementById(status + '-section');
     if (!container) return;
     if (items.length === 0) {
-      container.innerHTML = '<div class="text-center text-muted py-4"><i class="bi bi-emoji-neutral" style="font-size:2rem;"></i><p class="mt-2 mb-0">没有' + statusLabel(status) + '</p></div>';
+      var emptyHtml = '<div class="text-center text-muted py-4"><i class="bi bi-emoji-neutral" style="font-size:2rem;"></i><p class="mt-2 mb-0">没有' + statusLabel(status) + '</p></div>';
+      if (container._sectionMarkup === emptyHtml) return;
+      container.innerHTML = emptyHtml;
+      container._sectionMarkup = emptyHtml;
+      container._runningSig = null;
       return;
     }
-    container.innerHTML = items.map(function (job) { return renderFn(job); }).join('');
+    if (status === 'running' && typeof container.querySelectorAll === 'function') {
+      var sig = items.map(function (job) { return job.job_id + '|' + job.status + '|' + (job.title || ''); }).join('\n');
+      if (container._runningSig === sig) {
+        var matched = true;
+        for (var i = 0; i < items.length; i++) {
+          var job = items[i];
+          var infoEl = document.getElementById('info-' + job.job_id);
+          var barEl = document.getElementById('progress-' + job.job_id);
+          var pctEl = document.getElementById('pct-' + job.job_id);
+          if (!infoEl || !barEl || !pctEl) { matched = false; break; }
+          var done = Number(job.done_pages) || 0;
+          var total = Number(job.total_pages) || 0;
+          var infoText = total > 0 ? (done + ' / ' + total + ' 页') : '总页数待确认';
+          if (infoEl.textContent !== infoText) infoEl.textContent = infoText;
+          var widthText = job._pct + '%';
+          if (barEl.style.width !== widthText) barEl.style.width = widthText;
+          if (job.status !== 'paused') {
+            var nextBadge = '<i class="bi-arrow-repeat"></i> ' + job._pct + '%';
+            if (pctEl.innerHTML !== nextBadge) pctEl.innerHTML = nextBadge;
+          }
+        }
+        if (matched) return;
+      }
+      container._runningSig = sig;
+    } else {
+      container._runningSig = null;
+    }
+    var html = items.map(function (job) { return renderFn(job); }).join('');
+    if (container._sectionMarkup === html) return;
+    container.innerHTML = html;
+    container._sectionMarkup = html;
   }
 
   function statusLabel(s) {
@@ -621,12 +661,9 @@
   });
 
   // ── 轮询：离开页面（含进入 bfcache）时停止，返回时立即刷新并恢复 ──
-  function startPolling() {
-    if (!pollTimer) pollTimer = setInterval(refreshJobs, 5000);
-  }
   function stopPolling() {
     refreshSerial++;
-    if (pollTimer) clearInterval(pollTimer);
+    clearTimeout(pollTimer);
     pollTimer = null;
   }
 
@@ -641,16 +678,18 @@
       refreshJobs();
     });
     refreshJobs();
-    startPolling();
   });
 
-  window.addEventListener('pagehide', stopPolling);
+  window.addEventListener('pagehide', function () {
+    pageHidden = true;
+    stopPolling();
+  });
   window.addEventListener('pageshow', function (event) {
     if (!event.persisted) return;
+    pageHidden = false;
     readableKey = null; // 回到本页：重新判断哪些可以离线阅读、哪些有已确认的新章节
     updatesKey = null;
     refreshJobs();
-    startPolling();
   });
   // 切回本标签页时重新判断（文件可能在别处被移动/删除）
   document.addEventListener('visibilitychange', function () {
@@ -663,6 +702,5 @@
     readableKey = null;
     updatesKey = null;   // 可能刚在详情页点过“立即检查”
     refreshJobs();
-    startPolling();
   });
 })();

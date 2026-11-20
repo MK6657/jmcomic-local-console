@@ -123,5 +123,9 @@ def confirm():
             job_manager.schedule_next()   # 任务已经写进队列；调度照常看定时下载时间段
         except Exception as e:
             log.error(f"批量下载后调度失败（任务仍在队列中）kind={kind} error={e}")
-    context = _context()
-    return jsonify({"status": "ok", **result, "window": context["window"], "queue": context["queue"]}), 201
+    try:
+        context = _context()
+        result.update(window=context["window"], queue=context["queue"])
+    except Exception:
+        log.exception(f"批量下载已入队，读取队列摘要失败 kind={kind}")
+    return jsonify({"status": "ok", **result}), 201

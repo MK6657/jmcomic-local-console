@@ -2,7 +2,7 @@
 
 一部漫画“本地可读”= 资源目录记录的最近一次成功下载的输出目录仍然存在、在下载目录内，
 而且目录树里至少有一张本地阅读器能打开的图片（has_page_image）。
-与本地阅读器（routes/api_preview._find_album_dir + _scan_pages）的判断一致：最近一次完成的任务目录不在了，
+与本地阅读器的判断一致：最近一次完成的任务目录不在了，
 就不再回退到更早的任务；目录还在但一页图片都没有（例如被“打开文件夹”重新建出的空目录），也不算可读。
 下载总是写到同一个目录（DOWNLOAD_ROOT/<漫画名>_<album_id>）：目录被删除后又被新的下载任务重新建出来时，
 更早完成的任务会被标记为 superseded（database.mark_completed_jobs_superseded），不再算可读——
@@ -21,7 +21,7 @@
   archive_corrupt  没有散图，压缩包打不开 / 校验不对 —— 不可读，原因“压缩包损坏”
   archive_empty    没有散图，压缩包里没有能显示的图片 —— 不可读，原因“压缩包无可阅读图片”
   missing          能用的本地文件都不在（目录不在、空目录、目录被后来的下载重新建出）—— 原因“文件已删除”
-记住压缩包的结论时同时记下目录里每个候选压缩包的（大小, 修改时间），复用前逐个 lstat 确认没变；
+记住压缩包的结论时同时记下目录里每个候选压缩包的文件版本，复用前逐个 lstat 确认没变；
 本程序自己往目录里下载、打包时调用 forget()，不必等有效期。
 """
 import os
@@ -34,7 +34,7 @@ from pathlib import Path
 from . import archive_pages
 from . import database as db
 from . import path_guard
-from .file_tree import _REPARSE_POINT, iter_safe_files
+from .file_tree import _REPARSE_POINT, iter_safe_files, safe_files
 from .path_guard import is_safe_path
 from .validation import is_allowed_image, validate_numeric
 
@@ -53,7 +53,14 @@ def is_page_image(path) -> bool:
     return is_allowed_image(path.suffix) and is_safe_path(path)
 
 
-def first_page_image(folder) -> Path | None:
+def scan_page_images(folder: Path, *, check_paths=True) -> list[tuple[str, Path]]:
+    """Loose pages in reader order, shared by preview and cover selection."""
+    accept = is_page_image if check_paths else lambda page: is_allowed_image(page.suffix)
+    return [(page.relative_to(folder).as_posix(), page) for page in safe_files(folder, nonempty=True)
+            if accept(page)]
+
+
+def _first_page_evidence(folder) -> Path | None:
     """目录树里第一张可读的图片，没有则 None（folder 须已通过 is_safe_path）。
 
     与阅读器扫描同一套规则（core.file_tree：不跟随符号链接/目录联接，目录本身是链接则不可读），
@@ -69,8 +76,8 @@ def first_page_image(folder) -> Path | None:
 
 
 def has_page_image(folder) -> bool:
-    """目录树里是否至少有一页可读的图片（folder 须已通过 is_safe_path；规则见 first_page_image）。"""
-    return first_page_image(folder) is not None
+    """目录树里是否至少有一页可读的图片（folder 须已通过 is_safe_path）。"""
+    return _first_page_evidence(folder) is not None
 
 
 @dataclass(frozen=True)
@@ -105,26 +112,23 @@ def _is_link(info) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
-def _archive_signature(path):
-    info = _lstat(path)
-    if info is None or not stat.S_ISREG(info.st_mode) or _is_link(info):
-        return None
-    return (info.st_size, info.st_mtime_ns)
-
-
 def _archive_evidence(folder):
     """(LocalState, 依据)：没有散图时看压缩包（archive_pages.select_status，没变的压缩包不再打开）；
     依据是各候选压缩包的（路径, 签名）。打开压缩包暂时出错（被占用等）时不留依据：下次重新判断。"""
     try:
+        evidence = tuple((path, archive_pages._signature(path)) for path in archive_pages.candidates(folder))
         found = archive_pages.select_status(folder)
         if found is None:
             return MISSING, None
-        _, status, fmt, transient = found
+        selected, status, fmt, transient = found
         if transient and status != "ok":
             # 暂时打不开（被别的程序占用等）：不说成“压缩包损坏”，按还能读算；不留依据，下次重新判断
             return LocalState("archive", fmt), None
         state = LocalState(_ARCHIVE_STATES[status], fmt)
-        return state, tuple((path, archive_pages._signature(path)) for path in archive_pages.candidates(folder))
+        if (not any(path == selected and signature is not None for path, signature in evidence)
+                or not all(archive_pages._signature(path) == signature for path, signature in evidence)):
+            return state, None
+        return state, evidence
     except Exception:  # 防御：一个压缩包出任何意外都不能让整批判断失败
         return LocalState("archive_corrupt", None), None
 
@@ -174,13 +178,13 @@ def _folder_state(path: str, job_id: str, now: float, root: list) -> LocalState:
                     return state  # 记下的那一页还在
             elif state.state == "missing":
                 return state
-            elif evidence and all(_archive_signature(path) == signature for path, signature in evidence):
+            elif evidence and all(archive_pages._signature(path) == signature for path, signature in evidence):
                 return state      # 压缩包都没变
     if not root:
         root.append(path_guard.get_download_root())
     state, evidence = MISSING, None
     if is_safe_path(path, root[0]):
-        page = first_page_image(path)
+        page = _first_page_evidence(path)
         if page is not None:
             state, evidence = LocalState("loose"), page
         else:
@@ -198,13 +202,11 @@ def local_states(album_ids, *, conn=None) -> dict[str, LocalState]:
     ids = [a for a in dict.fromkeys(str(a) for a in album_ids) if validate_numeric(a)][:MAX_IDS]
     if not ids:
         return {}
-    rows = db.resource_records(ids, conn=conn)
+    rows = db.resource_records(ids, conn=conn, latest_only=True)
     states: dict[str, LocalState] = {}
     now, root = time.monotonic(), []
     for row in rows:
         album_id = row["album_id"]
-        if album_id in states:
-            continue  # 只看最近一次完成的任务
         if row["superseded_at"] or not row["output_path"]:
             states[album_id] = MISSING  # 它的目录后来被重新下载重新建出：里面的内容不是这次完成的下载
         else:

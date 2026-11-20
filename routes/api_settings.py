@@ -5,27 +5,40 @@ download_root 固定为项目 downloads/，不接受修改。
 """
 import io
 import json
+import threading
 
 from flask import Blueprint, request, jsonify, send_file
 
-from core.settings import DEFAULT_SETTINGS, get_settings, update_settings
+from core.settings import DEFAULT_SETTINGS, get_settings, normalize_settings_patch, update_settings
 from core.logger import log
 from core.jm_service import invalidate_option_cache
 from core.scheduler import sync_with_settings as sync_scheduler
 
 api_settings_bp = Blueprint("api_settings", __name__)
 
+_NETWORK_KEYS = {"proxy", "timeout", "retry_times", "client_type", "image_threads", "photo_threads"}
+_SCHEDULE_KEYS = {"schedule_enabled", "schedule_start", "schedule_end"}
+_apply_lock = threading.Lock()
 
-def _apply_saved_settings():
+
+def _apply_saved_settings(changed: set[str]) -> list[str]:
     """Persistence already committed: report live-application failures honestly."""
+    actions = []
+    if changed & _NETWORK_KEYS:
+        actions.append(("网络客户端", invalidate_option_cache))
+    if changed & _SCHEDULE_KEYS:
+        actions.append(("定时调度", sync_scheduler))
+    if not actions:
+        return []
     warnings = []
-    for name, action in (("网络客户端", invalidate_option_cache), ("定时调度", sync_scheduler)):
-        try:
-            action()
-        except Exception as exc:
-            # Settings can contain credentials; log only the operation and error type.
-            log.error(f"设置已保存但应用失败 component={name} error_type={type(exc).__name__}")
-            warnings.append(f"{name}未能立即应用，请重启程序后检查")
+    with _apply_lock:
+        for name, action in actions:
+            try:
+                action()
+            except Exception as exc:
+                # Settings can contain credentials; log only the operation and error type.
+                log.error(f"设置已保存但应用失败 component={name} error_type={type(exc).__name__}")
+                warnings.append(f"{name}未能立即应用，请重启程序后检查")
     return warnings
 
 
@@ -51,14 +64,43 @@ def save_settings():
         del body["download_root"]
 
     try:
-        update_settings(body)
+        changed = update_settings(body)
     except ValueError as exc:
         return jsonify(status="error", message=str(exc)), 400
-    ui_only = set(body).issubset({"ui_theme", "library_card_click", "home_show_recent_downloads"})
-    warnings = [] if ui_only else _apply_saved_settings()
+    warnings = _apply_saved_settings(changed)
     updated = get_settings()
     log.info(f"API保存设置 keys_updated={list(body.keys())}")
     return jsonify({"status": "ok", "saved": True, "settings": updated, "warnings": warnings})
+
+
+@api_settings_bp.post("/api/settings/reset")
+def reset_settings():
+    """还原默认配置（scope='appearance' 仅还原主题与动效，默认还原全部可写设置）。"""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"status": "error", "message": "请求体需为 JSON 对象"}), 400
+    scope = str(body.get("scope", "all") or "all").strip()
+    if scope == "appearance":
+        patch = {
+            key: DEFAULT_SETTINGS[key]
+            for key in ("ui_theme", "ui_fx_enabled", "ui_fx_preset")
+        }
+        update_settings(patch)
+        updated = get_settings()
+        log.info("API还原默认外观设置")
+        return jsonify({"status": "ok", "saved": True, "scope": scope, "settings": updated, "warnings": []})
+    if scope != "all":
+        return jsonify({"status": "error", "message": "未知的还原范围"}), 400
+    preserve_proxy = bool(body.get("preserve_proxy", False))
+    patch = {
+        k: v for k, v in DEFAULT_SETTINGS.items()
+        if k != "download_root" and not (preserve_proxy and k == "proxy")
+    }
+    changed = update_settings(patch)
+    warnings = _apply_saved_settings(changed)
+    updated = get_settings()
+    log.info(f"API还原默认设置 preserve_proxy={preserve_proxy}")
+    return jsonify({"status": "ok", "saved": True, "scope": scope, "settings": updated, "warnings": warnings})
 
 
 # ── 导入 / 导出 ──
@@ -115,7 +157,6 @@ def import_settings():
     if not isinstance(data, dict):
         return jsonify({"status": "error", "message": "设置文件内容需为 JSON 对象"}), 400
 
-    imported = 0
     skipped = 0
     errors = []
 
@@ -129,21 +170,15 @@ def import_settings():
             skipped += 1
             errors.append("download_root 为只读项，已跳过")
             continue
-        patch[key] = value
-    if patch:
         try:
-            update_settings(patch)
-            imported = len(patch)
+            patch.update(normalize_settings_patch({key: value}))
         except ValueError:
-            for key, value in patch.items():
-                try:
-                    update_settings({key: value})
-                    imported += 1
-                except ValueError:
-                    skipped += 1
-                    errors.append(f"设置 '{key}' 失败，已跳过")
+            skipped += 1
+            errors.append(f"设置 '{key}' 失败，已跳过")
 
+    changed = update_settings(patch)
+    imported = len(patch)
     log.info(f"API导入设置 imported={imported} skipped={skipped} errors={len(errors)}")
-    warnings = _apply_saved_settings() if imported else []
+    warnings = _apply_saved_settings(changed)
     return jsonify({"status": "ok", "imported": imported, "skipped": skipped, "errors": errors,
                     "warnings": warnings})

@@ -1,13 +1,16 @@
-"""Opt-in source measurement: python -m pytest -qs tests/check_atelier_gallery_430.py.
+"""Opt-in source measurement: python -m pytest -qs tests/checks/check_atelier_gallery_430.py.
 
 Requires local Playwright Chromium. Pytest's socket/libcurl guards remain active. Waitress
 serves only loopback; only SDK transport and search results are fixtures, never the reader APIs.
 """
 import json
 import threading
+import sys
 from pathlib import Path
 from time import perf_counter
 from urllib.parse import urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 from flask import jsonify

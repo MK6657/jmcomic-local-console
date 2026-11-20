@@ -3,6 +3,7 @@ import io
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -170,13 +171,17 @@ def test_online_routes_reject_bad_ids(client, path, status):
 
 def test_album_pages_lists_every_readable_chapter(client, online):
     from core import database as db
+    reader, _ = online
     jobs_before = len(db.get_all_jobs())
     data = client.get("/api/online/123").get_json()
     assert data["status"] == "ok" and data["title"] == "Online album"
     assert data["total_pages"] == 5 and data["skipped_chapters"] == 1
     assert [p["page"] for p in data["pages"]] == [1, 2, 3, 4, 5]
-    assert data["pages"][0] == {"page": 1, "url": "/api/online-img/123/0", "chapter": "第1话", "photo_id": "123"}
-    assert data["pages"][3]["url"] == "/api/online-img/125/0"
+    generation = reader._page_path("123", 0).parent.parent.name
+    assert data["pages"][0] == {
+        "page": 1, "url": f"/api/online-img/123/0?v={generation}", "chapter": "第1话", "photo_id": "123",
+    }
+    assert data["pages"][3]["url"] == f"/api/online-img/125/0?v={generation}"
     assert len(db.get_all_jobs()) == jobs_before  # reading online never creates a download job
 
 
@@ -191,6 +196,50 @@ def test_single_chapter_album_whose_page_list_fails_is_retryable(client, online)
     assert response.json["error_kind"] == "upstream_error"
     assert "获取 photo 详情失败 photo_id=500 error=OSError: chapter unavailable" in lm.ERROR_LOG_FILE.read_text(
         encoding="utf-8")
+
+
+@pytest.mark.parametrize("chapter_error,status,kind,upstream", [
+    (403, 502, "access_denied", 403),
+    (500, 502, "http_error", 500),
+    (None, 504, "timeout", None),
+])
+def test_unreadable_album_preserves_chapter_failure(client, online, monkeypatch, chapter_error, status, kind, upstream):
+    from requests import HTTPError, Response
+
+    _, fake = online
+    fake.album = FakeAlbum([FakePhoto("500", 0)])
+
+    def fail(_photo):
+        if chapter_error is None:
+            raise TimeoutError("private transport failure")
+        response = Response()
+        response.status_code = chapter_error
+        raise HTTPError("private transport failure", response=response)
+
+    monkeypatch.setattr(fake, "check_photo", fail)
+    response = client.get("/api/online/500")
+    assert (response.status_code, response.json["error_kind"], response.json.get("upstream_status")) == (
+        status, kind, upstream,
+    )
+    assert "private transport failure" not in response.get_data(as_text=True)
+
+
+def test_unreadable_album_prefers_http_failure_to_timeout(client, online, monkeypatch):
+    from core.upstream import http_failure
+
+    _, fake = online
+    fake.album = FakeAlbum([FakePhoto("500", 0), FakePhoto("501", 0)])
+
+    def fail(photo):
+        if photo.photo_id == "500":
+            raise TimeoutError("timed out")
+        raise http_failure(403)
+
+    monkeypatch.setattr(fake, "check_photo", fail)
+    response = client.get("/api/online/500")
+    assert (response.status_code, response.json["error_kind"], response.json["upstream_status"]) == (
+        502, "access_denied", 403,
+    )
 
 
 def test_album_whose_chapters_really_have_no_pages_is_404(client, online, monkeypatch):
@@ -217,13 +266,13 @@ def test_image_is_fetched_once_then_served_from_cache(client, online):
     first = client.get("/api/online-img/123/1")
     assert first.status_code == 200
     assert first.mimetype == "image/png"  # unscrambled originals keep their real format
-    assert first.headers["Cache-Control"] == "public, max-age=86400"
+    assert first.cache_control.no_store and not first.cache_control.public
     first.close()
     again = client.get("/api/online-img/123/1")
     assert again.status_code == 200
     again.close()
     assert fake.downloads == ["https://cdn.invalid/media/photos/123/00002.webp?v=1"]
-    assert (online_reader.CACHE_ROOT / "123" / "00002.webp").is_file()
+    assert online_reader._page_path("123", 1).is_file()
 
 
 def test_image_for_unlisted_chapter_fetches_its_page_list(client, online):
@@ -254,7 +303,7 @@ def test_page_is_cached_under_the_fixed_name_and_served_as_its_real_type(client,
     if mime != "image/jpeg" or scramble_id is None:
         assert response.get_data() == payload  # not scrambled: never decoded or re-encoded
     response.close()
-    assert [p.name for p in (online_reader.CACHE_ROOT / photo_id).iterdir()] == ["00002.webp"]  # no temp files
+    assert [p.name for p in online_reader._page_path(photo_id, 1).parent.iterdir()] == ["00002.webp"]
 
 
 def _animated_gif():
@@ -283,7 +332,7 @@ def test_gif_page_is_served_unsliced_and_animated(client, online, monkeypatch, p
     with Image.open(io.BytesIO(response.get_data())) as served:
         assert served.n_frames == 3
     response.close()
-    assert [p.name for p in (online_reader.CACHE_ROOT / photo_id).iterdir()] == ["00001.webp"]
+    assert [p.name for p in online_reader._page_path(photo_id, 0).parent.iterdir()] == ["00001.webp"]
 
 
 def test_download_job_does_not_unscramble_gif_pages(client, monkeypatch, tmp_path):
@@ -505,7 +554,7 @@ def test_invalid_download_is_rejected_without_leftovers(client, online, monkeypa
     use_client(monkeypatch, fake)
     response = client.get("/api/online-img/300000/0")
     assert (response.status_code, response.json["error_kind"]) == (502, "invalid_response")
-    folder = online_reader.CACHE_ROOT / "300000"
+    folder = online_reader._page_path("300000", 0).parent
     assert not folder.exists() or list(folder.iterdir()) == []
     hosts = [urlsplit(url).netloc for url in fake.downloads]
     assert set(hosts) == {"cdn.invalid", *JmModuleConfig.DOMAIN_IMAGE_LIST}
@@ -591,13 +640,13 @@ def test_failed_download_leaves_no_partial_file(client, online):
     client.get("/api/online/123")
     response = client.get("/api/online-img/123/0")
     assert (response.status_code, response.json["error_kind"]) == (502, "connection")
-    leftovers = list(online_reader.CACHE_ROOT.rglob("*.*")) if online_reader.CACHE_ROOT.exists() else []
+    leftovers = list(online_reader._page_path("123", 0).parent.glob("*"))
     assert leftovers == []
 
 
 def test_cache_trim_evicts_least_recently_read_pages(client, online, monkeypatch):
     online_reader, _ = online
-    folder = online_reader.CACHE_ROOT / "123"
+    folder = online_reader._page_path("123", 0).parent
     folder.mkdir(parents=True)
     now = time.time()
     for n in range(10):
@@ -622,9 +671,102 @@ def test_clear_cache_endpoint_also_clears_online_pages(client, online):
     online_reader, _ = online
     client.get("/api/online/123")
     client.get("/api/online-img/123/0").close()
-    assert online_reader.CACHE_ROOT.exists()
+    old_page = online_reader._page_path("123", 0)
+    assert old_page.is_file()
+    response = client.post("/api/system/clear-cache")
+    assert response.status_code == 200 and response.json["online_cache_cleanup_pending"] is False
+    assert not old_page.exists()
+    assert online_reader._page_path("123", 0) != old_page
+
+
+def test_legacy_online_cache_stays_readable_until_cleared(client, online, monkeypatch):
+    reader, fake = online
+    (reader.CACHE_ROOT / reader._CACHE_POINTER).unlink()
+    monkeypatch.setattr(reader, "_cache_location", None)
+    original = reader.CACHE_ROOT / "123" / "00001.webp"
+    original.parent.mkdir()
+    original.write_bytes(_png())
+
+    image_url = client.get("/api/online/123").json["pages"][0]["url"]
+    assert image_url == "/api/online-img/123/0?v=legacy"
+    with client.get(image_url) as response:
+        assert response.status_code == 200 and response.data == original.read_bytes()
+    assert fake.downloads == []
     assert client.post("/api/system/clear-cache").status_code == 200
-    assert not online_reader.CACHE_ROOT.exists()
+    assert not original.exists()
+
+
+def test_clear_cache_rotates_past_locked_files_and_retries_cleanup(client, online, monkeypatch):
+    reader, fake = online
+    image_url = client.get("/api/online/123").json["pages"][0]["url"]
+    with client.get(image_url) as response:
+        original = response.data
+        old_etag = response.headers["ETag"]
+    old_page = reader._page_path("123", 0)
+    old_generation = old_page.parent.parent
+    locked = True
+    remove_tree = reader.shutil.rmtree
+
+    def remove(path, *args, **kwargs):
+        if locked and path == old_generation:
+            raise PermissionError("fixture file is in use")
+        return remove_tree(path, *args, **kwargs)
+
+    monkeypatch.setattr(reader.shutil, "rmtree", remove)
+    cleared = client.post("/api/system/clear-cache")
+    assert cleared.status_code == 200 and cleared.json["online_cache_cleanup_pending"] is True
+    assert old_page.read_bytes() == original
+
+    refreshed = _png((18, 24))
+    fake.postman.answer = lambda _url: refreshed
+    monkeypatch.setattr(reader, "_cache_location", None)
+    updated_url = client.get("/api/online/123").json["pages"][0]["url"]
+    assert updated_url != image_url
+    with client.get(image_url, headers={"If-None-Match": old_etag}) as response:
+        assert response.status_code == 200 and response.data == refreshed
+        assert response.cache_control.no_store and response.headers["ETag"] != old_etag
+    current_page = reader._page_path("123", 0)
+    assert current_page != old_page and current_page.read_bytes() == refreshed
+
+    locked = False
+    monkeypatch.setattr(reader, "_TRIM_INTERVAL", 0)
+    with client.get(updated_url) as response:
+        assert response.data == refreshed
+    assert len(fake.downloads) == 2
+    assert not old_page.exists() and current_page.is_file()
+
+
+def test_new_generation_fetches_same_page_while_old_request_drains(online):
+    from core.upstream import UpstreamFailure
+
+    reader, fake = online
+    started = threading.Event()
+    resume = threading.Event()
+    original = _png()
+    refreshed = _png((18, 24))
+
+    def answer(_url):
+        if not started.is_set():
+            started.set()
+            assert resume.wait(5)
+            return original
+        return refreshed
+
+    fake.postman.answer = answer
+    old_page = reader._page_path("123", 0)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        old = pool.submit(reader.image_file, "123", 0)
+        try:
+            assert started.wait(3)
+            reader.clear_cache()
+            current = pool.submit(reader.image_file, "123", 0).result(timeout=3)
+            assert current != old_page and current.read_bytes() == refreshed
+        finally:
+            resume.set()
+        with pytest.raises(UpstreamFailure, match="缓存已刷新") as failure:
+            old.result(timeout=3)
+        assert failure.value.kind == "cache_changed"
+    assert not old_page.exists() and current.read_bytes() == refreshed
 
 
 def test_check_album_photos_keeps_order_when_a_chapter_fails(client):

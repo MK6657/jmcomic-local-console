@@ -1,7 +1,10 @@
 """start.bat reuses a server running current code and replaces one running outdated code. No real processes."""
+import hashlib
 import io
 import os
+import subprocess
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -11,7 +14,7 @@ import pytest
 def launcher_env(monkeypatch):
     import launcher
     calls = {"opened": [], "stopped": [], "launched": 0}
-    monkeypatch.setattr(launcher.webbrowser, "open", lambda url: calls["opened"].append(url))
+    monkeypatch.setattr(launcher.webbrowser, "open", lambda url: calls["opened"].append(url) or True)
     def stop(pid, port, record, *, only_if_idle):
         assert only_if_idle
         calls["stopped"].append(pid)
@@ -85,6 +88,115 @@ def test_update_copied_over_existing_files_is_detected(tmp_path):
     (tmp_path / "templates").mkdir()
     (tmp_path / "templates" / "new.html").write_text("", encoding="utf-8")  # an added file counts too
     assert launcher.server_outdated(record, root=tmp_path)
+
+
+@pytest.mark.parametrize("directory", ["templates/partials", "templates/classic"])
+def test_nested_template_creation_edit_and_deletion_trigger_restart(tmp_path, directory):
+    import launcher
+    nested = tmp_path / directory / "page.html"
+    nested.parent.mkdir(parents=True)
+    started = time.time() + 1
+    empty = launcher.code_fingerprint(tmp_path)
+    nested.write_text("old")
+    original = launcher.code_fingerprint(tmp_path)
+    assert original != empty
+    assert launcher.code_updated_since(started - 60, tmp_path)
+    nested.write_text("new")
+    os.utime(nested, (started - 3600, started - 3600))
+    assert not launcher.code_updated_since(started, tmp_path)
+    assert launcher.server_outdated({"code_fingerprint": original}, tmp_path)
+    nested.unlink()
+    assert launcher.code_fingerprint(tmp_path) == empty
+
+
+@pytest.mark.parametrize("scenario", ["good", "empty", "bad", "timeout", "wrong_program"])
+def test_source_setup_stamp_requires_startable_python(tmp_path, monkeypatch, scenario):
+    import launcher
+    venv = tmp_path / ".venv"
+    executable = venv / "Scripts/python.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"" if scenario == "empty" else b"fake binary")
+    requirements = b"example==1\n"
+    (tmp_path / "requirements.txt").write_bytes(requirements)
+    (venv / ".req.sha256").write_text(hashlib.sha256(requirements).hexdigest(), encoding="ascii")
+    probe = Mock(return_value=SimpleNamespace(returncode=0, stdout=b"jmconsole-python\n"))
+    if scenario == "bad":
+        probe.side_effect = OSError("synthetic invalid executable")
+    elif scenario == "timeout":
+        probe.side_effect = subprocess.TimeoutExpired(str(executable), 5)
+    elif scenario == "wrong_program":
+        probe.return_value.stdout = b"not the Python probe"
+    monkeypatch.setattr(launcher.subprocess, "run", probe)
+    assert launcher._setup_needed(tmp_path) == (scenario != "good")
+    if scenario == "empty":
+        probe.assert_not_called()
+    else:
+        assert probe.call_args.args[0][0] == str(executable)
+
+
+def test_source_setup_rebuilds_a_broken_interpreter_before_pip(tmp_path, monkeypatch):
+    import launcher
+    venv = tmp_path / ".venv"
+    executable = venv / "Scripts/python.exe"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    requirements = b"example==1\n"
+    (tmp_path / "requirements.txt").write_bytes(requirements)
+    stamp = venv / ".req.sha256"
+    expected = hashlib.sha256(requirements).hexdigest()
+    stamp.write_text(expected, encoding="ascii")
+    lease = Mock()
+    monkeypatch.setattr(launcher, "acquire_instance_lock", lambda: lease)
+    startup = Mock(side_effect=lambda path: path.stat().st_size > 0)
+    monkeypatch.setattr(launcher, "_source_python_startable", startup)
+    commands = []
+
+    def run(command, *, cwd, check):
+        assert cwd == tmp_path and check and not stamp.exists()
+        lease.close.assert_not_called()
+        commands.append(command)
+        if command[2] == "venv":
+            executable.write_bytes(b"repaired interpreter")
+        else:
+            assert command[0] == str(executable) and executable.stat().st_size > 0
+
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    launcher._prepare_source(tmp_path)
+    assert [command[2:4] for command in commands] == [
+        ["venv", str(venv)], ["pip", "install"], ["pip", "check"]]
+    assert stamp.read_text(encoding="ascii") == expected
+    lease.close.assert_called_once()
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_wait_propagates_exit_failure_after_readiness(monkeypatch, exit_code):
+    import launcher
+    child = Mock(pid=4321)
+    child.poll.return_value = exit_code
+    monkeypatch.setattr(launcher, "get_running_server", lambda: None)
+    monkeypatch.setattr(launcher, "launch_flask", lambda: child)
+    monkeypatch.setattr(launcher, "wait_until_ready", lambda proc: 5001)
+    monkeypatch.setattr(launcher.webbrowser, "open", Mock(return_value=True))
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    notify = Mock()
+    monkeypatch.setattr(launcher, "request_shutdown", notify)
+    if exit_code:
+        with pytest.raises(RuntimeError, match="退出码 7"):
+            launcher.main(["--wait"])
+    else:
+        assert launcher.main(["--wait"]) == 0
+    notify.assert_not_called()
+    child.wait.assert_not_called()
+
+
+def test_launch_displays_the_local_url_if_browser_fails(launcher_env, monkeypatch, capsys):
+    launcher, calls, _ = launcher_env
+    monkeypatch.setattr(launcher, "get_running_server", lambda: None)
+    monkeypatch.setattr(launcher.webbrowser, "open", Mock(side_effect=OSError("no browser")))
+    assert launcher.main([], quiet=True) == 0
+    assert calls["launched"] == 1
+    output = capsys.readouterr().out
+    assert "浏览器未打开" in output and "http://127.0.0.1:5001" in output
 
 
 def test_record_without_fingerprint_falls_back_to_timestamps(tmp_path):

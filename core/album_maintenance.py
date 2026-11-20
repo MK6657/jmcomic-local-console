@@ -3,6 +3,7 @@ from contextlib import closing, nullcontext
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import threading
 import time
 import uuid
 
@@ -22,6 +23,13 @@ from .download_layout import author_output_name
 
 RETRY_DELAYS = (2, 8)
 MAX_ATTEMPTS = len(RETRY_DELAYS) + 1
+_move_lock = threading.Lock()
+
+
+def wait_for_active_move():
+    """等待进行中的目录迁移提交到数据库，避免并发读取落入改名与提交之间。"""
+    with _move_lock:
+        return
 
 
 def _public_path(relative):
@@ -250,7 +258,7 @@ def _organize_location(work, check_control):
                                     old_identity=_identity(target))
         _record(work)
     check_control()
-    with db.transaction() as conn:
+    with _move_lock, db.transaction() as conn:
         if not _save(conn, work, 'running'):
             raise DownloadInterrupted('superseded')
         moved = _apply_move(conn, work)
@@ -260,7 +268,7 @@ def _organize_location(work, check_control):
 
 def recover():
     """Before new admissions, reconcile already-renamed paths and recover lost leases."""
-    with db.transaction() as conn:
+    with _move_lock, db.transaction() as conn:
         for row in conn.execute("SELECT * FROM album_maintenance WHERE state='running' OR state IN ('pending','failed') "
                                 "AND CASE WHEN json_valid(payload) "
                                 "THEN json_type(payload,'$._move')='object' ELSE 0 END").fetchall():

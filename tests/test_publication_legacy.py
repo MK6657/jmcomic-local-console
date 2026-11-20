@@ -72,6 +72,27 @@ def test_old_whole_album_archive_plus_new_loose_chapter(client, root, fmt):
     assert packed.read_bytes() == original
 
 
+@pytest.mark.parametrize('source', ['loose', 'pack', 'flat-pack'])
+def test_legacy_pages_overlap_by_chapter_id_and_page_number(client, root, source):
+    old = root / 'Album'
+    stale, retained = image('red'), image('blue')
+    folder = chapter(old, 'Former__71', '71')
+    if source == 'loose':
+        (folder / '00001.png').write_bytes(stale)
+        (folder / '00003.png').write_bytes(retained)
+    else:
+        names = (('Former__71/00001.png', 'Former__71/00003.png') if source == 'pack'
+                 else ('Former__71_p00001.png', 'Former__71_p00003.png'))
+        with zipfile.ZipFile(old / 'Album.cbz', 'w') as archive:
+            archive.writestr(names[0], stale)
+            archive.writestr(names[1], retained)
+    resource('v4', old, [])
+    original = {page: page.read_bytes() for page in old.rglob('*') if page.is_file()}
+    new = publish(root)
+    assert reader(client)[1] == [*new, ('71', retained)]
+    assert {page: page.read_bytes() for page in original} == original
+
+
 def test_shared_v4_tree_only_admits_certified_chapters_including_packed_pages(client, root):
     old = root / 'Album'
     red, blue, dirty = image('red'), image('blue'), image('black')

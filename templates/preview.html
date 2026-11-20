@@ -13,7 +13,7 @@
     <header class="reader-toolbar">
         <a class="btn btn-outline-secondary btn-sm" href="/downloads" id="preview-back"><i class="bi bi-arrow-left" aria-hidden="true"></i> 返回</a>
         <div class="reader-heading">
-            <span class="folio-kicker">ATELIER　/　单页展阅</span>
+            <span class="folio-kicker">ATELIER / 单页展阅</span>
             <h1 id="album-title">加载中...</h1>
             <span class="source-slip">本地典藏</span>
             <p class="folio-note">点击画页左右两侧或按 ← → 翻页；轻触中央或按 M 显隐工具。</p>
@@ -107,8 +107,8 @@
 
 {% endblock %}
 
-{# 单页预览有自己的翻页与缩略图工具，不放右下角快捷导航 #}
-{% block quick_nav %}{% endblock %}
+{# 单页预览提供轻量可收起悬浮快捷钮 #}
+{% block quick_nav %}{% include "partials/reader-fab.html" %}{% endblock %}
 
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>

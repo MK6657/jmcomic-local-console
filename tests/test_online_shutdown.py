@@ -188,7 +188,7 @@ def test_page_and_slot_waiters_exit_cooperatively_on_stop(reader, monkeypatch, w
         monkeypatch.setattr(reader, "_fetch_slots", resource)
         context = None
     else:
-        context = reader._page_lock((Photo.photo_id, 0))
+        context = reader._page_lock(reader._page_path(Photo.photo_id, 0))
         assert context.__enter__()
     thread, result = launch(lambda: reader.image_file(Photo.photo_id, 0))
     try:
@@ -363,4 +363,5 @@ def test_clear_cache_keeps_running_admission_open(reader):
     target.write_bytes(b"page")
     reader.clear_cache()
     assert not target.exists() and not reader._stop_event.is_set()
-    assert reader._store(target, b"new page")
+    assert not reader._store(target, b"retired page")
+    assert reader._store(reader._page_path(Photo.photo_id, 0), b"new page")

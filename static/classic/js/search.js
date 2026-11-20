@@ -89,12 +89,13 @@
   function restoreSearchState(fromCache) {
     var params = new URLSearchParams(window.location.search);
     currentQuery = params.get('keyword') || '';
-    currentSort = ['latest', 'views', 'likes'].indexOf(params.get('sort')) >= 0 ? params.get('sort') : 'latest';
     currentPage = Math.max(1, Math.min(MAX_PAGE, parseInt(params.get('page'), 10) || 1));
     currentPageSize = [20, 50, 100].indexOf(Number(params.get('page_size'))) >= 0 ? Number(params.get('page_size')) : 20;
     if (!currentQuery) return false;
     searchInput.value = currentQuery;
-    sortSelect.value = currentSort;
+    sortSelect.value = params.get('sort') || 'latest';
+    if (!sortSelect.value) sortSelect.value = 'latest';
+    currentSort = sortSelect.value;
     pageSizeSelect.value = String(currentPageSize);
     var nm = window.navMemory;
     var reload = !fromCache && !!nm && nm.navigationType() === 'reload';

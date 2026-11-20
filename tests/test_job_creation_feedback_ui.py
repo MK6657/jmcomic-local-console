@@ -93,8 +93,8 @@ def _failed(job_id):
 @pytest.mark.parametrize("page", ["search", "detail", "downloads"])
 def test_one_created_job_then_its_existing_id_is_shown(page, client, monkeypatch):
     from core import database as db
-    from core.job_manager import job_manager
-    monkeypatch.setattr(job_manager, "schedule_next", lambda: None)
+    from core.job_manager import JobManager
+    monkeypatch.setattr(JobManager, "schedule_next", lambda self: None)
     action = {"id": "job_source"}
     if page == "downloads":
         _failed("job_source")

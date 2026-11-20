@@ -26,26 +26,17 @@
         <button type="button" class="btn btn-outline-info btn-sm" id="library-resync-btn" title="从 18comic 重新同步所有标签">
             <i class="bi bi-arrow-repeat"></i> 同步所有标签
         </button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="library-open-export-btn" title="打开统一导出文件夹（CBZ / ZIP / PDF）">
+            <i class="bi bi-folder2-open" aria-hidden="true"></i> 导出目录
+        </button>
         <button type="button" class="btn btn-outline-secondary btn-sm" id="library-refresh-btn" title="刷新">
             <i class="bi bi-arrow-clockwise"></i> 刷新
         </button>
     </div>
 
-<!-- ===== 标签云（可折叠） ===== -->
+<!-- ===== 筛选栏 + 可折叠标签云（高频检索前置，书目封面首屏直见） ===== -->
 <div class="shelf-filter-sheet">
-        <div class="tag-cloud-header" id="tag-cloud-toggle" role="button" tabindex="0"
-             aria-controls="tag-cloud-container" aria-expanded="true">
-            <i class="bi bi-chevron-down"></i>
-            <strong><i class="bi bi-tags"></i> 按标签筛选</strong>
-            <span class="text-muted small ms-2" id="tag-filter-hint"></span>
-        </div>
-        <div id="tag-cloud-container">
-            <label class="visually-hidden" for="library-tag-search">查找标签</label>
-            <input id="library-tag-search" type="search" class="form-control shelf-tag-search" placeholder="在标签索引中查找…" autocomplete="off" aria-controls="tag-cloud">
-            <div class="tag-cloud" id="tag-cloud"></div>
-        </div>
-
-<!-- ===== 筛选栏（条件同步到地址栏，刷新/返回后保留） ===== -->
+<!-- 筛选栏（条件同步到地址栏，刷新/返回后保留） -->
 <div class="library-filters">
     <div class="flex-fill">
         <input type="text" id="library-search" class="form-control" placeholder="搜索标题/作者/车号/标签..."
@@ -73,6 +64,21 @@
     <button type="button" class="btn btn-outline-danger btn-sm" title="清除筛选" id="clear-filters-btn" style="display:none;">
         <i class="bi bi-x-circle"></i> 清除筛选
     </button>
+</div>
+
+<!-- 标签云（可折叠） -->
+<div class="shelf-tags-panel">
+    <div class="tag-cloud-header" id="tag-cloud-toggle" role="button" tabindex="0"
+         aria-controls="tag-cloud-container" aria-expanded="true">
+        <i class="bi bi-chevron-down"></i>
+        <strong><i class="bi bi-tags"></i> 按标签筛选</strong>
+        <span class="text-muted small ms-2" id="tag-filter-hint"></span>
+    </div>
+    <div id="tag-cloud-container">
+        <label class="visually-hidden" for="library-tag-search">查找标签</label>
+        <input id="library-tag-search" type="search" class="form-control shelf-tag-search" placeholder="在标签索引中查找…" autocomplete="off" aria-controls="tag-cloud">
+        <div class="tag-cloud" id="tag-cloud"></div>
+    </div>
 </div>
 </div>
 

@@ -27,7 +27,7 @@ FLASK_JSON = get_data_dir() / "flask.json"
 MAX_WAIT = 30
 POLL_INTERVAL = 0.5
 # Changes here only take effect after a restart; static files are cache-busted on every page load.
-RESTART_GLOBS = ("app.py", "core/*.py", "routes/*.py", "templates/*.html", "requirements.txt")
+RESTART_GLOBS = ("app.py", "core/*.py", "routes/*.py", "templates/**/*.html", "requirements.txt")
 # launcher.log housekeeping (the app's own app.log/error.log are handled by core/logger.py).
 LAUNCHER_LOG = "launcher.log"
 LAUNCHER_LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -93,7 +93,8 @@ def code_fingerprint(root=ROOT):
         # Frozen Python modules live in the archive, not core/*.py. Include the
         # executable and build manifest so backend/dependency updates count too.
         for path in (Path(sys.executable), root / "release.json"):
-            digest.update(path.read_bytes())
+            with path.open("rb") as handle:
+                hashlib.file_digest(handle, lambda: digest)
         return digest.hexdigest()
     for pattern in RESTART_GLOBS:
         for path in sorted(root.glob(pattern)):
@@ -110,8 +111,11 @@ def code_fingerprint(root=ROOT):
 def code_updated_since(timestamp, root=ROOT):
     """Fallback for a server that recorded no fingerprint: True when a file's modification or creation time
     is later than the server start. Misses files copied over existing ones with an older modification time."""
+    root = Path(root)
     for pattern in RESTART_GLOBS:
         for path in root.glob(pattern):
+            if not path.is_file():
+                continue
             info = path.stat()
             # A newly created file gets the copy time as its creation time (not so when overwriting a file).
             if max(info.st_mtime, getattr(info, "st_birthtime", 0)) > timestamp:
@@ -255,6 +259,18 @@ def _server_python(root):
     return venv_python if not getattr(sys, "frozen", False) and venv_python.is_file() else Path(sys.executable)
 
 
+def _source_python_startable(executable):
+    try:
+        if not executable.is_file() or executable.stat().st_size == 0:
+            return False
+        probe = subprocess.run([str(executable), "-I", "-B", "-c", "print('jmconsole-python')"],
+                               capture_output=True, timeout=5,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return probe.returncode == 0 and probe.stdout.strip() == b"jmconsole-python"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _setup_needed(root):
     requirements = root / "requirements.txt"
     stamp = root / ".venv" / ".req.sha256"
@@ -262,8 +278,8 @@ def _setup_needed(root):
         installed = stamp.read_text(encoding="ascii")
     except (FileNotFoundError, UnicodeError):
         return True
-    return (not (stamp.parent / "Scripts/python.exe").is_file()
-            or installed != hashlib.sha256(requirements.read_bytes()).hexdigest())
+    return (installed != hashlib.sha256(requirements.read_bytes()).hexdigest()
+            or not _source_python_startable(stamp.parent / "Scripts/python.exe"))
 
 
 def _prepare_source(root):
@@ -278,8 +294,10 @@ def _prepare_source(root):
         digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
         stamp = venv / ".req.sha256"
         stamp.unlink(missing_ok=True)
-        if not executable.is_file():
+        if not _source_python_startable(executable):
             subprocess.run([sys.executable, "-m", "venv", str(venv)], cwd=root, check=True)
+            if not _source_python_startable(executable):
+                raise RuntimeError("无法修复源码虚拟环境的 Python 解释器")
         subprocess.run([str(executable), "-m", "pip", "install", "-r", str(requirements)], cwd=root, check=True)
         subprocess.run([str(executable), "-m", "pip", "check"], cwd=root, check=True)
         if hashlib.sha256(requirements.read_bytes()).hexdigest() != digest:
@@ -331,25 +349,21 @@ def launch_flask(root=None):
 
 def cleanup(proc):
     """Drain our own child without interpreting a missing event as safe to kill."""
-    if proc.poll() is None:
+    exit_code = proc.poll()
+    if exit_code is None:
         token = getattr(proc, "jm_launch_token", None)
         notified = isinstance(token, str) and request_shutdown(token)
-        if notified:
-            try:
-                proc.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("服务尚未完成退出，进程已保留；请等待在途任务结束") from None
-            if proc.returncode:
-                raise RuntimeError("服务退出未完成全部清理，请检查日志后再启动")
-            return
         # The event may already have closed while Python is still waiting for
         # an in-flight SDK future. Absence never proves startup did no work.
         try:
-            proc.wait(timeout=1)
+            proc.wait(timeout=20 if notified else 1)
         except subprocess.TimeoutExpired:
+            if notified:
+                raise RuntimeError("服务尚未完成退出，进程已保留；请等待在途任务结束") from None
             raise RuntimeError("停机通道不可用，进程仍在运行，已保留；请检查日志后重试") from None
-        if proc.returncode:
-            raise RuntimeError("服务启动或退出失败，请检查日志")
+        exit_code = proc.returncode
+    if exit_code:
+        raise RuntimeError(f"服务进程以退出码 {exit_code} 结束，请检查日志")
 
 
 def wait_until_ready(proc, timeout=MAX_WAIT):
@@ -378,25 +392,39 @@ def _restart_blocker(port, record):
         activity.append(health["jm_active_clients"])
         if all(type(value) is int and value >= 0 for value in activity):
             if any(activity):
-                return "已暂缓升级：排队 {}、运行 {}、暂停 {}、下载执行器 {}、在用 SDK 客户端 {}。".format(*activity)
+                return "已暂缓升级：排队 {}、运行 {}、暂停 {}、下载执行器 {}、在途 SDK 客户端活动 {}。".format(*activity)
             return None
     except (OSError, HTTPException, ValueError, KeyError, TypeError, AttributeError):
         pass
     return "无法确认任务是否空闲，已暂缓升级。"
 
 
+def _open_browser(url):
+    try:
+        return webbrowser.open(url)
+    except (OSError, webbrowser.Error):
+        return False
+
+
+def _show_launch_message(message, *, quiet, alert=False):
+    if not quiet or (alert and sys.stdout is not None):
+        print(message)
+    elif alert and os.name == "nt":
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, message, "JMComic", 0x40)
+
+
 def _attach(port, record, quiet, reason=None):
     if get_running_server(expected_pid=int(record["pid"])) != (port, record):
         raise RuntimeError("运行服务的身份已变化，已取消打开页面；请重试")
+    url = f"http://{HOST}:{port}"
+    opened = _open_browser(url)
+    state = "已打开既有实例" if opened else "既有实例正在运行"
     message = ((reason + " 请在任务结束后重新启动，或在原窗口正常退出。\n") if reason else "")
-    message += (f"已打开既有实例（PID {record['pid']}）：{get_path_config().home}。\n"
-                "沿用原服务的目录设置；退出本窗口不会停止该服务。")
-    webbrowser.open(f"http://{HOST}:{port}")
-    if not quiet:
-        print(message)
-    elif reason and os.name == "nt" and sys.stdout is None:
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(None, message, "JMComic：继续使用已有服务", 0x40)
+    message += f"{state}（PID {record['pid']}）：{get_path_config().home}。"
+    if not opened:
+        message += f"\n浏览器未打开，请复制以下地址手动打开。\n{url}"
+    _show_launch_message(message, quiet=quiet, alert=not opened or (reason is not None and sys.stdout is None))
     return 0
 
 
@@ -442,9 +470,12 @@ def main(argv=None, quiet=False):
     try:
         port = wait_until_ready(proc)
         url = f"http://{HOST}:{port}"
-        webbrowser.open(url)
-        if not quiet:
-            print(f"Running: {url} (launcher child PID {proc.pid})")
+        opened = _open_browser(url)
+        if opened:
+            message = f"Running: {url} (launcher child PID {proc.pid})"
+        else:
+            message = f"服务已启动（启动器子进程 PID {proc.pid}）。浏览器未打开，请复制以下地址手动打开。\n{url}"
+        _show_launch_message(message, quiet=quiet, alert=not opened)
         if args.wait:
             input("按 Enter 或 Ctrl+C 正常停止本窗口启动的服务并退出… ")
         else:

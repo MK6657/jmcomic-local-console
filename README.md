@@ -14,19 +14,19 @@ This is a **local Python application**, not a browser extension or a hosted serv
 Only use it for content you are authorized to access and download. This repository
 does not include downloaded content, credentials, or the upstream reference project.
 
-**Run on Windows:** [Download the previously verified x64 portable package and checksums](docs/WINDOWS_ACCEPTANCE.md). The [vNext audit disposition](docs/AUDIT_DISPOSITION_2026-11-18.md) identifies that immutable baseline; it is not acceptance of a new build.
+**Run on Windows:** [Download the previously verified x64 portable package and checksums](docs/archive/WINDOWS_ACCEPTANCE.md). The [vNext audit disposition](docs/archive/AUDIT_DISPOSITION_2026-11-18.md) identifies that immutable baseline; it is not acceptance of a new build.
 Extract the whole package and open `JMComic.exe`. No separate Python or Node installation is required.
-See the [backup and upgrade instructions](docs/WINDOWS_RELEASE.md) before using an existing instance.
+See the [backup and upgrade instructions](docs/WINDOWS_RELEASE.md) before using an existing instance. See the [documentation index](docs/README.md) for active guides, architecture notes, and historical archives.
 
 ## Backend review branch
 
-The current v5 Windows candidate is on the local `codex/windows-vnext` branch, based on `552bb65`. Follow the [review guide](docs/WINDOWS_VNEXT_REVIEW.md) on a restored copy and compare the [candidate's checksums and verification scope](docs/WINDOWS_VNEXT_ACCEPTANCE.md). The clone command below retrieves the previous public baseline.
+The current v5 Windows candidate is on the local `codex/windows-vnext` branch, based on `552bb65`. Follow the [review guide](docs/archive/WINDOWS_VNEXT_REVIEW.md) on a restored copy and compare the [candidate's checksums and verification scope](docs/archive/WINDOWS_VNEXT_ACCEPTANCE.md). The clone command below retrieves the previous public baseline.
 
 The previous Windows backend refactor is published on **`codex/refactor-windows`**; `main`
-keeps the previous version. Reviewers should follow the [clone and test guide](docs/GITHUB_REVIEW.md)
-and [independent audit instructions](docs/INDEPENDENT_BACKEND_AUDIT.md).
+keeps the previous version. Reviewers should follow the [clone and test guide](docs/archive/GITHUB_REVIEW.md)
+and [independent audit instructions](docs/archive/INDEPENDENT_BACKEND_AUDIT.md).
 
-The [project handoff](docs/PROJECT_HANDOFF.md) records the earlier backend review, verified product commit, and evidence for that snapshot. For findings against `552bb65`, use the vNext disposition above.
+The [project handoff](docs/archive/PROJECT_HANDOFF.md) records the earlier backend review, verified product commit, and evidence for that snapshot. For findings against `552bb65`, use the vNext disposition above.
 
 ```bash
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
@@ -34,7 +34,7 @@ cd jmcomic-backend-review
 ```
 
 The original audit snapshot is commit `7ae6ccb`; the branch now also contains the
-[audit corrections](docs/AUDIT_FIXES.md), including SSE/export capacity limits and
+[audit corrections](docs/archive/AUDIT_FIXES.md), including SSE/export capacity limits and
 paginated task history, metadata request budgets, update-check shutdown, and
 responsive task controls during database contention, and shared schema validation before
 startup writes or restore publication. Record the cloned HEAD when reviewing

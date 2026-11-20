@@ -572,7 +572,7 @@ def run_all():
 
     print("=" * 60)
     print("🔬 端到端链路集成测试")
-    print(f"   项目: D:\\Hermes\\禁漫下载搜索插件")
+    print(f"   项目: {Path(__file__).resolve().parents[2]}")
     print(f"   时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 

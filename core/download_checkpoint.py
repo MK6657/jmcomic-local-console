@@ -29,6 +29,7 @@ class DownloadCheckpoint:
         self.previous_done = row.get('done_pages') or 0
         self.directory = Path(row['output_path']) if self.previous_total and row.get('output_path') else None
         self.pages = {}
+        self.confirmed = {}
         self.dirty = False
         try:
             pages = json.loads(_checkpoint_path(job_id).read_bytes())
@@ -89,15 +90,23 @@ class DownloadCheckpoint:
         except OSError:
             return False
 
-    def confirm(self, path):
+    def confirm(self, path, verified_digest=None):
         """Called under the page counter lock, after image verification or publication."""
         key = self._key(path)
         signature = self._signature(path)
-        if getattr(self, 'isolated', False) and key not in self.receipts:
-            self.remember_digest(path, self.digest(path))
+        if getattr(self, 'isolated', False):
+            digest = verified_digest if verified_digest is not None else self.digest(path)
+            if verified_digest is None:
+                self.remember_digest(path, digest)
+            if self.receipts.get(key) != digest:
+                raise OSError('页面与下载确认摘要不一致')
+            self.confirmed[(path.parent, path.stem)] = (path, digest)
         if self.pages.get(key) != signature:
             self.pages[key] = signature
             self.dirty = True
+
+    def receipt_digest(self, path):
+        return self.receipts[self._key(path)]
 
     @staticmethod
     def digest(path):

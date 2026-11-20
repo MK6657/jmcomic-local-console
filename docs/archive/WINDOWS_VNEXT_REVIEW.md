@@ -32,7 +32,7 @@ Remove-Item Env:\JMCONSOLE_HOME, Env:\JMCONSOLE_DOWNLOAD_DIR, Env:\JMCONSOLE_CAC
 | 启用自动打包及删原图；同册仍有暂停任务时观察 B；之后让全部任务结束 | B 可以先用，整理稍后进行。在 Windows 占用文件导致替换失败时，先解除占用，再点“重试整理”；不需要重新下载。 |
 | 清除 B 的任务历史。重进书库再读、导出。回到首页取消一个测试任务 | 书仍可用；取消任务的进度订阅结束。 |
 
-需要严格复核请求次数或中断窗口的审查者可用源码离线重跑 `tests/test_queue_recovery.py` 和 `tests/test_publication_reader_export.py`。`tests/check_download_queue.py --two-stalls`、`--pause`、`--quick-resume` 各单独运行，使用真正的回环 HTTP 和 SDK 解码，不依赖上游；无需在个人实例制造故障。`JMComic.exe self-check`、`JMComic.exe lifecycle-check` 是便携包自检。实际 ZIP 的验收证据见分支上的 `docs/WINDOWS_VNEXT_ACCEPTANCE.md`。
+需要严格复核请求次数或中断窗口的审查者可用源码离线重跑 `tests/test_queue_recovery.py` 和 `tests/test_publication_reader_export.py`。`python tests/checks/check_download_queue.py --two-stalls`、`--pause`、`--quick-resume` 各单独运行，使用真正的回环 HTTP 和 SDK 解码，不依赖上游；无需在个人实例制造故障。`JMComic.exe self-check`、`JMComic.exe lifecycle-check` 是便携包自检。实际 ZIP 的验收证据见分支上的 `docs/archive/WINDOWS_VNEXT_ACCEPTANCE.md`。
 
 ## 存储与回退
 

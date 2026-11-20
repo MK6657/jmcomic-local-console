@@ -300,7 +300,7 @@ def test_unchanged_archive_folders_are_not_opened_again(downloads, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(os, "scandir", boom)
         patch.setattr(os.path, "realpath", boom)
-        patch.setattr(zipfile, "ZipFile", boom)
+        patch.setattr(Path, "open", boom)
         assert local_states(list(expected)) == first
 
 
@@ -1265,16 +1265,18 @@ def test_a_passing_read_error_never_supersedes_the_earlier_download(client, down
     archive_pages.clear_cache()
     with local_availability._cache_lock:
         local_availability._cache.clear()
-    real, calls = archive_pages.zipfile.ZipFile, []
+    real, calls = Path.open, []
 
-    def locked_once(*a, **k):
-        calls.append(a)
-        if len(calls) == 1:
-            raise PermissionError(13, "locked")
-        return real(*a, **k)
-    monkeypatch.setattr(archive_pages.zipfile, "ZipFile", locked_once)
-    assert download("jb", ["71"], outcome="failed", written=1)["status"] == "failed"
-    monkeypatch.setattr(archive_pages.zipfile, "ZipFile", real)
+    def locked_once(path, mode="r", *args, **kwargs):
+        if mode == "rb" and path.suffix in archive_pages.ARCHIVE_SUFFIXES:
+            calls.append(path)
+            if len(calls) == 1:
+                raise PermissionError(13, "locked")
+        return real(path, mode, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", locked_once)
+        assert download("jb", ["71"], outcome="failed", written=1)["status"] == "failed"
+    assert calls
     assert db.get_job("ja")["superseded_at"] is None
     assert client.get("/api/preview/3001").get_json()["total_pages"] == 3
 
@@ -1307,24 +1309,23 @@ def test_exports_preflight_metadata_then_read_60_pages_with_one_archive_open(
     comic(folder, {f"ch1/{n:03d}.png": png("white", (8 + n % 5, 8)) for n in range(1, 61)})
     _job("jl", "101", folder)
     archive_pages.select(folder)  # index warm, as after the reader opened it
-    real, opens = zipfile.ZipFile, []
+    path = folder / "Long.cbz"
+    real, opens = Path.open, []
 
-    class Counting(real):
-        def __init__(self, file, mode="r", *a, **k):
-            if mode == "r":
-                opens.append(file)
-            super().__init__(file, mode, *a, **k)
-    monkeypatch.setattr(archive_pages.zipfile, "ZipFile", Counting)
+    def counted(file, mode="r", *args, **kwargs):
+        if file == path and mode == "rb":
+            opens.append(file)
+        return real(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted)
     response = client.post(f"/api/export/jl/{fmt}")
     try:
         assert response.status_code == 200
         # The warm index needs one bounded metadata preflight plus one shared
         # reader for all 60 pages; page extraction must not reopen per page.
-        assert len(opens) == 2, ("expected metadata preflight + one page reader", opens)
-        assert getattr(opens[0], "name", None) == str(folder / "Long.cbz")
-        assert opens[1] == folder / "Long.cbz"
+        assert opens == [path, path]
         if fmt == "zip":
-            with real(io.BytesIO(response.data)) as exported:
+            with zipfile.ZipFile(io.BytesIO(response.data)) as exported:
                 assert len(exported.infolist()) == 60
         else:
             import pikepdf
@@ -1426,7 +1427,7 @@ global.document = {
   getElementById: id => (ids[id] = ids[id] || el('div')),
   addEventListener: (type, fn) => { if (type === 'DOMContentLoaded') loaded.push(fn); },
 };
-global.setInterval = () => 1; global.clearInterval = () => {};
+global.setTimeout = () => 1; global.clearTimeout = () => {};
 eval(fs.readFileSync(utilsPath, 'utf8'));
 window.apiFetch = url => Promise.resolve(url.startsWith('/api/jobs?') ? { status: 'ok', jobs: data.jobs.jobs } : data.available);
 window.showToast = () => {}; window._jobTitleMap = {};
@@ -1624,14 +1625,13 @@ def test_originals_are_kept_when_the_new_archive_does_not_check_out(client, down
 
 
 def _lock(monkeypatch, name):
-    from core import archive_pages
-    real = archive_pages.zipfile.ZipFile
+    real = Path.open
 
-    def locked(file, *a, **k):
-        if str(file).endswith(name):
+    def locked(file, mode="r", *args, **kwargs):
+        if file.name.endswith(name) and mode == "rb":
             raise PermissionError(32, "in use by another program")
-        return real(file, *a, **k)
-    monkeypatch.setattr(archive_pages.zipfile, "ZipFile", locked)
+        return real(file, mode, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", locked)
 
 
 def test_a_busy_archive_is_never_called_corrupt(client, downloads, exports_tmp, monkeypatch):
@@ -1829,12 +1829,13 @@ _READER_PAGES = [{"page": n, "url": f"/api/preview-archive/101/{n}?v=a-b&p=x{n}"
 
 
 def _reader(script, href, status=None, reply=None, fail=None, online=False, urls=None, load_error=None,
-            next_before_answer=False):
+            next_before_answer=False, pages=None):
     import json
     import subprocess
     if NODE is None:
         pytest.skip("needs Node.js (CI installs it)")
-    pages = [dict(p, url=(urls or {}).get(p["page"], p["url"])) for p in _READER_PAGES]
+    source = _READER_PAGES if pages is None else pages
+    pages = [dict(page, url=(urls or {}).get(page["page"], page["url"])) for page in source]
     scenario = {"script": script, "href": href, "online": online, "status": status, "reply": reply, "failPage": fail,
                 "loadError": load_error, "nextBeforeAnswer": next_before_answer,
                 "data": {"status": "ok", "title": "t", "pages": pages, "total_pages": len(pages)}}

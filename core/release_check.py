@@ -19,8 +19,9 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 _PATH_KEYS = ("JMCONSOLE_HOME", "JMCONSOLE_DOWNLOAD_DIR", "JMCONSOLE_CACHE_DIR", "JMCONSOLE_BACKUP_DIR")
 
 
-class _CleanupError(RuntimeError):
-    pass
+class _CheckError(RuntimeError):
+    def __init__(self, stage, error):
+        super().__init__(f"{stage}: {type(error).__name__}")
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -108,55 +109,95 @@ def _close_application_logging():
         return
     housekeeper = getattr(module, "_housekeeper", None)
     thread = getattr(housekeeper, "_thread", None)
-    actions = [module.shutdown_logging,
-               lambda: _require(thread is None or not thread.is_alive())]
+    actions = [("log_maintenance", module.shutdown_logging),
+               ("log_maintenance", lambda: _require(thread is None or not thread.is_alive()))]
     loggers = [logging.getLogger()] + [logger for logger in logging.Logger.manager.loggerDict.values()
                                        if isinstance(logger, logging.Logger)]
     def detach(handler):
         for logger in loggers:
             logger.removeHandler(handler)
     for handler in getattr(module, "_shared_handlers", ()):
-        actions.extend((lambda handler=handler: detach(handler), handler.flush, handler.close))
+        actions.extend((("log_detach", lambda handler=handler: detach(handler)),
+                        ("log_flush", handler.flush), ("log_close", handler.close)))
     _cleanup(actions)
 
 
 def _cleanup(actions):
     """Attempt every release even if an earlier release failed."""
     errors = []
-    for action in actions:
+    for stage, action in actions:
         try:
             action()
         except Exception as error:
-            errors.append(error)
+            errors.append((stage, error))
     if errors:
-        raise _CleanupError("self-check cleanup failed") from errors[0]
+        stage, error = errors[0]
+        if isinstance(error, _CheckError):
+            raise error
+        raise _CheckError(stage, error) from error
 
 
 def _close_channels(socket_map):
-    _cleanup([channel.close for channel in list(socket_map.values())]
-             + [lambda: _require(not socket_map)])
+    actions = [
+        ("http_channel_close", channel.handle_close if hasattr(channel, "outbuf_lock") else channel.close)
+        for channel in list(socket_map.values())
+    ]
+    actions.append(("http_channels_drain", lambda: _require(not socket_map)))
+    _cleanup(actions)
 
 
-def _cleanup_runtime(client, server, thread, socket_map, server_errors):
-    actions = []
+def _close_http(server, socket_map):
+    actions = [("http_channel_close", lambda: _close_channels(socket_map))]
+    if server is not None:
+        def stop_workers():
+            server.task_dispatcher.shutdown(timeout=3)
+            if server.task_dispatcher.threads:
+                raise TimeoutError("HTTP worker threads still running")
+        actions.append(("http_worker_shutdown", stop_workers))
+    _cleanup(actions)
+
+
+def _serve_http(server, socket_map, stop, errors):
+    try:
+        while not stop.is_set():
+            if not socket_map:
+                raise RuntimeError("HTTP listener closed before shutdown")
+            server.asyncore.loop(timeout=server.adj.asyncore_loop_timeout, map=socket_map,
+                                 use_poll=server.adj.asyncore_use_poll, count=1)
+    except BaseException as error:
+        errors.append(_CheckError("http_loop", error))
+    finally:
+        try:
+            _close_http(server, socket_map)
+        except _CheckError as error:
+            errors.append(error)
+
+
+def _stop_http(server, thread, socket_map, stop, errors):
+    stop.set()
+    if thread is None:
+        _close_http(server, socket_map)
+    else:
+        thread.join(timeout=5)
+        if thread.is_alive():
+            raise TimeoutError("HTTP loop still running")
+    if errors:
+        raise errors[0]
+
+
+def _cleanup_runtime(client, server, thread, socket_map, stop, server_errors):
+    actions = [("http_thread_join", lambda: _stop_http(server, thread, socket_map, stop, server_errors))]
     if client is not None:
         # This client belongs only to this check. Do not use the application
         # helper here: it deliberately logs/swallows session-close failures.
-        actions.append(lambda: client.get_root_postman().session.close())
+        actions.append(("sdk_session_close", lambda: client.get_root_postman().session.close()))
     service = sys.modules.get("core.jm_service")
     reader = sys.modules.get("core.online_reader")
     if service is not None:
-        actions.append(service.invalidate_option_cache)
+        actions.append(("sdk_cache_close", lambda: _require(service.invalidate_option_cache())))
     if reader is not None:
-        actions.append(reader.clear_cache)
-    if server is not None:
-        actions.append(lambda: server.task_dispatcher.shutdown(timeout=3))
-    actions.append(lambda: _close_channels(socket_map))
-    if thread is not None:
-        actions.extend((lambda: thread.join(timeout=3), lambda: _require(not thread.is_alive())))
-    if server is not None:
-        actions.append(lambda: _require(not server.task_dispatcher.threads))
-    actions.extend((lambda: _require(not server_errors), _close_application_logging))
+        actions.append(("reader_cache_close", lambda: _require(not reader.clear_cache())))
+    actions.append(("log_cleanup", _close_application_logging))
     _cleanup(actions)
 
 
@@ -164,6 +205,8 @@ def _run_checks(root: Path, checks: dict) -> None:
     """Imports intentionally live here, after instance isolation is installed."""
     server = thread = client = None
     socket_map, server_errors = {}, []
+    stop = threading.Event()
+    stage = "application_import"
     try:
         from app import create_app
         from flask import Response
@@ -172,14 +215,18 @@ def _run_checks(root: Path, checks: dict) -> None:
         from jmcomic import JmModuleConfig
         from . import database, image_download, jm_service, path_utils, sdk_adapter
 
+        stage = "isolated_paths"
         config = path_utils.get_path_config()
         _require(all(path.is_relative_to(root) for path in (
             config.home, config.data, config.logs, config.downloads, config.cache, config.backups)))
         checks["isolated_paths"] = True
+        stage = "pillow_webp_gif_pdf"
         payload = _image_checks()
         checks["pillow_webp_gif_pdf"] = True
+        stage = "crypto_ca_bundle"
         _dependency_checks()
         checks["crypto_ca_bundle"] = True
+        stage = "application_create"
         application = create_app()
         _require(Path(database.DB_PATH).is_relative_to(root))
 
@@ -187,16 +234,15 @@ def _run_checks(root: Path, checks: dict) -> None:
         def release_check_image():
             return Response(payload, mimetype="image/png")
 
+        stage = "http_start"
         server = create_server(application, host="127.0.0.1", port=0, threads=2,
                                map=socket_map, asyncore_loop_timeout=0.1, channel_timeout=5)
         port = int(server.effective_port)
-        def serve():
-            try:
-                server.run()
-            except BaseException as error:
-                server_errors.append(type(error).__name__)
-        thread = threading.Thread(target=serve, name="release-check-http", daemon=True)
-        thread.start()
+        http_thread = threading.Thread(target=_serve_http, args=(server, socket_map, stop, server_errors),
+                                       name="release-check-http", daemon=True)
+        http_thread.start()
+        thread = http_thread
+        stage = "waitress_pages_assets_api"
         opener = build_opener(ProxyHandler({}), _NoRedirect())
         def fetch(path):
             with opener.open(Request(f"http://127.0.0.1:{port}{path}", headers={"Connection": "close"}), timeout=5) as response:
@@ -213,6 +259,7 @@ def _run_checks(root: Path, checks: dict) -> None:
                  and health["pid"] == os.getpid())
         settings = json.loads(fetch("/api/settings"))
         _require(settings["status"] == "ok" and Path(settings["settings"]["download_root"]) == config.downloads)
+        stage = "settings_save_readback"
         patch = {"timeout": "47", "retry_times": "0", "schedule_start": "0", "auto_update_check": "false"}
         save = Request(f"http://127.0.0.1:{port}/api/settings", data=json.dumps(patch).encode(),
                        headers={"Content-Type": "application/json", "Connection": "close"}, method="POST")
@@ -223,6 +270,7 @@ def _run_checks(root: Path, checks: dict) -> None:
         _require(all(loaded[key] == value and database.get_setting(key) == value for key, value in patch.items()))
         checks["settings_save_readback"] = True
         checks["waitress_pages_assets_api"] = True
+        stage = "sdk_curl_image_conversion"
         local = f"127.0.0.1:{port}"
         JmModuleConfig.DOMAIN_API_LIST = [local]
         JmModuleConfig.DOMAIN_HTML_LIST = [local]
@@ -236,7 +284,8 @@ def _run_checks(root: Path, checks: dict) -> None:
         with Image.open(destination) as converted:
             _require(converted.format == "WEBP" and converted.size == (8, 8))
             converted.verify()
-        _require(not server_errors)
+        checks["sdk_curl_image_conversion"] = True
+        stage = "no_task_scheduler"
         _require(jm_service.get_active_client_count() == 0)
         from .job_manager import job_manager
         from . import scheduler, update_checker
@@ -244,10 +293,11 @@ def _run_checks(root: Path, checks: dict) -> None:
                  and scheduler._scheduler_thread is None and not update_checker.runtime_status()["running"])
         _require(sys.modules["app"]._mutex_handle is None
                  and not sys.modules["core.instance_lock"]._owned)
-        checks["sdk_curl_image_conversion"] = True
         checks["no_task_scheduler"] = True
+    except Exception as error:
+        raise _CheckError(stage, error) from error
     finally:
-        _cleanup_runtime(client, server, thread, socket_map, server_errors)
+        _cleanup_runtime(client, server, thread, socket_map, stop, server_errors)
 
 
 def run_self_check() -> dict:
@@ -266,8 +316,9 @@ def run_self_check() -> dict:
             with _temporary_environment(Path(temporary)):
                 stage = "local_checks"
                 _run_checks(Path(temporary), checks)
+            stage = "temporary_directory_cleanup"
         checks["cleanup"] = True
         return {"status": "ok", "exit_code": 0, "checks": checks, "upstream_requests": 0}
     except Exception as error:
         return {"status": "error", "exit_code": 1, "checks": checks,
-                "error": f"{stage}: {type(error).__name__}"}
+                "error": str(error) if isinstance(error, _CheckError) else f"{stage}: {type(error).__name__}"}

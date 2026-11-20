@@ -17,8 +17,9 @@ runtime/logs/
 runtime/cache/
 runtime/backups/
 
-# Downloads (user content)
+# Downloads & Exports (user content)
 downloads/
+导出/
 
 # IDE
 .vscode/

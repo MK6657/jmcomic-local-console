@@ -9,6 +9,15 @@ from urllib.parse import urlparse
 from . import database as db
 from .logger import log
 from .path_guard import DOWNLOAD_ROOT
+from .ui_themes import (
+    DEFAULT_UI_FX_ENABLED,
+    DEFAULT_UI_FX_PRESET,
+    DEFAULT_UI_THEME,
+    UI_FX_PRESETS,
+    UI_THEMES,
+    normalize_fx_preset,
+    normalize_theme,
+)
 
 # ── 设置缓存（5 秒 TTL，避免密集调 get_settings 时反复查 DB）──
 _settings_cache: dict | None = None
@@ -16,18 +25,19 @@ _settings_cache_time: float = 0
 _SETTINGS_CACHE_TTL = 5.0
 _settings_lock = threading.Lock()
 
-UI_THEMES = {"paper", "sage", "linen", "night"}
-
 # 第一版支持的设置项及默认值
 DEFAULT_SETTINGS = {
     "download_root": str(DOWNLOAD_ROOT),
-    "ui_theme": "paper",
+    "ui_theme": DEFAULT_UI_THEME,
+    "ui_fx_enabled": DEFAULT_UI_FX_ENABLED,
+    "ui_fx_preset": DEFAULT_UI_FX_PRESET,
     "max_running_jobs": "1",
     "timeout": "30",
     "retry_times": "2",
     "proxy": "",
     "client_type": "api",
     "skip_existing": "true",
+    "image_format": "webp",
     "organize_mode": "none",
     # 定时下载设置
     "schedule_enabled": "false",
@@ -48,6 +58,25 @@ DEFAULT_SETTINGS = {
 }
 
 
+def merge_stored_settings(stored) -> dict:
+    """将数据库读取到的原始键值与默认值合并并归一化（不访问数据库）。"""
+    merged = dict(DEFAULT_SETTINGS)
+    merged.update(stored)
+    # A legacy database/import cannot relocate the process's storage roots.
+    merged["download_root"] = str(DOWNLOAD_ROOT)
+    merged["ui_theme"] = normalize_theme(merged.get("ui_theme"))
+    merged["ui_fx_preset"] = normalize_fx_preset(merged.get("ui_fx_preset"))
+    image_format = str(merged.get("image_format", "")).strip().lower()
+    merged["image_format"] = image_format if image_format in {"webp", "png", "jpg"} else "webp"
+    pack_format = str(merged.get("pack_format", "")).strip().lower()
+    merged["pack_format"] = pack_format if pack_format in {"cbz", "zip"} else "cbz"
+    if str(merged.get("ui_fx_enabled", "")).strip().lower() not in {"true", "false"}:
+        merged["ui_fx_enabled"] = DEFAULT_UI_FX_ENABLED
+    if merged["auto_pack"] != "true":
+        merged["delete_originals"] = "false"
+    return merged
+
+
 def get_settings() -> dict:
     """获取所有设置（合并默认值），5 秒缓存"""
     global _settings_cache, _settings_cache_time
@@ -55,13 +84,7 @@ def get_settings() -> dict:
     with _settings_lock:
         if _settings_cache is not None and (now - _settings_cache_time) < _SETTINGS_CACHE_TTL:
             return dict(_settings_cache)
-        stored = db.get_all_settings()
-        merged = dict(DEFAULT_SETTINGS)
-        merged.update(stored)
-        # A legacy database/import cannot relocate the process's storage roots.
-        merged["download_root"] = str(DOWNLOAD_ROOT)
-        if merged.get("ui_theme") not in UI_THEMES:
-            merged["ui_theme"] = "paper"
+        merged = merge_stored_settings(db.get_all_settings())
         _settings_cache = merged
         _settings_cache_time = now
         return dict(merged)
@@ -81,12 +104,14 @@ def get_setting(key: str) -> str:
     return db.get_setting(key, DEFAULT_SETTINGS.get(key, ""))
 
 
-def update_settings(settings: dict):
-    """Validate the whole patch, then commit it atomically; never report a silent skip."""
+def normalize_settings_patch(settings: dict) -> dict:
+    """Validate a settings patch and normalize its values without touching the database."""
     enums = {
         "client_type": {"api", "html"}, "pack_format": {"cbz", "zip"},
+        "image_format": {"webp", "png", "jpg"},
         "organize_mode": {"none", "by_author", "flat"},
         "ui_theme": UI_THEMES,
+        "ui_fx_preset": UI_FX_PRESETS,
     }
     bounds = {
         "timeout": (5, 120), "retry_times": (0, 20), "max_running_jobs": (1, 5),
@@ -94,7 +119,7 @@ def update_settings(settings: dict):
         "schedule_start": (0, 23), "schedule_end": (0, 23),
     }
     bool_keys = {"schedule_enabled", "auto_pack", "delete_originals", "skip_existing", "library_card_click",
-                 "auto_update_check", "home_show_recent_downloads"}
+                 "auto_update_check", "home_show_recent_downloads", "ui_fx_enabled"}
     normalized = {}
     for key, value in settings.items():
         if key not in DEFAULT_SETTINGS:
@@ -137,24 +162,48 @@ def update_settings(settings: dict):
             except ValueError:
                 raise ValueError("proxy 地址无效（认证信息已隐藏）") from None
             normalized[key] = value
-    if normalized:
-        conn = db.get_db()
+    return normalized
+
+
+def update_settings(settings: dict) -> set[str]:
+    """Commit a validated patch atomically and return the settings whose values changed."""
+    normalized = normalize_settings_patch(settings)
+    if not normalized:
+        return set()
+    with db.transaction() as conn:
+        stored = dict(conn.execute("SELECT key, value FROM settings"))
+        old_auto_pack = stored.get("auto_pack", DEFAULT_SETTINGS["auto_pack"])
+        if normalized.get("auto_pack", old_auto_pack) != "true":
+            normalized["delete_originals"] = "false"
+        elif old_auto_pack != "true":
+            normalized.setdefault("delete_originals", "false")
+        changed = {key for key, value in normalized.items() if stored.get(key, DEFAULT_SETTINGS[key]) != value}
+        conn.executemany(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            [(key, value) for key, value in normalized.items() if stored.get(key) != value],
+        )
+    invalidate_settings_cache()
+    return changed
+
+
+def _bounded_int(settings: dict, key: str, lo: int, hi: int) -> int:
+    raw = settings.get(key)
+    if not isinstance(raw, bool):
         try:
-            with conn:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                    list(normalized.items()),
-                )
-        finally:
-            conn.close()
-        invalidate_settings_cache()
+            value = int(raw)
+            if lo <= value <= hi:
+                return value
+        except (ValueError, TypeError):
+            pass
+    return int(DEFAULT_SETTINGS[key])
 
 
-def build_jmcomic_option() -> dict:
-    """根据当前设置生成 jmcomic option 配置字典"""
+def build_jmcomic_option(settings: dict | None = None) -> dict:
+    """根据当前设置或调用方传入的完整快照生成 jmcomic option 配置字典。"""
     from curl_cffi import CurlOpt
-    s = get_settings()
-    proxy = s.get("proxy", "").strip()
+    s = get_settings() if settings is None else settings
+    proxy = str(s.get("proxy") or "").strip()
+    timeout = _bounded_int(s, "timeout", 5, 120)
 
     option = {
         "download": {
@@ -162,14 +211,14 @@ def build_jmcomic_option() -> dict:
                 "suffix": "original",  # 第一版固定webp
             },
             "threading": {
-                "image": int(s.get("image_threads", 20)),
-                "photo": int(s.get("photo_threads", 1)),
+                "image": _bounded_int(s, "image_threads", 1, 50),
+                "photo": _bounded_int(s, "photo_threads", 1, 10),
             },
         },
         "client": {
             "impl": "html",
-            "retry_times": int(s.get("retry_times", 2)),  # 降为 2，网络稳定时减少重试等待
-            "timeout": int(s.get("timeout", 30)),
+            "retry_times": _bounded_int(s, "retry_times", 0, 20),  # 降为 2，网络稳定时减少重试等待
+            "timeout": timeout,
             # 由 jmcomic 按 impl 选择其维护的域名；API 地址不能用于 HTML 客户端。
             # 不覆盖 domain，升级依赖时即可同步 API 分流地址和协议版本。
             # ⭐ 启用 session 模式，复用 TCP 连接，消除每次请求的 TLS 握手
@@ -180,7 +229,7 @@ def build_jmcomic_option() -> dict:
                     "proxies": {"http": proxy, "https": proxy} if proxy else {},
                     "curl_options": {CurlOpt.NOPROXY: "" if proxy else "*"},
                     # ⭐ 显式设置 HTTP 请求超时（秒），防止 curl_easy_perform 无限阻塞
-                    "timeout": int(s.get("timeout", 30)),
+                    "timeout": timeout,
                 },
             },
         },
@@ -189,7 +238,7 @@ def build_jmcomic_option() -> dict:
         },
     }
 
-    client_type = s.get("client_type", "html")
+    client_type = str(s.get("client_type") or "html").strip().lower()
     if client_type == "api":
         option["client"]["impl"] = "api"
 

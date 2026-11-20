@@ -11,12 +11,14 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from flask import Blueprint, jsonify, request
-from core.database import get_db, get_all_jobs
+from core.database import get_db
 from core.job_manager import job_manager
 from core.path_utils import get_path_config
 from core.logger import log, LOG_DIR, MAX_TOTAL_SIZE_MB, MAX_LOG_AGE_DAYS
 from core.validation import validate_numeric
-from core.jm_service import get_active_client_count, invalidate_option_cache, clear_album_detail_cache
+from core.jm_service import (
+    get_active_client_count, get_in_flight_client_count, invalidate_option_cache, clear_album_detail_cache,
+)
 from core import online_reader
 from core import desktop_platform
 from core.settings import build_jmcomic_option
@@ -27,6 +29,13 @@ api_system_bp = Blueprint("api_system", __name__)
 
 # 进程启动时间（用于计算 uptime）
 _START_TIME = time.time()
+
+
+def _job_activity(conn) -> dict:
+    counts = dict.fromkeys(("queued", "running", "paused"), 0)
+    counts.update(conn.execute("SELECT status, COUNT(*) FROM jobs WHERE status IN "
+                               "('queued','running','paused') GROUP BY status"))
+    return counts
 
 
 @api_system_bp.get("/api/system/diagnose")
@@ -67,53 +76,24 @@ def diagnose():
 
         # ── 应用状态 ──
         db_ok = False
+        active_count = queued_count = 0
         try:
-            conn = get_db()
-            conn.execute("SELECT 1").fetchone()
-            conn.close()
+            with closing(get_db()) as conn:
+                counts = _job_activity(conn)
+                active_count, queued_count = counts["running"], counts["queued"]
             db_ok = True
         except Exception:
             issues.append("数据库连接异常")
             level = "unhealthy"
 
         # ── 错误日志最近 24h 分析 ──
-        _error_pattern = _re.compile(r'\b(ERROR|CRITICAL)\b')
-        errors_24h = 0
-        recent_errors = []
-        cutoff = datetime.now().timestamp() - 86400
-        _MAX_SCAN_SIZE = 10 * 1024 * 1024
-        for f in log_files:
-            if not f.name.startswith('error'):
-                continue
-            if f.stat().st_mtime < cutoff:
-                continue
-            if f.stat().st_size > _MAX_SCAN_SIZE:
-                continue
-            try:
-                with open(f, 'r', encoding='utf-8', errors='replace') as fh:
-                    for line in iter(fh.readline, ""):
-                        if fh.tell() > _MAX_SCAN_SIZE:
-                            break
-                        if _error_pattern.search(line):
-                            errors_24h += 1
-                            if len(recent_errors) < 5:
-                                recent_errors.append(line.strip()[:200])
-            except Exception:
-                pass
-
+        errors_24h, error_scan_truncated = _count_recent_errors(LOG_DIR, now)
         if errors_24h > 20:
             issues.append(f"最近 24 小时错误 {errors_24h} 次（阈值 20）")
-            if level == "healthy":
-                level = "degraded"
-
-        active_count = 0
-        queued_count = 0
-        try:
-            all_jobs = get_all_jobs()
-            active_count = sum(1 for j in all_jobs if j.get("status") == "running")
-            queued_count = sum(1 for j in all_jobs if j.get("status") == "queued")
-        except Exception:
-            pass
+        if error_scan_truncated:
+            issues.append("最近 24 小时错误日志未能完整扫描，显示已读取部分的计数")
+        if level == "healthy" and (errors_24h > 20 or error_scan_truncated):
+            level = "degraded"
 
         # ── jmcomic API 域名可达性检查 ──
         jm_domain = ""
@@ -183,6 +163,7 @@ def diagnose():
             },
             "warnings": issues,
             "error_count_24h": errors_24h,
+            "error_count_24h_truncated": error_scan_truncated,
         })
     except Exception as e:
         log.exception(f"诊断过程异常 error={e}")
@@ -193,14 +174,12 @@ def diagnose():
 def health_ping():
     """轻量健康检查"""
     log.debug("API健康检查")
+    include_activity = request.args.get("activity") == "1"
     activity = {}
     try:
         with closing(get_db()) as conn:
-            if request.args.get("activity") == "1":
-                counts = dict.fromkeys(("queued", "running", "paused"), 0)
-                counts.update(conn.execute("SELECT status, COUNT(*) FROM jobs WHERE status IN "
-                                           "('queued','running','paused') GROUP BY status"))
-                activity["jobs"] = dict(counts, executors=job_manager.get_running_count())
+            if include_activity:
+                activity["jobs"] = dict(_job_activity(conn), executors=job_manager.get_running_count())
             else:
                 conn.execute("SELECT 1").fetchone()
     except Exception:
@@ -211,7 +190,7 @@ def health_ping():
         "application": "jmcomic-local-console",
         "pid": os.getpid(),
         "instance_id": get_path_config().instance_id(os.environ.get("JMCONSOLE_LAUNCH_TOKEN", "")),
-        "jm_active_clients": get_active_client_count(),
+        "jm_active_clients": get_in_flight_client_count() if include_activity else get_active_client_count(),
         **activity,
     })
 
@@ -223,8 +202,11 @@ def clear_jm_comic_cache():
     try:
         invalidate_option_cache()
         clear_album_detail_cache()
-        online_reader.clear_cache()
-        return jsonify({"status": "ok", "message": "jmcomic 缓存已清除"})
+        pending = online_reader.clear_cache()
+        message = "jmcomic 缓存已清除"
+        if pending:
+            message = "jmcomic 缓存已刷新，部分旧在线阅读缓存暂时无法删除，将在后续访问时重试"
+        return jsonify(status="ok", message=message, online_cache_cleanup_pending=pending)
     except Exception as e:
         log.error(f"清除 jmcomic 缓存失败: {e}")
         return jsonify({"status": "error", "message": "清除缓存失败"}), 500
@@ -241,6 +223,7 @@ import core.logger as _core_logger  # noqa: E402  调用时读取模块属性，
 
 _LOG_SOURCES = {"error": "error.log", "app": "app.log"}
 _LOG_READ_CAP_BYTES = 4 * 1024 * 1024
+_DIAGNOSE_LOG_CAP_BYTES = 10 * 1024 * 1024
 # 搜索（含“只看此请求”）要能找到几天前的记录；16MB 约 1 秒，仍远小于日志总上限
 _LOG_QUERY_READ_CAP_BYTES = 16 * 1024 * 1024
 _LOG_BLOCK_BYTES = 256 * 1024
@@ -401,6 +384,7 @@ def _iter_log_entries_newest_first(path: Path, state: dict):
     try:
         fh = open(path, "rb")
     except OSError:
+        state["truncated"] = True
         return
     with fh:
         fh.seek(0, os.SEEK_END)
@@ -451,6 +435,37 @@ def _iter_log_entries_newest_first(path: Path, state: dict):
             tail = [b"\n" + b"\n".join(before)] if before else []
             for item in reversed(_parse_log_lines(texts)):
                 yield item
+
+
+def _count_recent_errors(log_dir: Path, now: float) -> tuple[int, bool]:
+    state = {"budget": _DIAGNOSE_LOG_CAP_BYTES, "truncated": False, "is_current": lambda: True}
+    cutoff = now - 86400
+    rotated_stop = cutoff - 86400  # 留 24 小时时钟抖动余量，避免继续扫描更早的旧轮转文件
+    active_name = _LOG_SOURCES["error"]
+    count = 0
+    for path in _log_files_for("error", log_dir):
+        if state["budget"] <= 0:
+            state["truncated"] = True
+            break
+        newest_occurred = None
+        try:
+            with closing(_iter_log_entries_newest_first(path, state)) as entries:
+                for entry, _ in entries:
+                    try:
+                        occurred = datetime.strptime(entry["time"], _core_logger.DATE_FORMAT).timestamp()
+                    except (ValueError, OverflowError, OSError):
+                        continue
+                    if newest_occurred is None:
+                        newest_occurred = occurred
+                    if occurred < cutoff:
+                        break
+                    if entry["level"] in {"ERROR", "CRITICAL"} and occurred <= now:
+                        count += 1
+        except OSError:
+            state["truncated"] = True
+        if path.name != active_name and newest_occurred is not None and newest_occurred < rotated_stop:
+            break
+    return count, state["truncated"]
 
 
 def _read_cap_bytes(query: str) -> int:

@@ -8,8 +8,9 @@ import stat
 import zipfile
 
 from . import archive_pages
-from .download_layout import CHAPTER_MARKER
+from .download_layout import CHAPTER_MARKER, _marker
 from .file_tree import is_link, natural_key
+from .flat_pages import read_flat_page_name
 from .publication import VIEWS, WORK, checked, private_path
 from .storage import STAGING_DIRECTORY, is_temporary_path
 from .validation import EXPORT_IMAGE_EXTENSIONS, validate_numeric
@@ -148,7 +149,42 @@ def _numbered_page(name):
             and re.fullmatch(r'(?:[0-9]{5}|[1-9][0-9]{5,})', stem) is not None)
 
 
-def _filtered_archive(archives, prepare, marked, check):
+def _chapter_id(name):
+    match = re.search(r'__([0-9]{1,20})(?:_[0-9]+)?\Z', name)
+    return match[1] if match else None
+
+
+def _page_target(name, owners, chapters, replacements, *, packed=False):
+    parts = name.split('/')
+    page = parts[-1]
+    if len(parts) == 2 and _numbered_page(page):
+        folder = parts[0]
+        photo_id = owners.get(folder, _chapter_id(folder) if packed else None)
+        stem = Path(page).stem
+    elif len(parts) == 1 and (flat := read_flat_page_name(page)):
+        photo_id, stem = flat
+        page = stem + Path(page).suffix
+    else:
+        return name
+    if (photo_id, stem) in replacements:
+        return None
+    if photo_id in chapters:
+        return f"{chapters[photo_id]['folder']}/{page}"
+    return name
+
+
+def _write_pack(index, selected, target, check):
+    names = [name.casefold() for _, name in selected if name is not None]
+    if len(names) != len(set(names)):
+        raise OSError('旧归档页重名，保留原书架')
+    with archive_pages.open_pages(index) as read, zipfile.ZipFile(target, 'x') as dest:
+        for page, name in selected:
+            if name is not None:
+                check()
+                dest.writestr(name, read(page))
+
+
+def _filtered_archive(archives, prepare, marked, transform, check):
     # Never carry an opaque archive (or extract untrusted member paths) out of a shared v4 tree.
     for path, name in archives:
         check()
@@ -157,16 +193,14 @@ def _filtered_archive(archives, prepare, marked, check):
             raise OSError(f'无法核对旧资源包 {path.name}: {index.reason}')
         if index.status != 'ok':
             continue
-        pages = [p for p in index.pages if p.chapter in marked and _numbered_page(p.name.rsplit('/', 1)[-1])]
+        pages = [(p, transform(p.name, packed=True)) for p in index.pages
+                 if p.chapter in marked and _numbered_page(p.name.rsplit('/', 1)[-1])]
         if pages:
-            with archive_pages.open_pages(index) as read, zipfile.ZipFile(prepare / name, 'x') as dest:
-                for page in pages:
-                    check()
-                    dest.writestr(page.name, read(page), compress_type=page.info.compress_type)
+            _write_pack(index, pages, prepare / name, check)
         break  # the reader used this archive, never a union of older alternatives
 
 
-def copy_legacy(source, prepare, name, check):
+def copy_legacy(source, prepare, name, check, *, chapters, replacement_pages):
     if source is None:
         return
     old, eligible = source
@@ -174,36 +208,63 @@ def copy_legacy(source, prepare, name, check):
         old.lstat()
     except FileNotFoundError:
         return  # a removed legacy folder has no shelf to carry over
-    folders, archives = [], {}
+    folders, archives, loose = [], {}, {}
     for path, info in _entries(old, check):
         if stat.S_ISDIR(info.st_mode):
             folders.append(path)
         elif path.suffix.lower() in archive_pages.ARCHIVE_SUFFIXES:
             archives[path] = info
         elif eligible is None and path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS:
-            _copy(path, prepare / path.name, info)
+            loose[path] = info
     packs = _archives(old, name, archives)
+    marked = None if eligible is None else _marked(folders, eligible, check)
+    owners = {}
+    for folder in folders:
+        photo_id = _chapter_id(folder.name)
+        marker = _marker(folder)
+        if marker:
+            owners[folder.name] = photo_id if str(marker.get('photo_id')) == photo_id else None
+
+    def transform(relative, *, packed=False):
+        return _page_target(relative, owners, chapters, replacement_pages, packed=packed)
+
+    def copy_page(path, info):
+        dest = transform(path.relative_to(old).as_posix())
+        if dest is not None:
+            if (prepare / dest).exists():
+                raise OSError('旧章节页重名，保留原书架')
+            _copy(path, prepare / dest, info)
+
+    for path, info in loose.items():
+        copy_page(path, info)
     if eligible is None:
         for path, dest in packs:
             check()
-            _copy(path, prepare / dest, archives[path])
+            index = archive_pages.read_index(path)
+            selected = [(page, transform(page.name, packed=True)) for page in index.pages]
+            if any(page.name != target for page, target in selected):
+                if index.skipped:
+                    raise OSError(f'无法完整核对旧资源包 {path.name}，保留原书架')
+                _write_pack(index, selected, prepare / dest, check)
+                info = archives[path]
+                os.utime(prepare / dest, ns=(info.st_atime_ns, info.st_mtime_ns))
+            else:
+                _copy(path, prepare / dest, archives[path])
         # Keep other ZIP files as before, unless the new directory name would promote
         # an unrelated ZIP into a reader archive. The source always stays untouched.
         for path in archives.keys() - {p for p, _ in packs}:
             if path.stem.lower() != name.lower():
                 check()
                 _copy(path, prepare / path.name, archives[path])
-        marked = None
     else:
-        marked = _marked(folders, eligible, check)
         folders = [folder for folder in folders if folder.name in marked]
         for folder in folders:
             check()
             dest = prepare / folder.name
-            dest.mkdir()
+            dest.mkdir(exist_ok=True)
             (dest / CHAPTER_MARKER).write_bytes(marked[folder.name])
         if marked:
-            _filtered_archive(packs, prepare, marked, check)
+            _filtered_archive(packs, prepare, marked, transform, check)
     while folders:
         for path, info in _entries(folders.pop(), check):
             if stat.S_ISDIR(info.st_mode):
@@ -216,4 +277,4 @@ def copy_legacy(source, prepare, name, check):
             else:
                 keep = _numbered_page(path.name)
             if keep:
-                _copy(path, prepare / path.relative_to(old), info)
+                copy_page(path, info)

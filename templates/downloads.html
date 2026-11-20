@@ -17,13 +17,18 @@
                 <a href="#{{ key }}" data-filter="{{ key }}"{% if key == 'all' %} aria-current="page"{% endif %}>{{ label }}{% if key in ('failed','canceled') %}<span class="folio-filter-count" data-filter-count="{{ key }}"></span>{% endif %}</a>
                 {% endfor %}
             </nav>
-            <details class="record-cleanup"><summary>清理记录</summary><div>
-                <p>仅移除任务记录，保留藏书文件。</p>
-                {% for key, label in [('completed','已完成'),('failed','失败'),('canceled','已取消')] %}
-                <button type="button" class="btn btn-sm btn-outline-secondary" data-action="clear" data-status="{{ key }}">清空{{ label }}</button>
-                {% endfor %}
-                <button type="button" class="btn btn-sm btn-outline-danger" data-action="clear-finished">清空所有已结束记录</button>
-            </div></details>
+            <div class="d-flex align-items-center gap-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-action="open-export-folder" title="打开统一导出文件夹（CBZ / ZIP / PDF）">
+                    <i class="bi bi-folder2-open" aria-hidden="true"></i> 导出目录
+                </button>
+                <details class="record-cleanup"><summary>清理记录</summary><div>
+                    <p>仅移除任务记录，保留藏书文件。</p>
+                    {% for key, label in [('completed','已完成'),('failed','失败'),('canceled','已取消')] %}
+                    <button type="button" class="btn btn-sm btn-outline-secondary" data-action="clear" data-status="{{ key }}">清空{{ label }}</button>
+                    {% endfor %}
+                    <button type="button" class="btn btn-sm btn-outline-danger" data-action="clear-finished">清空所有已结束记录</button>
+                </div></details>
+            </div>
         </div>
         <div class="folio-caption"><h2 id="folio-caption">同册传输卷宗</h2>
             <a id="folio-back" href="#all" hidden>返回同册全景</a>

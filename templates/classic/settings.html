@@ -39,16 +39,18 @@
         <div class="row g-3">
             <div class="col-12 col-md-6" data-setting-key="proxy">
                 <label for="proxy" class="form-label">代理地址</label>
-                <input type="text" id="proxy" name="proxy" class="form-control"
-                       placeholder="例如: http://127.0.0.1:7890"
-                       value="{{ settings.proxy or '' }}">
-                <div class="form-text">
-                    HTTP 代理（留空则不使用代理）<br>
+                <div class="input-group has-validation">
+                    <input type="password" id="proxy" name="proxy" class="form-control"
+                           autocomplete="off" spellcheck="false" placeholder="留空表示直连" aria-describedby="proxy-help">
+                    <button type="button" id="proxy-visibility" class="btn btn-outline-secondary" aria-controls="proxy" aria-label="显示代理地址" aria-pressed="false">显示</button>
+                    <div class="invalid-feedback"></div>
+                </div>
+                <div class="form-text" id="proxy-help">
+                    支持 HTTP(S) 和 SOCKS5。清空并保存即可恢复直连。<br>
                     <strong>格式示例：</strong>
                     <code>http://127.0.0.1:7890</code>、
                     <code>http://user:pass@proxy.example.com:8080</code>
                 </div>
-                <div class="invalid-feedback"></div>
             </div>
             <div class="col-6 col-md-3" data-setting-key="timeout">
                 <label for="timeout" class="form-label">超时（秒）</label>
@@ -109,10 +111,14 @@
                 <div class="form-text">同时下载的章节数量，建议保持为 1</div>
                 <div class="invalid-feedback"></div>
             </div>
-            <div class="col-12 col-md-6">
-                <label class="form-label">图片格式</label>
-                <input type="text" class="form-control" value="WebP" readonly>
-                <div class="form-text">第一版统一保存为 WebP 格式</div>
+            <div class="col-12 col-md-6" data-setting-key="image_format">
+                <label for="image_format" class="form-label">图片保存格式</label>
+                <select id="image_format" name="image_format" class="form-select">
+                    <option value="webp" {% if (settings.image_format or 'webp') == 'webp' %}selected{% endif %}>WebP（推荐）</option>
+                    <option value="jpg" {% if settings.image_format == 'jpg' %}selected{% endif %}>JPG（通用兼容）</option>
+                    <option value="png" {% if settings.image_format == 'png' %}selected{% endif %}>PNG（无损）</option>
+                </select>
+                <div class="form-text">新下载的图片按所选格式保存。多帧动图保留为动画 WebP。</div>
             </div>
             <div class="col-12 col-md-6" data-setting-key="organize_mode">
                 <label for="organize_mode" class="form-label">下载后自动整理目录</label>
@@ -136,14 +142,23 @@
         <h5><i class="bi bi-archive"></i> 下载后处理</h5>
         <div class="row g-3">
             <div class="col-12" data-setting-key="auto_pack">
-                <div class="form-text mb-3">下载完成后自动将漫画打包为 .cbz 格式</div>
+                <div class="form-text mb-3">下载完成后按所选格式打包，图片直接封装。</div>
                 <div class="form-check form-switch mb-3">
                     <input type="checkbox" id="auto_pack" name="auto_pack"
                            class="form-check-input" role="switch" value="true"
                            {% if settings.auto_pack == 'true' %}checked{% endif %}>
                     <label class="form-check-label" for="auto_pack">
-                        <strong>自动打包 CBZ</strong>
+                        <strong>自动打包</strong>
                     </label>
+                </div>
+                <div class="col-md-6 ms-4 mb-3" data-setting-key="pack_format">
+                    <label for="pack_format" class="form-label">自动打包格式</label>
+                    <select id="pack_format" name="pack_format" class="form-select"
+                            {% if settings.auto_pack != 'true' %}disabled{% endif %}>
+                        <option value="cbz" {% if (settings.pack_format or 'cbz') == 'cbz' %}selected{% endif %}>CBZ（漫画阅读器直读）</option>
+                        <option value="zip" {% if settings.pack_format == 'zip' %}selected{% endif %}>ZIP（通用归档）</option>
+                    </select>
+                    <div class="form-text">仅在自动打包开启时可配置</div>
                 </div>
                 <div class="form-check form-switch ms-4" id="delete_originals_wrapper" data-setting-key="delete_originals">
                     <input type="checkbox" id="delete_originals" name="delete_originals"

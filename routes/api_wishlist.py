@@ -1,4 +1,5 @@
 """收藏清单 API"""
+from datetime import datetime, timedelta
 import json
 import re
 
@@ -24,6 +25,10 @@ _MAX_BATCH_DOWNLOAD = 50
 _MAX_BATCH_IMPORT_FILE = 200
 _MAX_BATCH_IMPORT_RAW_TOKENS = 200
 _MAX_BATCH_IMPORT_RAW_ACTUAL = 50
+_ADDED_AT_ISO = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
+    r"(?:[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?(?:Z|[+-][0-9]{2}:[0-5][0-9])?)?"
+)
 
 
 # ──────────────────────────────────────────────
@@ -137,7 +142,8 @@ def list_wishlist():
 
     # “已下载（可阅读）”与资源库、详情、搜索用同一条规则；只有完成过下载的收藏才可能可读
     with db.library_snapshot() as conn:
-        states = states_among(db.get_completed_album_ids(wishlist_only=True, conn=conn), conn)
+        candidates = db.get_completed_album_ids(wishlist_only=True, keyword=q, conn=conn)
+        states = states_among(candidates, conn)
         result = db.get_all_wishlist(
             page=page, page_size=page_size, keyword=q, sort=sort, conn=conn,
             status=status or None, readable_ids=(aid for aid, state in states.items() if state.readable),
@@ -302,6 +308,18 @@ def export_wishlist():
     )
 
 
+def _imported_added_at(value, fallback):
+    if value is None:
+        return None
+    if isinstance(value, str) and _ADDED_AT_ISO.fullmatch(value):
+        try:
+            datetime.fromisoformat(value)
+            return value
+        except ValueError:
+            pass
+    return fallback.isoformat()
+
+
 @api_wishlist_bp.post("/api/wishlist/import-file")
 def import_wishlist_file():
     """通过上传 JSON 文件导入收藏"""
@@ -342,6 +360,7 @@ def import_wishlist_file():
     skipped_existing = 0
     errors = []
 
+    imported_at = datetime.now()
     for idx, entry in enumerate(data):
         if not isinstance(entry, dict):
             errors.append({"index": idx, "message": "条目不是对象"})
@@ -365,7 +384,8 @@ def import_wishlist_file():
             cover_url = str(cover_url)[:2000]
 
         try:
-            result = db.add_wishlist(album_id, title, author, cover_url)
+            added_at = _imported_added_at(entry.get("added_at", ""), imported_at - timedelta(microseconds=idx))
+            result = db.add_wishlist(album_id, title, author, cover_url, added_at=added_at)
             if result:
                 added += 1
             else:

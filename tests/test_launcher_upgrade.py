@@ -1,6 +1,8 @@
 """Exercise the real health contract and upgrade decision without sockets or service processes."""
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -23,7 +25,6 @@ def running_service(client, tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "FLASK_JSON", marker)
     monkeypatch.setattr(launcher, "get_path_config", lambda: paths)
     monkeypatch.setattr(api_system, "get_path_config", lambda: paths)
-    monkeypatch.setattr(api_system, "get_active_client_count", lambda: 0)
     monkeypatch.setattr(launcher, "process_alive", lambda pid: False)
     notify, browser, spawn, cleanup = Mock(return_value=True), Mock(), Mock(), Mock()
     monkeypatch.setattr(launcher, "request_shutdown", notify)
@@ -44,15 +45,13 @@ def running_service(client, tmp_path, monkeypatch):
                            spawn=spawn, cleanup=cleanup)
 
 
-@pytest.mark.parametrize("busy", ["running", "queued", "paused", "executors", "clients"])
+@pytest.mark.parametrize("busy", ["running", "queued", "paused", "executors"])
 def test_update_opens_original_service_without_interrupting_work(running_service, monkeypatch, busy, capsys):
     import launcher
     from core import database
     from routes import api_system
     if busy == "executors":
         monkeypatch.setattr(api_system.job_manager, "get_running_count", lambda: 1)
-    elif busy == "clients":
-        monkeypatch.setattr(api_system, "get_active_client_count", lambda: 1)
     else:
         database.insert_job("fixture", "123", "private-title", [])
         if busy != "queued":
@@ -64,6 +63,59 @@ def test_update_opens_original_service_without_interrupting_work(running_service
     service.notify.assert_not_called()
     service.spawn.assert_not_called()
     service.cleanup.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["independent", "shared", "retired_shared"])
+def test_update_waits_for_live_sdk_leases(running_service, capsys, kind):
+    import launcher
+    from core import jm_service
+
+    leased, _ = jm_service.get_client(shared=kind != "independent")
+    service = running_service
+    try:
+        if kind == "retired_shared":
+            assert jm_service.invalidate_option_cache()
+        assert service.local(5002, "/api/system/health?activity=1")["jm_active_clients"] == 1
+        assert launcher.main([]) == 0
+        assert "在途 SDK 客户端活动 1" in capsys.readouterr().out
+        service.browser.assert_called_once_with("http://127.0.0.1:5002")
+        service.notify.assert_not_called()
+        service.spawn.assert_not_called()
+    finally:
+        jm_service.close_client(leased)
+    assert service.local(5002, "/api/system/health?activity=1")["jm_active_clients"] == 0
+    assert launcher.main([]) == 0
+    service.notify.assert_called_once()
+    service.spawn.assert_called_once()
+
+
+def test_update_waits_while_shared_sdk_client_is_being_built(running_service, monkeypatch):
+    import launcher
+    from core import jm_service, sdk_adapter
+
+    original = sdk_adapter.new_client
+    entered, finish = Event(), Event()
+
+    def build(*args, **kwargs):
+        entered.set()
+        assert finish.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sdk_adapter, "new_client", build)
+    service = running_service
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(jm_service.get_client)
+        try:
+            assert entered.wait(5)
+            assert service.local(5002, "/api/system/health?activity=1")["jm_active_clients"] == 1
+            assert launcher.main([]) == 0
+            service.notify.assert_not_called()
+            service.spawn.assert_not_called()
+        finally:
+            finish.set()
+            leased, _ = future.result(timeout=5)
+            jm_service.close_client(leased)
+    assert service.local(5002, "/api/system/health?activity=1")["jm_active_clients"] == 0
 
 
 def test_idle_verified_update_signals_original_then_opens_replacement(running_service):
@@ -145,6 +197,19 @@ def test_attach_only_opens_verified_service_without_preflight_or_ownership(runni
     service.notify.assert_not_called()
     service.spawn.assert_not_called()
     service.cleanup.assert_not_called()
+
+
+def test_attach_prints_url_and_accurate_status_when_browser_declines(running_service, capsys):
+    import launcher
+
+    service = running_service
+    service.browser.return_value = False
+    assert launcher.main(["--attach"]) == 0
+    output = capsys.readouterr().out
+    assert "既有实例正在运行" in output and "浏览器未打开" in output
+    assert "http://127.0.0.1:5002" in output and "已打开既有实例" not in output
+    service.notify.assert_not_called()
+    service.spawn.assert_not_called()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows shutdown events")

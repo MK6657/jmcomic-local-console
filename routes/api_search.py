@@ -38,10 +38,9 @@ def search():
 
     try:
         result = search_albums(keyword=q, page=page, page_size=page_size, sort=sort)
-        add_search_history(q)
         raw_items = result.get("items", [])
         items = raw_items[:page_size]
-        return jsonify({
+        response = jsonify({
             "status": "ok",
             "items": items,
             "total": result["total"],
@@ -55,6 +54,13 @@ def search():
         if failure is not None:
             return jsonify(failure.payload()), failure.http_status
         return jsonify({"status": "error", "message": "搜索失败，请稍后重试"}), 500
+
+    if page == 1:
+        try:
+            add_search_history(q)
+        except Exception as exc:
+            log.warning(f"搜索成功但写入搜索历史失败 error_type={type(exc).__name__}")
+    return response
 
 
 @api_search_bp.get("/search-history")
@@ -73,9 +79,12 @@ def search_history():
         return jsonify({"status": "error", "message": "获取搜索历史失败"}), 500
 
 
+@api_search_bp.delete("/search-history")
 @api_search_bp.delete("/search-history/<string:keyword>")
-def delete_search_history_route(keyword: str):
+def delete_search_history_route(keyword: str | None = None):
     """删除指定的搜索历史"""
+    if keyword is None:
+        keyword = request.args.get("keyword", "")
     keyword = keyword.strip()
     if not keyword:
         return jsonify({"status": "error", "message": "缺少 keyword"}), 400

@@ -1,8 +1,8 @@
 """在线阅读：按需从上游取单页图片并缓存，供连续阅读页（/online/<album_id>）展示。
 
 - 不创建下载任务，不写入 downloads/ 或资源库；本地阅读（/read、/preview）仍然只读本地文件。
-- 页面缓存在 runtime/cache/online/<photo_id>/<nnnnn>.webp（名字固定，真实格式由 image_mime 按文件头判断），
-  按总大小淘汰最久未读的页面。
+- 页面保存在 runtime/cache/online 的当前代次下（旧版直接使用 online 目录），文件名为 <photo_id>/<nnnnn>.webp。
+  真实格式由 image_mime 按文件头判断，按总大小淘汰最久未读的页面。
 - 每页只取一次上游字节。不需要解扰的页（num == 0、没有 scramble_id、GIF）原样保存；需要解扰的按 jmcomic
   的方式切片还原后编码为 JPEG q90（比 WebP method 0 快一个数量级、画质相当，只多占本地缓存）。下载任务不走这里。
 - 章节图片列表：album_pages() 记下的列表一直有效（图片地址不带时效参数，只按 LRU 淘汰）。不在内存里时（服务重启、
@@ -35,10 +35,12 @@ from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 from PIL import Image
 
 from . import jm_service
+from .file_tree import is_link
 from .logger import log
 from .path_utils import get_cache_dir
 from .sdk_adapter import image_domains as _image_hosts, transport_and_session
@@ -72,6 +74,8 @@ _STALE_TEMP_SECONDS = 600    # 超过 10 分钟仍未改名的临时文件视为
 _TIMEOUT_MESSAGE = "在线加载超时，请稍后重试"
 # 缓存里只有这种文件名是已完成的页面；写入时的临时文件形如 00001.tmp-xxxxxxxx.webp（旧版为 *.part）
 _PAGE_NAME = re.compile(r"\d{5,}\.webp")
+_CACHE_GENERATION = re.compile(r"generation-[0-9a-f]{32}")
+_CACHE_POINTER = ".generation"
 _TEMP_MARK = ".tmp-"
 _clock = time.monotonic      # 测试替换为假时钟
 
@@ -216,12 +220,12 @@ _photos_lock = threading.Lock()
 _photo_lookups = {}          # photo_id -> _Lookup：正在向上游查的章节
 _photo_failures = OrderedDict()  # photo_id -> (time, detached failure)
 _fetch_slots = threading.BoundedSemaphore(_MAX_PARALLEL_FETCHES)
-_page_locks = {}             # (photo_id, index) -> [Lock, 使用者数]；没人用时删除
+_page_locks = {}             # 页文件路径 -> [Lock, 使用者数]；没人用时删除
 _page_locks_guard = threading.Lock()
 _trim_lock = threading.Lock()
 _last_trim = 0.0
-# clear_cache() 每次加 1：之前启动的取图不再写入缓存。
-_cache_epoch = 0
+_cache_location: tuple[Path, Path] | None = None
+_cache_cleanup_pending = False
 _store_lock = threading.Lock()
 
 _MAGIC = ((b"RIFF", "image/webp"), (b"\xff\xd8", "image/jpeg"), (b"\x89PNG", "image/png"), (b"GIF8", "image/gif"))
@@ -234,10 +238,12 @@ def _remember_locked(photo_id: str, photo) -> None:
         _photos.popitem(last=False)
 
 
-def _remember_photos(photos) -> None:
+def _remember_photos(photos, *, cache_dir: Path | None = None) -> None:
     with _lifecycle_cond:
         _require_running()
         with _photos_lock:
+            if cache_dir is not None and not _cache_is_current(cache_dir):
+                return
             for photo in photos:
                 _remember_locked(str(photo.photo_id), photo)
 
@@ -265,9 +271,11 @@ class _Lookup:
 
 
 @_tracked
-def _get_photo(photo_id: str, deadline: float):
+def _get_photo(photo_id: str, deadline: float, *, cache_dir: Path | None = None):
     """同一章节同时只查一次；等待超时后查询继续，已知失败在短暂冷却期保留原分类。"""
     with _photos_lock:
+        if cache_dir is not None and not _cache_is_current(cache_dir):
+            raise _cache_changed()
         photo = _photos.get(photo_id)
         if photo is not None:
             _photos.move_to_end(photo_id)
@@ -379,6 +387,7 @@ def _finish_lookup(photo_id: str, lookup: _Lookup, photo, error) -> None:
 def album_pages(album_id: str) -> dict:
     """整本漫画的在线页列表，结构与本地 /api/preview/<id> 一致，另附 photo_id 便于按章节定位。"""
     log.info(f"在线阅读 获取页面列表 album_id={album_id}")
+    cache_dir = _active_cache_dir()
     deadline = jm_service.metadata_budget._clock() + jm_service._operation_timeout(20)
     client, _ = jm_service.get_client()
     try:
@@ -388,13 +397,16 @@ def album_pages(album_id: str) -> dict:
             _call_client=client,
         )
         _require_running()
-        failed = []
+        failures = []
         chapter_deadline = min(deadline, jm_service.metadata_budget.deadline_after(min(15, jm_service._operation_timeout(15))))
-        photos = jm_service.check_album_photos(client, album, failed=failed, deadline=chapter_deadline, stop_event=_stop_event)
+        photos = jm_service.check_album_photos(
+            client, album, failures=failures, deadline=chapter_deadline, stop_event=_stop_event,
+        )
     finally:
         jm_service.close_client(client)
 
     pages, skipped = [], 0
+    generation = cache_dir.name if cache_dir != CACHE_ROOT else "legacy"
     for photo in photos:
         count = len(photo.page_arr) if getattr(photo, "page_arr", None) else 0
         if not count:
@@ -404,20 +416,49 @@ def album_pages(album_id: str) -> dict:
         for index in range(count):
             pages.append({
                 "page": len(pages) + 1,
-                "url": f"/api/online-img/{photo.photo_id}/{index}",
+                "url": f"/api/online-img/{photo.photo_id}/{index}?v={generation}",
                 "chapter": chapter,
                 "photo_id": str(photo.photo_id),
             })
-    _remember_photos([photo for photo in photos if getattr(photo, "page_arr", None)])
-    if not pages and failed:
-        log.warning(f"在线阅读 所有章节的页面列表都获取失败 album_id={album_id} chapters={len(failed)}")
-        jm_service.metadata_budget.remaining(chapter_deadline, _stop_event, jm_service.background_calls.stop_event())
-        raise UpstreamFailure("upstream_error", "上游未能提供章节列表，请稍后重试")
+    _remember_photos([photo for photo in photos if getattr(photo, "page_arr", None)], cache_dir=cache_dir)
+    if not pages and failures:
+        failure = preferred_failure(failures)
+        log.warning(f"在线阅读 未获取到可读页 album_id={album_id} chapters={len(failures)} kind={failure.kind}")
+        raise failure
     return {"title": str(getattr(album, "name", "") or ""), "pages": pages, "skipped_chapters": skipped}
 
 
-def _page_path(photo_id: str, index: int) -> Path:
-    return CACHE_ROOT / photo_id / f"{index + 1:05d}.webp"
+def _active_cache_dir() -> Path:
+    global _cache_location, _cache_cleanup_pending
+    location = _cache_location
+    if location is not None and location[0] == CACHE_ROOT:
+        return location[1]
+    with _store_lock:
+        if _cache_location is None or _cache_location[0] != CACHE_ROOT:
+            try:
+                with (CACHE_ROOT / _CACHE_POINTER).open(encoding="ascii") as handle:
+                    name = handle.read(64)
+            except FileNotFoundError:
+                directory = CACHE_ROOT
+            else:
+                if not _CACHE_GENERATION.fullmatch(name):
+                    raise OSError("在线阅读缓存代次无效，请清除缓存")
+                directory = CACHE_ROOT / name
+            _cache_cleanup_pending = directory != CACHE_ROOT
+            _cache_location = (CACHE_ROOT, directory)
+        return _cache_location[1]
+
+
+def _cache_is_current(directory: Path) -> bool:
+    return _cache_location == (CACHE_ROOT, directory)
+
+
+def _cache_changed() -> UpstreamFailure:
+    return UpstreamFailure("cache_changed", "图片缓存已刷新，请重试", http_status=503)
+
+
+def _page_path(photo_id: str, index: int, cache_dir: Path | None = None) -> Path:
+    return (cache_dir or _active_cache_dir()) / photo_id / f"{index + 1:05d}.webp"
 
 
 @contextmanager
@@ -463,31 +504,33 @@ def image_file(photo_id: str, index: int) -> Path:
     """返回单页图片的缓存路径；未缓存时从上游取。索引越界抛 IndexError，上游失败保留具体分类。
     时限从这里算起：等同一页的预取、等取图名额、查章节列表都算在内，不会等完再重新计时。
     无论是否命中缓存，都在后台预取本章节接下来的几页。"""
-    epoch = _cache_epoch
-    target = _page_path(photo_id, index)
-    if _cached_page(target):
-        _touch(target)
-        _schedule_prefetch(photo_id, index)
-        return target
-    deadline = _clock() + _page_budget()
-    with _page_lock((photo_id, index), deadline - _clock()) as acquired:
-        if not _cached_page(target):  # 同一页的另一个请求或预取刚取完就直接用
-            if not acquired:
-                log.warning(f"在线阅读 取图失败 photo_id={photo_id} page={index + 1} error=等待同一页的另一次获取超时")
-                raise UpstreamTimeout(_TIMEOUT_MESSAGE)
-            photo = _get_photo(photo_id, deadline)
-            if index >= len(photo.page_arr or ()):
-                raise IndexError(f"photo {photo_id} has no page {index + 1}")
-            if not _fetch_page(photo, index, target, deadline, epoch=epoch):
-                _require_running()
-                raise UpstreamFailure("cache_changed", "图片缓存已刷新，请重试", http_status=503)
-    _schedule_prefetch(photo_id, index)
-    _trim_cache()
+    cache_dir = _active_cache_dir()
+    target = _page_path(photo_id, index, cache_dir)
+    cached = _cached_page(target)
+    if not cached:
+        deadline = _clock() + _page_budget()
+        with _page_lock(target, deadline - _clock()) as acquired:
+            if not _cached_page(target):  # 同一页的另一个请求或预取刚取完就直接用
+                if not acquired:
+                    log.warning(f"在线阅读 取图失败 photo_id={photo_id} page={index + 1} error=等待同一页的另一次获取超时")
+                    raise UpstreamTimeout(_TIMEOUT_MESSAGE)
+                photo = _get_photo(photo_id, deadline, cache_dir=cache_dir)
+                if index >= len(photo.page_arr or ()):
+                    raise IndexError(f"photo {photo_id} has no page {index + 1}")
+                if not _fetch_page(photo, index, target, deadline):
+                    _require_running()
+                    raise _cache_changed()
+    if not _cache_is_current(cache_dir):
+        raise _cache_changed()
+    _touch(target)
+    _schedule_prefetch(photo_id, index, cache_dir=cache_dir)
+    if not cached or _cache_cleanup_pending:
+        _trim_cache()
     return target
 
 
 @_tracked
-def _fetch_page(photo, index: int, target: Path, deadline: float, epoch=None, background=False) -> bool:
+def _fetch_page(photo, index: int, target: Path, deadline: float, background=False) -> bool:
     """取一页、按需解扰、写入缓存，到 deadline 为止；不发布无效或超限的图片。
     clear_cache() 之后不再发布旧请求的结果，返回 False。"""
     photo_id = str(photo.photo_id)
@@ -515,7 +558,7 @@ def _fetch_page(photo, index: int, target: Path, deadline: float, epoch=None, ba
         level(f"在线阅读{' 预取' if background else ''} 取图结果不是有效图片 photo_id={photo_id} page={index + 1} "
               f"size={len(data)} error={type(e).__name__}: {e}")
         raise UpstreamFailure("invalid_response", "上游返回的图片无效，请稍后重试") from e
-    return _store(target, content, epoch)
+    return _store(target, content)
 
 
 # ── 解扰 ──────────────────────────────────────────────
@@ -822,34 +865,34 @@ def _describe(error) -> str:
 # ── 预取 ──────────────────────────────────────────────
 
 _prefetch_cond = _lifecycle_cond
-_prefetch_queue = deque()    # ((photo_id, index), epoch)，队首先取
+_prefetch_queue = deque()    # ((photo_id, index), 代次目录)，队首先取
 _prefetch_active = set()
 _prefetch_threads = set()    # Actual owners; only reap a Thread after it exits.
 
 
-def _schedule_prefetch(photo_id: str, index: int) -> None:
+def _schedule_prefetch(photo_id: str, index: int, *, cache_dir: Path | None = None) -> None:
     """把本章节接下来 _PREFETCH_AHEAD 页中未缓存的放到预取队首（离当前页近的先取）。
     章节列表不在内存里（服务重启、清除缓存）就不预取：后台不查章节，读者的请求查到之后再预取。"""
     photo = _cached_photo(photo_id)
     if photo is None:
         return
+    cache_dir = cache_dir or _active_cache_dir()
     end = min(index + 1 + _PREFETCH_AHEAD, len(photo.page_arr or ()))
-    keys = [(photo_id, i) for i in range(index + 1, end)]
-    keys = [key for key in keys if not _cached_page(_page_path(*key))]
-    if not keys:
+    items = [((photo_id, i), cache_dir) for i in range(index + 1, end)
+             if not _cached_page(_page_path(photo_id, i, cache_dir))]
+    if not items:
         return
     with _prefetch_cond:
-        if _stop_event.is_set():
+        if _stop_event.is_set() or not _cache_is_current(cache_dir):
             return
         _reap_threads_locked()
-        epoch = _cache_epoch
-        keys = [key for key in keys if key not in _prefetch_active]
-        if not keys:
+        items = [item for item in items if item not in _prefetch_active]
+        if not items:
             return
-        wanted = set(keys)
-        rest = [item for item in _prefetch_queue if item[0] not in wanted]
+        wanted = set(items)
+        rest = [item for item in _prefetch_queue if item not in wanted]
         _prefetch_queue.clear()
-        _prefetch_queue.extend([(key, epoch) for key in keys] + rest)
+        _prefetch_queue.extend(items + rest)
         while len(_prefetch_queue) > _PREFETCH_QUEUE:
             _prefetch_queue.pop()
         while len(_prefetch_threads) < _PREFETCH_WORKERS:
@@ -861,7 +904,7 @@ def _schedule_prefetch(photo_id: str, index: int) -> None:
                 if not thread.is_alive():
                     _prefetch_threads.discard(thread)
                 raise
-        _prefetch_cond.notify(len(keys))
+        _prefetch_cond.notify(len(items))
 
 
 def _prefetch_worker() -> None:
@@ -876,38 +919,39 @@ def _prefetch_worker() -> None:
                     _prefetch_cond.wait(remaining)
                 if _stop_event.is_set():
                     return
-                key, epoch = _prefetch_queue.popleft()
-                _prefetch_active.add(key)
+                item = _prefetch_queue.popleft()
+                _prefetch_active.add(item)
             try:
-                _prefetch(key, epoch)
+                _prefetch(*item)
             except TimeoutError:
                 pass  # _download 已记录原因
             except Exception as e:
-                log.info(f"在线阅读 预取失败 photo_id={key[0]} page={key[1] + 1} error={type(e).__name__}: {e}")
+                photo_id, index = item[0]
+                log.info(f"在线阅读 预取失败 photo_id={photo_id} page={index + 1} error={type(e).__name__}: {e}")
             finally:
                 with _prefetch_cond:
-                    _prefetch_active.discard(key)
+                    _prefetch_active.discard(item)
                     _prefetch_cond.notify_all()
     finally:
         with _prefetch_cond:
             _prefetch_cond.notify_all()
 
 
-def _prefetch(key, epoch: int) -> None:
+def _prefetch(key, cache_dir: Path) -> None:
     photo_id, index = key
-    target = _page_path(photo_id, index)
-    if _stop_event.is_set() or epoch != _cache_epoch or _cached_page(target):
+    target = _page_path(photo_id, index, cache_dir)
+    if _stop_event.is_set() or not _cache_is_current(cache_dir) or _cached_page(target):
         return
     photo = _cached_photo(photo_id)
     if photo is None or index >= len(photo.page_arr or ()):
         return  # 章节列表已不在内存里（清除缓存等）：后台不查章节，等读者打开这一页时再查
-    with _page_lock(key) as acquired:
+    with _page_lock(target) as acquired:
         # 拿不到锁：前台正在取这一页，不重复取
-        if not acquired or _cached_page(target) or epoch != _cache_epoch:
+        if not acquired or _cached_page(target) or not _cache_is_current(cache_dir):
             return
         if _all_hosts_down(urlsplit(photo[index].download_url).netloc):
             return  # 所有图片域名刚失败过：不在后台反复撞，等读者翻到这一页时再取
-        stored = _fetch_page(photo, index, target, _clock() + _page_budget(), epoch=epoch, background=True)
+        stored = _fetch_page(photo, index, target, _clock() + _page_budget(), background=True)
     if stored:
         _trim_cache()
 
@@ -915,10 +959,10 @@ def _prefetch(key, epoch: int) -> None:
 # ── 缓存 ──────────────────────────────────────────────
 
 @_tracked
-def _store(target: Path, content: bytes, epoch=None) -> bool:
-    """先写临时文件再改名，缓存里不会出现半张图；epoch 已过期（clear_cache 之后）则不写。"""
+def _store(target: Path, content: bytes) -> bool:
+    """原子写入当前代次的页面，拒绝已经过期的写入。"""
     with _store_lock:
-        if _stop_event.is_set() or (epoch is not None and epoch != _cache_epoch):
+        if _stop_event.is_set() or not _cache_is_current(target.parent.parent):
             return False
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix=target.stem + _TEMP_MARK, suffix=target.suffix, dir=target.parent)
@@ -927,7 +971,7 @@ def _store(target: Path, content: bytes, epoch=None) -> bool:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(content)
             with _lifecycle_cond:
-                if _stop_event.is_set() or (epoch is not None and epoch != _cache_epoch):
+                if _stop_event.is_set():
                     return False
                 os.replace(tmp, target)
         finally:
@@ -945,27 +989,84 @@ def image_mime(path: Path) -> str:
     return _sniff(head) or "application/octet-stream"
 
 
-@_tracked
-def clear_cache() -> None:
-    """删除缓存的页面，并停止预取、关闭取图连接、忘掉域名失败记录（设置页“清除缓存”）。"""
-    global _cache_epoch, _pool_epoch, _idle_clients, _last_good_host
-    with _prefetch_cond:
-        _prefetch_queue.clear()
-        _prefetch_cond.notify_all()
+@contextmanager
+def serving_page(path: Path):
+    """确认并打开仍属当前代次的页。响应体由调用方在锁外发送。"""
     with _store_lock:
-        _cache_epoch += 1
-        shutil.rmtree(CACHE_ROOT, ignore_errors=True)
-    with _photos_lock:
-        _photos.clear()
-        _photo_failures.clear()
-    with _pool_lock:
-        _pool_epoch += 1
-        idle, _idle_clients = [client for _, client in _idle_clients], []
+        if not _cache_is_current(path.parent.parent):
+            raise FileNotFoundError(path)
+        yield
+
+
+def _new_cache_dir() -> Path:
+    name = f"generation-{uuid4().hex}"
+    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="ascii", prefix=".generation-",
+                                         dir=CACHE_ROOT, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(name)
+        temporary.replace(CACHE_ROOT / _CACHE_POINTER)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return CACHE_ROOT / name
+
+
+def _chapter_directory(path: Path) -> bool:
+    return path.name.isascii() and path.name.isdigit()
+
+
+def _remove_retired_cache(active: Path) -> bool:
+    """尽力清理离任代次，下次裁剪继续尝试当前未能删除的目录。"""
+    try:
+        directories = list(CACHE_ROOT.iterdir())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    pending = False
+    for directory in directories:
+        retired = _CACHE_GENERATION.fullmatch(directory.name) or (
+            active != CACHE_ROOT and _chapter_directory(directory)
+        )
+        if directory == active or not retired:
+            continue
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            pending |= directory.exists()
+        except OSError:
+            pending = True
+    return pending
+
+
+@_tracked
+def clear_cache() -> bool:
+    """切换缓存代次。返回是否有旧缓存等待删除。"""
+    global _cache_location, _cache_cleanup_pending, _pool_epoch, _idle_clients, _last_good_host
+    with _trim_lock:
+        with _store_lock:
+            cache_dir = _new_cache_dir()
+            with _lifecycle_cond, _photos_lock:
+                _cache_location = (CACHE_ROOT, cache_dir)
+                _prefetch_queue.clear()
+                _prefetch_cond.notify_all()
+                _photos.clear()
+                _photo_failures.clear()
+                _photo_lookups.clear()
+                _pool_epoch += 1
+                idle, _idle_clients = [client for _, client in _idle_clients], []
+        pending = _cache_cleanup_pending = _remove_retired_cache(cache_dir)
+    if pending:
+        log.warning("在线阅读缓存已切换，部分旧缓存暂时无法删除")
     for client in idle:
         _close_reader_client(client)
     with _hosts_lock:
         _host_failed_at.clear()
         _last_good_host = None
+    return pending
 
 
 def _touch(path: Path) -> None:
@@ -982,7 +1083,7 @@ def _is_cached_page(path: Path) -> bool:
 
 
 def _trim_cache(force: bool = False) -> None:
-    global _last_trim
+    global _last_trim, _cache_cleanup_pending
     if _stop_event.is_set():
         return
     now = time.monotonic()
@@ -992,21 +1093,28 @@ def _trim_cache(force: bool = False) -> None:
         return
     try:
         _last_trim = now
+        active = _active_cache_dir()
+        if _cache_cleanup_pending:
+            _cache_cleanup_pending = _remove_retired_cache(active)
         files, total = [], 0
         stale = time.time() - _STALE_TEMP_SECONDS
-        for path in CACHE_ROOT.rglob("*"):
+        directories = [directory for directory in active.glob("*") if _chapter_directory(directory)]
+        for directory in directories:
             try:
-                if not path.is_file():
-                    continue
-                stat = path.stat()
-                if not _is_cached_page(path):
-                    # 临时文件：写入失败又删不掉（Windows 上被占用）留下的半成品过期即删；
-                    # 较新的可能正在写入，既不计入缓存大小也不参与淘汰。
-                    if stat.st_mtime < stale:
-                        path.unlink()
-                    continue
-                files.append((stat.st_mtime, stat.st_size, path))
-                total += stat.st_size
+                if not is_link(directory) and directory.is_dir():
+                    for path in directory.iterdir():
+                        try:
+                            if is_link(path) or not path.is_file():
+                                continue
+                            stat = path.stat()
+                            if not _is_cached_page(path):
+                                if stat.st_mtime < stale:
+                                    path.unlink()
+                                continue
+                            files.append((stat.st_mtime, stat.st_size, path))
+                            total += stat.st_size
+                        except OSError:
+                            continue
             except OSError:
                 continue
         if total <= CACHE_LIMIT_BYTES:
@@ -1020,7 +1128,7 @@ def _trim_cache(force: bool = False) -> None:
                 total -= size
             except OSError:
                 pass
-        for directory in CACHE_ROOT.glob("*"):
+        for directory in directories:
             try:
                 directory.rmdir()
             except OSError:

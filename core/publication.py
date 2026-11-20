@@ -4,16 +4,20 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import stat
 
 from . import database as db
 from .backup_paths import safe_parts
 from .download_layout import CHAPTER_FORMAT, CHAPTER_MARKER, chapter_format, chapter_output_dir
 from .file_tree import is_link
+from .logger import log
 from .storage import STAGING_DIRECTORY, is_temporary_path, publication_tree, staged_file
 
 WORK = '.jmcomic-work'
 VIEWS = '.jmcomic-views'
+_PAGE_NAME = re.compile(r'(?:[0-9]{5}|[1-9][0-9]{5,})\.(?:webp|png|jpg)\Z')
 
 
 def _key(job):
@@ -58,7 +62,7 @@ def _json_write(path, value):
 
 
 def _load(path):
-    if is_link(path) or not path.is_file():
+    if not path.is_file() or is_link(path):
         raise OSError('任务文件清单无效')
     return json.loads(path.read_bytes())
 
@@ -78,7 +82,7 @@ def job_snapshot(job_id, root):
 
 
 def _copy(source, dest):
-    if is_link(source) or not source.is_file():
+    if not source.is_file() or is_link(source):
         raise OSError('发布源文件不是普通文件')
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, dest)
@@ -87,6 +91,84 @@ def _copy(source, dest):
 def _digest(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def _logical_pages(manifest):
+    return {(chapter['photo_id'], Path(name).stem.casefold())
+            for chapter in manifest for name in chapter['files']}
+
+
+def _page_identity(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink
+
+
+def _remove_receipt_pages(root, work, receipts):
+    folders, resolved = set(), []
+    for relative, digest in receipts.items():
+        try:
+            parts = safe_parts(Path(relative).parts, context='工作页')
+            if len(parts) != 2 or not _PAGE_NAME.fullmatch(parts[1]):
+                continue
+            page = checked(root, work.relative_to(root) / Path(*parts))
+            try:
+                before = page.lstat()
+            except FileNotFoundError:
+                resolved.append((relative, digest))
+                continue
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or _digest(page) != digest:
+                continue
+            if _page_identity(page.lstat()) != _page_identity(before) or is_link(page):
+                continue
+            page.unlink()
+            resolved.append((relative, digest))
+            folders.add(page.parent)
+        except (OSError, ValueError) as error:
+            log.warning(f'工作页暂未回收 error={type(error).__name__}')
+    for folder in folders:
+        try:
+            marker = folder / CHAPTER_MARKER
+            chapter = re.search(r'__([0-9]{1,20})(?:_[0-9]+)?\Z', folder.name)
+            if chapter and set(folder.iterdir()) == {marker} and _load(marker).get('photo_id') == chapter[1]:
+                marker.unlink()
+            if not any(folder.iterdir()):
+                folder.rmdir()
+        except (OSError, ValueError, AttributeError):
+            pass
+    return resolved
+
+
+def reclaim_work_pages(root, job_id, album_id):
+    """Reclaim only a removed job's private, receipt-verified page copies."""
+    root = Path(root)
+    if not root.is_dir():
+        return
+    base = checked(root, Path(WORK, _key(job_id)))
+    work = checked(root, base.relative_to(root) / 'pages')
+    if not work.is_dir():
+        return
+    owner = _load(base / 'workspace.json')
+    if not isinstance(owner, dict) or (owner.get('job'), owner.get('album')) != (job_id, album_id):
+        return
+    canonical = Path(os.path.realpath(work))
+    with closing(db.get_db()) as conn:
+        if conn.execute('SELECT job_id FROM jobs WHERE job_id=? UNION ALL '
+                        'SELECT job_id FROM published_tasks WHERE job_id=?', (job_id, job_id)).fetchone():
+            return
+        references = conn.execute('SELECT output_path FROM jobs WHERE output_path IS NOT NULL UNION '
+                                  'SELECT output_path FROM resource_catalog WHERE output_path IS NOT NULL')
+        for row in references:
+            if row[0]:
+                path = Path(os.path.realpath(row[0]))
+                if path.is_relative_to(canonical) or canonical.is_relative_to(path):
+                    return
+        receipts = dict(conn.execute('SELECT page,digest FROM task_page_receipts WHERE job_id=?', (job_id,)))
+    resolved = _remove_receipt_pages(root, work, receipts)
+    if resolved:
+        with db.transaction() as conn:
+            conn.executemany('DELETE FROM task_page_receipts WHERE job_id=? AND page=? AND digest=?',
+                             [(job_id, name, digest) for name, digest in resolved])
+    if not any(work.iterdir()):
+        work.rmdir()
 
 
 class Workspace:
@@ -129,7 +211,7 @@ class Workspace:
         with publication_tree(self.base, self.root) as path:
             yield path
 
-    def seed(self, photos, existing, skip, valid, is_gif):
+    def seed(self, photos, existing, skip, valid, is_gif, *, page_extension=None):
         copied = []
         sources = [p for p in (self.previous_dir, existing) if p and p != self.work]
         for source in dict.fromkeys(sources):
@@ -142,14 +224,20 @@ class Workspace:
                     continue
                 legacy_format = chapter_format(old) < CHAPTER_FORMAT
                 for idx, image in enumerate(photo, 1):
-                    file = old / f'{idx:05d}.webp'
-                    if not file.is_file() or is_link(file):
+                    gif = is_gif(image)
+                    extensions = (page_extension(gif),) if page_extension else ('.webp', '.png', '.jpg')
+                    file = next(
+                        (old / f'{idx:05d}{ext}' for ext in extensions
+                         if (old / f'{idx:05d}{ext}').is_file() and not is_link(old / f'{idx:05d}{ext}')),
+                        None,
+                    )
+                    if file is None:
                         continue
                     resuming_old = source == self.previous_dir
                     mine = resuming_old and self.legacy.contains(file)
                     # Old writers flattened GIFs to one frame; even a valid WebP or
                     # an old receipt cannot certify that the animation survived.
-                    if (legacy_format and is_gif(image)) or (not mine and (resuming_old or not skip)):
+                    if (legacy_format and gif) or (not mine and (resuming_old or not skip)):
                         continue
                     dest = chapter_output_dir(self.work, photo) / file.name
                     if not dest.exists() and valid(file):
@@ -163,23 +251,31 @@ class Workspace:
 
     def seal(self, photos, check):
         manifest = []
+        isolated = getattr(self.legacy, 'isolated', False)
         for photo in photos:
             chapter = chapter_output_dir(self.work, photo, create=False)
             if chapter is None:
                 raise OSError('章节未完整写入')
             files, digests = [], {}
             for idx in range(1, len(photo) + 1):
-                page = chapter / f'{idx:05d}.webp'
-                if is_link(page) or not page.is_file() or page.stat().st_size == 0:
+                check()
+                stem = f'{idx:05d}'
+                if isolated:
+                    page, receipt = self.legacy.confirmed.get((chapter, stem), (None, None))
+                else:
+                    candidates = [chapter / (stem + suffix) for suffix in ('.webp', '.png', '.jpg')]
+                    page = next((p for p in candidates if p.is_file() and not is_link(p) and p.stat().st_size > 0), None)
+                    receipt = None
+                if page is None or not page.is_file() or is_link(page) or page.stat().st_size <= 0:
                     raise OSError('章节有缺页')
+                digest = _digest(page)
+                if isolated and receipt != digest:
+                    raise OSError('已确认的页面在发布前发生变化')
                 files.append(page.name)
-                digests[page.name] = _digest(page)
-                if getattr(self.legacy, 'isolated', False):
-                    receipt = self.legacy.receipts.get(page.relative_to(self.work).as_posix())
-                    if receipt != digests[page.name]:
-                        raise OSError('已确认的页面在发布前发生变化')
+                digests[page.name] = digest
             manifest.append({'photo_id': str(photo.photo_id), 'name': str(photo.name or photo.photo_id),
                              'folder': chapter.name, 'files': files, 'digests': digests})
+        marker = self.snapshot / '.jm-publication.json'
         if not self.snapshot.exists():
             with self.temporary_tree() as new:
                 for p in manifest:
@@ -189,32 +285,40 @@ class Workspace:
                         _copy(self.work / p['folder'] / name, new / p['folder'] / name)
                         if _digest(new / p['folder'] / name) != digest:
                             raise OSError('封存的页面与确认记录不一致')
-                _json_write(new / '.jm-publication.json', manifest)
+                _json_write(new / marker.name, manifest)
                 new.rename(self.snapshot)
         else:
-            for photo in manifest:
-                for name, digest in photo['digests'].items():
+            sealed = _load(marker)
+            if sealed != manifest:
+                expected = _logical_pages(manifest)
+                if (not isolated or _logical_pages(sealed) != expected
+                        or sum(len(chapter['files']) for chapter in sealed) != len(expected)):
+                    raise OSError('待发布成品与当前章节不一致')
+            for photo in sealed:
+                safe_parts([photo['folder'], *photo['files']])
+                if (set(photo['files']) != photo['digests'].keys()
+                        or not all(_PAGE_NAME.fullmatch(name) for name in photo['files'])):
+                    raise OSError('待发布成品的页面清单无效')
+                for name in photo['files']:
                     check()
+                    digest = photo['digests'][name]
+                    if isolated and self.legacy.receipts.get(f"{photo['folder']}/{name}") != digest:
+                        raise OSError('待发布成品与下载确认记录不一致')
                     source = checked(self.root, (self.snapshot / photo['folder'] / name).relative_to(self.root))
                     if _digest(source) != digest:
                         raise OSError('中断后任务成品内容已改变')
-        if _load(self.snapshot / '.jm-publication.json') != manifest:
-            raise OSError('待发布成品与当前章节不一致')
+            return sealed
+        if _load(marker) != manifest:
+            raise OSError('待发布成品写入后无法核对')
         return manifest
 
     def release_pages(self, manifest):
         """Only after commit, remove our known, byte-identical work copies; preserve anything else."""
-        for photo in manifest:
-            folder = checked(self.root, self.work.relative_to(self.root) / photo['folder'])
-            for name, digest in photo['digests'].items():
-                src = checked(self.root, (folder / name).relative_to(self.root))
-                if src.is_file() and _digest(src) == digest:
-                    src.unlink()
-            marker = folder / CHAPTER_MARKER
-            if marker.exists() and _load(marker).get('photo_id') == photo['photo_id']:
-                marker.unlink()
-            if folder.is_dir() and not any(folder.iterdir()):
-                folder.rmdir()
+        receipts = (self.legacy.receipts if getattr(self.legacy, 'isolated', False) else {
+            f"{photo['folder']}/{name}": digest
+            for photo in manifest for name, digest in photo['digests'].items()
+        })
+        _remove_receipt_pages(self.root, self.work, receipts)
 
     def project(self, manifest, album, settings, check):
         """Build out of sight. A single DB commit makes the complete generation discoverable."""
@@ -235,26 +339,34 @@ class Workspace:
             marker = target / '.jm-view.json'
             if not (marker.is_file() and _load(marker) == identity):
                 target = checked(self.root, Path(VIEWS, _key(self.job + ':' + generation), self.target.name))
-        entries = [(r['job_order'], job_snapshot(r['job_id'], self.root), json.loads(r['manifest'])) for r in records]
-        entries.append((order, self.snapshot, manifest))
+        entries = [(r['job_order'], r['job_id'], json.loads(r['manifest'])) for r in records]
+        entries.append((order, self.job, manifest))
         pages, chapters = {}, {}
-        for _, folder, chapter_list in sorted(entries, key=lambda e: e[0]):
+        for _, owner, chapter_list in sorted(entries, key=lambda entry: entry[0]):
             for p in chapter_list:
                 pid = p['photo_id']
                 safe_parts([p['folder'], *p['files']])
                 chapters[pid] = {'photo_id': pid, 'name': p['name'], 'folder': p['folder']}
                 for name in p['files']:
-                    pages[pid, name] = (checked(self.root, (folder / p['folder'] / name).relative_to(self.root)),
-                                        p['digests'][name])
+                    pages[pid, Path(name).stem.casefold()] = (owner, p['folder'], name, p['digests'][name])
+        snapshots = {self.job: self.snapshot}
+        selected = []
+        for (pid, _), (owner, folder, name, digest) in pages.items():
+            if owner not in snapshots:
+                snapshots[owner] = job_snapshot(owner, self.root)
+                if snapshots[owner] is None:
+                    raise OSError('任务成品记录已不存在')
+            source = checked(self.root, (snapshots[owner] / folder / name).relative_to(self.root))
+            selected.append((source, Path(chapters[pid]['folder'], name), digest))
         if not target.exists():
             with self.temporary_tree() as prepare:
-                copy_legacy(legacy, prepare, target.name, check)
+                copy_legacy(legacy, prepare, target.name, check, chapters=chapters, replacement_pages=pages)
                 for pid, p in chapters.items():
                     (prepare / p['folder']).mkdir(exist_ok=True)
                     _json_write(prepare / p['folder'] / CHAPTER_MARKER, {'format': 2, 'photo_id': pid})
-                for (pid, name), (source, digest) in pages.items():
+                for source, relative, digest in selected:
                     check()
-                    dest = prepare / chapters[pid]['folder'] / name
+                    dest = prepare / relative
                     _copy(source, dest)
                     if _digest(dest) != digest:
                         raise OSError('任务成品页内容与发布记录不一致，旧书架保留')
@@ -268,9 +380,9 @@ class Workspace:
                 raise OSError('发布目录已被占用')
             # A previous process may have renamed this view and exited before
             # committing. Its marker proves identity, not that every byte survived.
-            for (pid, name), (source, digest) in pages.items():
+            for source, relative, digest in selected:
                 check()
-                dest = checked(self.root, (target / chapters[pid]['folder'] / name).relative_to(self.root))
+                dest = checked(self.root, (target / relative).relative_to(self.root))
                 if _digest(source) != digest or _digest(dest) != digest:
                     raise OSError('中断后发布文件内容已改变，保留文件供检查')
         payload = {key: settings.get(key) for key in ('organize_mode','auto_pack','pack_format','delete_originals')}

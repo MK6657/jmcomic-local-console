@@ -3,10 +3,12 @@
 Restoration never opens the live application database or overwrites an existing
 instance. All ZIP and SQLite work happens in a private sibling directory first.
 """
+from contextlib import closing
 from dataclasses import dataclass
 import hashlib
+import json
 import os
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PureWindowsPath
 import shutil
 import sqlite3
 import stat
@@ -129,17 +131,79 @@ def _rewrite_database(path: Path, version: int, source_root: PurePath, final_dow
 
 def _private_parent(parent: Path, root: Path, identities: dict[Path, tuple]) -> None:
     current = root
-    _check_chain(identities)
+    if _plain_directory(root) != identities[root]:
+        raise RestoreError("unsafe_target", "恢复暂存目录发生变化，目标实例未发布")
     for component in parent.relative_to(root).parts:
         current = current / component
-        try:
-            current.mkdir()
-        except FileExistsError:
-            pass
+        if current not in identities:
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
         identity = _plain_directory(current)
         if current in identities and identities[current] != identity:
             raise RestoreError("unsafe_target", "恢复暂存目录发生变化，目标实例未发布")
         identities[current] = identity
+
+
+def _restore_move_plan(database, manifest, deadline):
+    from .backup import _maintenance_moves, _move_placements
+
+    def check():
+        _check_deadline(deadline)
+
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA trusted_schema=OFF")
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        moves = list(_maintenance_moves(connection, manifest["schema_version"], check))
+    phases = manifest["resources"].get("maintenance_moves")
+    if phases is None and moves:
+        raise RestoreError("missing_move_evidence", "此旧版备份包含中断的目录整理且缺少位置记录，目标实例未发布")
+    phases = phases or {}
+    return moves, phases, _move_placements(moves, phases, check)
+
+
+def _finish_restored_moves(database, version, final_downloads, staged_downloads, identities, moves, phases, deadline):
+    """Rebind unfinished moves and commit already-moved catalog paths before publishing."""
+    if not moves:
+        return
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("PRAGMA trusted_schema=OFF")
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        triggers = _validate_schema(connection, version, deadline)
+        connection.execute("BEGIN IMMEDIATE")
+        for name in triggers:
+            connection.execute(f'DROP TRIGGER "{name}"')
+        for move in moves:
+            _check_deadline(deadline)
+            payload = move.payload
+            if phases[move.album_id] == "at_target":
+                source, target = (final_downloads.joinpath(*parts) for parts in (move.source, move.target))
+                connection.execute("UPDATE jobs SET output_path=? WHERE album_id=? AND status='completed' AND "
+                                   "job_id IN (SELECT p.job_id FROM published_tasks p JOIN resource_catalog c USING(job_id) "
+                                   "WHERE p.album_id=? AND c.output_path=? AND c.superseded_at IS NULL)",
+                                   (str(target), move.album_id, move.album_id, str(source)))
+                for table in output_path_tables(version):
+                    for (path,) in connection.execute(f"SELECT DISTINCT output_path FROM {table} WHERE album_id=?",
+                                                      (move.album_id,)).fetchall():
+                        _check_deadline(deadline)
+                        if path and Path(path) == source:
+                            connection.execute(f"UPDATE {table} SET output_path=? WHERE album_id=? AND output_path=?",
+                                               (str(target), move.album_id, path))
+                relative = "/".join(move.target)
+                payload.update(directory=relative, preferred_directory=relative)
+                del payload["_move"]
+            else:
+                intent = payload["_move"]
+                intent["identity"] = list(identities[staged_downloads.joinpath(*move.source)])
+                if move.retained:
+                    intent["old_identity"] = list(identities[staged_downloads.joinpath(*move.target)])
+            connection.execute("UPDATE album_maintenance SET payload=? WHERE album_id=?",
+                               (json.dumps(payload, ensure_ascii=False), move.album_id))
+        for sql in triggers.values():
+            connection.execute(sql)
+        if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            raise RestoreError("invalid_database", "恢复后的整理记录校验失败，目标实例未发布")
 
 
 def _copy_member(archive, name: str, target: Path, expected: dict, deadline: float) -> None:
@@ -194,7 +258,7 @@ def restore_backup(archive_path, target_dir, *, timeout: float = 120) -> Restore
     A database/inventory backup intentionally produces an empty downloads folder;
     returned warnings explicitly state that resources were not part of the backup.
     """
-    from .backup import BackupError, inspect_backup
+    from .backup import BackupError, _move_resource_path, _open_backup_zip, inspect_backup
     target = Path(target_dir)
     if not target.is_absolute():
         raise RestoreError("unsafe_target", "恢复目标必须是一个全新的绝对目录")
@@ -214,6 +278,7 @@ def restore_backup(archive_path, target_dir, *, timeout: float = 120) -> Restore
             info = inspect_backup(handle, timeout=max(0.0, deadline - time.monotonic()))
             manifest = info.manifest
             source_root = parse_source_root(manifest["resources"]["source_root"])
+            source_windows = isinstance(source_root, PureWindowsPath)
             for entry in manifest["resources"]["files"]:
                 _check_deadline(deadline)
                 safe_parts(entry["path"].split("/"))
@@ -226,20 +291,32 @@ def restore_backup(archive_path, target_dir, *, timeout: float = 120) -> Restore
             _private_parent(downloads, stage, private_directories)
             _private_parent(database.parent, stage, private_directories)
             handle.seek(0)
-            with zipfile.ZipFile(handle) as archive:
+            with _open_backup_zip(handle, lambda: _check_deadline(deadline)) as archive:
                 _copy_member(archive, "app.db", database, manifest["database"], deadline)
                 # Validate schema and all output paths before extracting resources.
                 jobs, resources, requeued = _rewrite_database(database, manifest["schema_version"], source_root,
                                                               target / "downloads", deadline)
                 restored = 0
                 if manifest["resources"]["included"]:
+                    _check_chain(chain)
+                    _private_parent(database.parent, stage, private_directories)
+                    moves, phases, placements = _restore_move_plan(database, manifest, deadline)
                     for entry in manifest["resources"]["files"]:
                         parts = safe_parts(entry["path"].split("/"))
-                        output = downloads.joinpath(*parts)
+                        output = downloads.joinpath(*_move_resource_path(parts, placements, source_windows=source_windows))
                         _check_chain(chain)
                         _private_parent(output.parent, stage, private_directories)
                         _copy_member(archive, "downloads/" + entry["path"], output, entry, deadline)
                         restored += 1
+                    if placements:
+                        _check_chain(chain)
+                        for _, parts in placements.values():
+                            _check_deadline(deadline)
+                            if parts is not None:
+                                _private_parent(downloads.joinpath(*parts), stage, private_directories)
+                        _private_parent(database.parent, stage, private_directories)
+                        _finish_restored_moves(database, manifest["schema_version"], target / "downloads", downloads,
+                                               private_directories, moves, phases, deadline)
             _check_deadline(deadline)
             _check_chain(chain)
             _check_chain(private_directories)
@@ -247,6 +324,7 @@ def restore_backup(archive_path, target_dir, *, timeout: float = 120) -> Restore
                 raise RestoreError("target_exists", "恢复目标已存在，请指定一个全新的实例目录")
             if _plain_directory(stage) != stage_identity:
                 raise RestoreError("unsafe_target", "恢复暂存目录发生变化，目标实例未发布")
+            _check_deadline(deadline)
             _publish_new_directory(stage, target)
             stage = None
             included = manifest["resources"]["included"]

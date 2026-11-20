@@ -315,3 +315,29 @@ def test_packer_publishes_only_complete_archives_and_preserves_old_on_crc_failur
         packer.pack(tmp_path, output)
     assert output.read_bytes() == previous
     assert not (tmp_path / STAGING_DIRECTORY).exists()
+
+
+def test_staged_pack_must_fit_reader_budget_before_replacing_old_pack(client, tmp_path, monkeypatch):
+    from core import archive_pages, path_guard
+    from core.download_finalize import _pack
+
+    root = tmp_path / "downloads"
+    album = root / "Album"
+    album.mkdir(parents=True)
+    monkeypatch.setattr(path_guard, "DOWNLOAD_ROOT", root)
+    target = album / "Album.cbz"
+    old, loose = album / "00001.png", album / "00002.png"
+    Image.new("RGB", (8, 8), "red").save(old)
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.write(old, old.name)
+    original = target.read_bytes()
+    old_size = old.stat().st_size
+    old.unlink()
+    Image.new("RGB", (8, 8), "blue").save(loose)
+    loose_bytes = loose.read_bytes()
+    monkeypatch.setattr(archive_pages, "MAX_TOTAL_BYTES", old_size + len(loose_bytes) - 1)
+
+    with pytest.raises(ValueError, match="旧包和原图保留"):
+        _pack(album, {"delete_originals": "true"}, lambda: None)
+    assert target.read_bytes() == original and loose.read_bytes() == loose_bytes
+    assert len(archive_pages.read_index(target).pages) == 1

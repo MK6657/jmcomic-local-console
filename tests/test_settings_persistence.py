@@ -39,9 +39,9 @@ const form=element('form');
 form.elements=Object.values(controls);
 form.querySelector=s=>{const m=s.match(/^\[name="([^"]+)"\]$/);return m?controls[m[1]]||null:null};
 form.querySelectorAll=s=>s==='input[type="checkbox"]'?Object.values(controls).filter(c=>c.type==='checkbox'):[];
-const save=element('save'), importFile=element('','file'), importButton=element('');
+const save=element('save'), reset=element('reset'), importFile=element('','file'), importButton=element('');
 const visibility=element('');
-const ids={'settings-form':form,'save-settings-btn':save,'import-settings-btn':importButton,'import-settings-file':importFile,'proxy-visibility':visibility,...controls};
+const ids={'settings-form':form,'save-settings-btn':save,'settings-reset-btn':reset,'import-settings-btn':importButton,'import-settings-file':importFile,'proxy-visibility':visibility,...controls};
 global.document={readyState:'complete',getElementById:id=>ids[id]||null,
  addEventListener:(n,f)=>(events[n]??=[]).push(f),createElement:()=>element('created')};
 global.window={addEventListener:(n,f)=>(events[n]??=[]).push(f),apiFetch:(url,options={})=>new Promise((resolve,reject)=>pending.push({url,options,resolve,reject}))};
@@ -57,6 +57,8 @@ new Function(source)();
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 const get=()=>pending.filter(p=>(p.options.method||'GET')==='GET');
 const posts=()=>pending.filter(p=>p.url==='/api/settings'&&p.options.method==='POST');
+const resets=()=>pending.filter(p=>p.url==='/api/settings/reset'&&p.options.method==='POST');
+const writeButtons=()=>[save.disabled,reset.disabled,importButton.disabled];
 const defaults=Object.fromEntries(form.elements.map(c=>[c.name,c.type==='checkbox'?String(c.checked):c.value]));
 const answer=values=>({status:'ok',settings:{...defaults,...values}});
 const savedBaseline={timeout:'30',retry_times:'7',proxy:'http://127.0.0.1:7890',auto_update_check:'false'};
@@ -115,6 +117,29 @@ const scenario=process.argv[2];
    const a=click();const b=form.fire('submit',{preventDefault(){}});await flush();
    const count=posts().length;for(const p of posts())p.resolve(answer({timeout:'77'}));await Promise.all([a,b]);
    console.log(JSON.stringify({posts:count,toasts}));
+ } else if(scenario==='reset-overlap'){
+   get()[0].resolve(answer(savedBaseline));await flush();
+   await edit('retry_times','5');const saving=click();await flush();
+   const duringSave=writeButtons();await reset.fire('click');await startImport();
+   posts()[0].resolve(answer({retry_times:'5'}));await saving;
+   const importing=await startImport();const duringImport=writeButtons();
+   await reset.fire('click');await click();
+   importing.resolve({status:'ok',imported:1,skipped:0});await flush();
+   get()[1].resolve(answer({retry_times:'9'}));await flush();
+   const resetting=reset.fire('click');await flush();
+   const duringReset=writeButtons();await click();await startImport();
+   resets()[0].resolve({...answer({retry_times:'2'}),warnings:['fixture runtime warning']});await flush();
+   const duringRefresh=writeButtons();
+   get()[2].resolve(answer({retry_times:'2'}));await resetting;
+   console.log(JSON.stringify({duringSave,duringImport,duringReset,duringRefresh,after:writeButtons(),
+      resetBodies:resets().map(p=>JSON.parse(p.options.body)),posts:posts().length,
+      imports:pending.filter(p=>p.url==='/api/settings/import').length,
+      confirms:confirmations.length,retry:controls.retry_times.value,notice:toasts.at(-1)}));
+ } else if(scenario==='reset-failed'){
+   get()[0].resolve(answer(savedBaseline));await flush();
+   const resetting=reset.fire('click');await flush();
+   resets()[0].resolve({status:'error',message:'fixture reset failed'});await resetting;
+   console.log(JSON.stringify({after:writeButtons(),notice:toasts.at(-1),gets:get().length}));
  } else if(scenario==='edit-during-save'){
    get()[0].resolve(answer({timeout:'30'}));await flush();await edit('timeout','41');const p=click();await flush();
    await edit('timeout','77');await edit('retry_times','0');await edit('image_threads','21');await edit('image_threads','20');
@@ -184,10 +209,11 @@ const scenario=process.argv[2];
 """
 
 
-def ui(scenario, settings=None):
+def ui(scenario, settings=None, *, edition="atelier"):
     if NODE is None:
         pytest.skip("requires Node.js")
-    result = subprocess.run([NODE, "-e", UI, str(ROOT / "static/js/settings.js"), scenario, json.dumps(settings)],
+    static = ROOT / ("static/classic" if edition == "classic" else "static")
+    result = subprocess.run([NODE, "-e", UI, str(static / "js/settings.js"), scenario, json.dumps(settings)],
                             cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -212,6 +238,22 @@ def test_saving_an_early_edit_loads_untouched_fields_but_posts_only_the_draft(sc
 
 def test_enter_and_click_cannot_submit_two_settings_writes():
     assert ui("double-submit")["posts"] == 1
+
+
+def test_save_import_and_reset_are_mutually_exclusive_and_reset_reports_warnings():
+    result = ui("reset-overlap")
+    assert all(result[phase] == [True] * 3 for phase in ("duringSave", "duringImport", "duringReset", "duringRefresh"))
+    assert result["after"] == [False] * 3
+    assert result["resetBodies"] == [{"scope": "all"}]
+    assert result["posts"] == result["imports"] == result["confirms"] == 1
+    assert result["retry"] == "2"
+    assert result["notice"]["type"] == "warning" and "fixture runtime warning" in result["notice"]["message"]
+
+
+def test_failed_reset_releases_write_controls_without_claiming_success():
+    result = ui("reset-failed")
+    assert result["after"] == [False] * 3 and result["gets"] == 1
+    assert result["notice"]["type"] == "danger" and "fixture reset failed" in result["notice"]["message"]
 
 
 def test_no_op_reverted_or_unwritable_fields_never_write_or_reconfirm_deletion():
@@ -278,11 +320,14 @@ def test_existing_socks_proxy_does_not_block_saving_and_apply_warning_is_visible
     assert result["toasts"][-1]["type"] == "warning"
 
 
-def test_password_visibility_does_not_submit_a_mask_or_erase_the_saved_proxy():
-    assert ui('masked-proxy') == {'revealed': True, 'masked': True, 'body': {'retry_times': '0'}, 'direct': {'proxy': ''}}
+@pytest.mark.parametrize("edition", ["atelier", "classic"])
+def test_password_visibility_does_not_submit_a_mask_or_erase_the_saved_proxy(edition):
+    assert ui('masked-proxy', edition=edition) == {
+        'revealed': True, 'masked': True, 'body': {'retry_times': '0'}, 'direct': {'proxy': ''}
+    }
 
 
-@pytest.mark.parametrize('theme', ('paper', 'sage', 'linen', 'night'))
+@pytest.mark.parametrize('theme', ('sage', 'mint', 'paper', 'linen', 'apricot', 'night', 'pixel', 'cyber', 'anime'))
 def test_preferences_render_saved_palette_and_zero_without_embedding_proxy(client, theme):
     from core.settings import update_settings
     update_settings({'ui_theme': theme, 'retry_times': 0, 'proxy': 'socks5h://fixture-user:fixture-secret@localhost'})
@@ -290,7 +335,9 @@ def test_preferences_render_saved_palette_and_zero_without_embedding_proxy(clien
     assert 'fixture-secret' not in html and 'fixture-user' not in html
     assert 'type="password" id="proxy"' in html and re.search(r'id="retry_times"[^>]*value="0"', html)
     cards = dict(re.findall(r'data-pref-theme="(\w+)" aria-pressed="(true|false)"', html))
-    assert cards == {key: str(key == theme).lower() for key in ('paper', 'sage', 'linen', 'night')}
+    assert cards == {key: str(key == theme).lower()
+                     for key in ('sage', 'mint', 'paper', 'linen', 'apricot', 'night', 'pixel', 'cyber', 'anime')}
+    assert 'id="ui-fx-enabled-toggle"' in html and 'id="pref-reset-appearance-btn"' in html
     for anchor in re.findall(r'href="#([\w-]+)"', html.split('<nav class="pref-index"')[1].split('</nav>')[0]):
         assert html.count(f'id="{anchor}"') == 1
 
@@ -392,11 +439,12 @@ def test_postcommit_runtime_failure_reports_saved_state_and_warning(client, monk
     def fail():
         raise RuntimeError("synthetic runtime application failure")
     monkeypatch.setattr(api_settings, "sync_scheduler", fail)
-    response = client.post("/api/settings", json={"timeout": "47", "retry_times": "0"})
+    response = client.post("/api/settings", json={"schedule_start": "6"})
     assert response.status_code == 200
     body = response.get_json()
-    assert body["status"] == "ok" and body["saved"] is True and body["warnings"]
-    assert client.get("/api/settings").get_json()["settings"]["timeout"] == "47"
+    assert body["status"] == "ok" and body["saved"] is True
+    assert body["warnings"] == ["定时调度未能立即应用，请重启程序后检查"]
+    assert client.get("/api/settings").get_json()["settings"]["schedule_start"] == "6"
 
 
 def test_failed_validation_is_not_committed_and_read_response_is_not_cached(client):

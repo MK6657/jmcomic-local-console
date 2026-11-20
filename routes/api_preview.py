@@ -7,12 +7,11 @@ from urllib.parse import quote
 from flask import Blueprint, Response, jsonify, request, send_file
 
 import core.database as db
-from core import archive_pages, chapter_inventory
+from core import album_maintenance, archive_pages, chapter_inventory, flat_pages
 from core.publication_access import published_path
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
 from core.database import get_completed_job_by_album_id
-from core.file_tree import safe_files
-from core.local_availability import MAX_IDS, is_page_image, local_states
+from core.local_availability import MAX_IDS, local_states, scan_page_images as _scan_pages
 from core.logger import log
 # P1-8 补充 album_id 校验；图片类型与 MIME 统一取自 core.validation
 from core.validation import validate_numeric, is_allowed_image, get_image_mime
@@ -102,11 +101,15 @@ def _find_album_dir(album_id: str) -> tuple[Path | None, str | None]:
     最近一次完成的任务已被取代（目录被删除后又被重新下载建出，见 core.local_availability）同样返回 None：
     里面是还没完成（或失败 / 已取消）的那次下载写的残缺内容，与“本地可读”的判断一致。
     """
-    job = get_completed_job_by_album_id(album_id)
-    if job and job.get("output_path") and not job.get("superseded_at"):
+    for attempt in range(2):
+        job = get_completed_job_by_album_id(album_id)
+        if not job or not job.get("output_path") or job.get("superseded_at"):
+            return None, None
         p = Path(job["output_path"])
         if published_path(p, DOWNLOAD_ROOT, directory=True) is not None and p.is_dir():
             return p, job.get("title") or p.name
+        if attempt == 0:
+            album_maintenance.wait_for_active_move()
     return None, None
 
 
@@ -141,7 +144,7 @@ def _page_list(album_id: str, album_dir: Path, loose: list, index) -> list[dict]
     """散图 + 压缩包补齐的页（archive_pages.merge_pages）→ {page, url, chapter, photo_id, offset}。
     压缩包的页地址是它在阅读器页里的序号，带压缩包版本 v 和页名 p：压缩包换了（重新打包）时服务端按页名找回同一页，
     找不到就说明压缩包已更新（409），不会给出别的页。photo_id / offset（这一页在本章里的位置，从 0 起）
-    让“在线阅读这一页”打开同一章的同一页；章节目录名里没有 photo_id 时为 None。"""
+    让“在线阅读这一页”打开同一章的同一页，扁平页使用文件名记录的原始页号。"""
     numbers = {}
     if index is not None and index.status == "ok":
         numbers = {page.name: number for number, page in enumerate(index.reader_pages, start=1)}
@@ -159,15 +162,14 @@ def _page_list(album_id: str, album_dir: Path, loose: list, index) -> list[dict]
         offset = counts.get(folder, 0)
         counts[folder] = offset + 1
         match = _CHAPTER_ID.search(folder.rsplit("/", 1)[-1]) if folder else None
+        photo_id = match.group(1) if match else None
+        flat = flat_pages.read_flat_page_name(name) if not folder else None
+        if flat is not None and (original_page := int(flat[1])) > 0:
+            photo_id = flat[0]
+            offset = original_page - 1
         pages.append({"page": len(pages) + 1, "url": url, "chapter": chapter,
-                      "photo_id": match.group(1) if match else None, "offset": offset})
+                      "photo_id": photo_id, "offset": offset})
     return pages
-
-
-def _scan_pages(album_dir: Path) -> list[tuple[str, Path]]:
-    """目录里阅读器能显示的散图 [(相对路径, 文件)]，自然排序（含根目录与各章节子目录）"""
-    return [(img.relative_to(album_dir).as_posix(), img) for img in safe_files(album_dir, nonempty=True)
-            if is_page_image(img)]  # 与“本地可读”判定（core.local_availability）同一条规则：空文件不算页
 
 
 @api_preview_bp.get("/api/preview/<album_id>")
@@ -294,7 +296,8 @@ def preview_archive_image(album_id: str, number: int):
         return jsonify({"status": "error", "reason": reason, "message": message}), 422
     pages = index.reader_pages
     wanted = request.args.get("v")
-    if wanted is not None and wanted != archive_pages.version(index):
+    version = archive_pages.version(index)
+    if wanted is not None and wanted != version:
         found = index.find(request.args.get("p") or "")
         if found is None:
             response = jsonify({"status": "error", "reason": "archive_changed",
@@ -306,7 +309,14 @@ def preview_archive_image(album_id: str, number: int):
         return jsonify({"status": "error", "message": "页码超出范围"}), 404
     else:
         page = pages[number - 1]
+    response = Response(mimetype=get_image_mime(page.suffix))
+    response.headers["Cache-Control"] = "no-cache"
+    etag = f"{version}-{number}"
+    response.set_etag(etag)
     try:
+        condition = request.if_none_match
+        if not condition.star_tag and condition.contains_weak(etag) and archive_pages.can_revalidate(index, page):
+            return response.make_conditional(request)
         data = archive_pages.read_page(index, page)
     except archive_pages.ArchiveBusy as e:
         log.warning(f"压缩包页暂时读不了 album_id={album_id} archive={index.path.name} page={page.name} error={e}")
@@ -315,8 +325,5 @@ def preview_archive_image(album_id: str, number: int):
         log.warning(f"压缩包页读取失败 album_id={album_id} archive={index.path.name} page={page.name} error={e}")
         return jsonify({"status": "error", "reason": "archive_corrupt",
                         "message": "压缩包里这一页读不出来，压缩包可能已损坏"}), 422
-    response = Response(data, mimetype=get_image_mime(page.suffix))
-    # 与散图一样不做强缓存（地址带压缩包版本）；ETag 让重复请求走 304
-    response.headers["Cache-Control"] = "no-cache"
-    response.set_etag(f"{archive_pages.version(index)}-{number}")
+    response.set_data(data)
     return response.make_conditional(request)

@@ -44,10 +44,25 @@ def configure_sdk() -> None:
         # Claim the library logger before importing the SDK so its default stdout
         # handler is never needed; claiming twice also handles the opposite order.
         from .logger import claim_library_loggers
-        from jmcomic import JmModuleConfig
+        from jmcomic import JmImageTool, JmModuleConfig
         JmModuleConfig.FLAG_ENABLE_JM_LOG = True
         JmModuleConfig.FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN = False
         JmModuleConfig.FLAG_API_CLIENT_REQUIRE_COOKIES = False
+        # Guard JPEG saves when image_format=jpg encounters RGBA/LA/P source frames.
+        if not getattr(JmImageTool.save_image, "_atelier_rgb_guard", False):
+            _orig_save_image = JmImageTool.save_image.__func__
+
+            @classmethod
+            def _safe_save_image(cls, image, filepath: str):
+                if (
+                    str(filepath).lower().endswith((".jpg", ".jpeg"))
+                    and getattr(image, "mode", None) not in ("RGB", "L", None)
+                ):
+                    image = image.convert("RGB")
+                return _orig_save_image(cls, image, filepath)
+
+            _safe_save_image._atelier_rgb_guard = True
+            JmImageTool.save_image = _safe_save_image
         claim_library_loggers()
 
 

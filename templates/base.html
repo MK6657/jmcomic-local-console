@@ -1,9 +1,13 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="{{ ui_theme }}" data-bs-theme="{{ 'dark' if ui_theme == 'night' else 'light' }}">
+{% set _is_dark = (ui_theme in ui_dark_themes) if ui_dark_themes is defined else (ui_theme in ('night', 'cyber')) %}
+{% set _fx_enabled = ui_fx_enabled if ui_fx_enabled is defined else true %}
+{% set _fx_preset = ui_fx_preset if ui_fx_preset is defined else 'auto' %}
+{% set _fx_active = ui_fx_active if ui_fx_active is defined else ('calm' if _fx_enabled else 'none') %}
+<html lang="zh-CN" data-theme="{{ ui_theme }}" data-bs-theme="{{ 'dark' if _is_dark else 'light' }}" data-fx="{{ _fx_active }}" data-fx-enabled="{{ 'true' if _fx_enabled else 'false' }}" data-fx-preset="{{ _fx_preset }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="{{ 'dark' if ui_theme == 'night' else 'light' }}">
+    <meta name="color-scheme" content="{{ 'dark' if _is_dark else 'light' }}">
     <title>{% block title %}藏书阁 · JMComic 下载控制台{% endblock %}</title>
 
     <!-- Favicon -->
@@ -14,9 +18,10 @@
     <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
     <!-- Bootstrap Icons -->
     <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css">
-    <!-- 自定义样式（Eye-care 护眼主题） -->
+    <!-- 自定义样式（Fresh Eye-Care & Style Studio v3.1） -->
     <link rel="stylesheet" href="{{ asset_url('css/style.css') }}">
     <link rel="stylesheet" href="{{ asset_url('css/atelier.css') }}">
+    <link rel="stylesheet" href="{{ asset_url('css/atelier-fx.css') }}">
 
     {% block head_extra %}{% endblock %}
 </head>
@@ -26,15 +31,14 @@
 {% set destinations = [
     ('/', 'house-door', '书斋总览', '总览'), ('/search', 'search', '检索探索', '检索'),
     ('/library', 'collection', '私人书阁', '书阁'), ('/wishlist', 'bookmark-heart', '心愿典藏', '心愿'),
-    ('/downloads', 'list-ul', '传输中心', '传输'), ('/settings', 'gear', '偏好与色谱', '偏好')
+    ('/downloads', 'list-ul', '传输中心', '传输'), ('/settings', 'gear', '偏好与主题', '偏好')
 ] %}
-{% set minerals = [('paper', '宣纸 · 古籍暖米'), ('sage', '青瓷 · 宋韵粉青'), ('linen', '白麻 · 画册晨光'), ('night', '玄墨 · 暗房夜读')] %}
 <a class="atelier-skip" href="#atelier-content">跳至正文</a>
 <div class="atelier-shell{% if reading %} atelier-reading{% endif %}">
 <aside class="atelier-sidebar navbar" aria-label="书斋">
     <a class="atelier-brand" href="/" aria-label="藏书阁 · 书斋总览" title="藏书阁 · 书斋总览">
         <span class="seal-stamp" aria-hidden="true">藏</span>
-        <span class="brand-type"><strong>藏书阁</strong><small>JM · ATELIER</small></span>
+        <span class="brand-type"><strong>藏书阁</strong><small>JM · STUDIO</small></span>
     </a>
     {% if atelier_demo %}<span class="atelier-demo">离线样书 · 演示实例</span>{% endif %}
     <nav class="sidebar-nav" aria-label="书斋导航">
@@ -53,11 +57,16 @@
         <i class="bi bi-activity" aria-hidden="true"></i><span><strong>传输动态</strong><small id="atelier-activity">查看任务队列</small></span>
     </a>
     {% endif %}
-    <div class="mineral-dock" role="group" aria-label="矿物纸墨色谱">
-        <div class="mineral-caption"><span>纸墨色调</span><span class="mineral-name" aria-hidden="true"></span></div>
+    <div class="mineral-dock" role="group" aria-label="主题与特效快捷切换">
+        <div class="mineral-caption">
+            <span class="mineral-caption-main"><span class="mineral-name" aria-hidden="true"></span></span>
+            <button type="button" id="shell-fx-toggle" class="shell-fx-toggle" aria-pressed="{{ 'true' if _fx_enabled else 'false' }}" title="一键开关交互动效" aria-label="一键开关交互动效">
+                <i class="bi bi-stars" aria-hidden="true"></i><span>{{ '动效开' if _fx_enabled else '动效关' }}</span>
+            </button>
+        </div>
         <div class="mineral-stones">
-        {% for key, name in minerals %}
-            <button type="button" class="stone-btn" data-set-theme="{{ key }}" aria-pressed="{{ 'true' if ui_theme == key else 'false' }}" title="{{ name }}" aria-label="切换主题：{{ name }}"></button>
+        {% for spec in ui_themes %}
+            <button type="button" class="stone-btn" data-set-theme="{{ spec.key }}" aria-pressed="{{ 'true' if ui_theme == spec.key else 'false' }}" title="{{ spec.full_label }}" aria-label="切换主题：{{ spec.full_label }}"></button>
         {% endfor %}
         </div>
     </div>
@@ -153,7 +162,7 @@ function escapeHtml(str) {
  * @param {string} message - 显示内容
  * @param {string} type    - 'success' | 'danger' | 'warning' | 'info'
  */
-window.showToast = function (message, type) {
+window.showToast = function (message, type, action) {
   type = type || 'success';
   var bgClass, icon;
   switch (type) {
@@ -184,22 +193,43 @@ window.showToast = function (message, type) {
   toastEl.setAttribute('aria-live', 'assertive');
   toastEl.setAttribute('aria-atomic', 'true');
 
-  toastEl.innerHTML = '<div class="d-flex">'
-    + '<div class="toast-body"><i class="bi ' + icon + ' me-2"></i>' + escapeHtml(message) + '</div>'
-    + '<button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="关闭"></button>'
-    + '</div>';
+  var row = document.createElement('div');
+  row.className = 'd-flex align-items-center';
+  var body = document.createElement('div');
+  body.className = 'toast-body';
+  body.innerHTML = '<i class="bi ' + icon + ' me-2"></i>' + escapeHtml(message);
+  row.appendChild(body);
+  if (action && action.label && typeof action.onClick === 'function') {
+    var actionBtn = document.createElement('button');
+    actionBtn.type = 'button';
+    actionBtn.className = 'btn btn-sm me-1 flex-shrink-0';
+    actionBtn.style.cssText = 'color:inherit;border:1px solid currentColor;background:transparent;padding:2px 9px;border-radius:999px;font-size:12px;line-height:1.4;';
+    actionBtn.textContent = String(action.label);
+    actionBtn.addEventListener('click', function () {
+      action.onClick();
+    });
+    row.appendChild(actionBtn);
+  }
+  var closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'btn-close btn-close-white me-2 m-auto';
+  closeBtn.setAttribute('data-bs-dismiss', 'toast');
+  closeBtn.setAttribute('aria-label', '关闭');
+  row.appendChild(closeBtn);
+  toastEl.appendChild(row);
 
   container.appendChild(toastEl);
 
+  var delay = action && action.label ? 7000 : 5000;
   if (typeof bootstrap !== 'undefined' && bootstrap.Toast) {
-    var bsToast = new bootstrap.Toast(toastEl, { autohide: true, delay: 5000 });
+    var bsToast = new bootstrap.Toast(toastEl, { autohide: true, delay: delay });
     bsToast.show();
   } else {
     toastEl.classList.add('show');
     setTimeout(function () {
       toastEl.classList.remove('show');
       setTimeout(function () { toastEl.remove(); }, 300);
-    }, 5000);
+    }, delay);
   }
 
   toastEl.addEventListener('hidden.bs.toast', function () {
@@ -208,6 +238,7 @@ window.showToast = function (message, type) {
 };
 </script>
 <script src="{{ asset_url('js/atelier-shell.js') }}"></script>
+<script src="{{ asset_url('js/atelier-fx.js') }}"></script>
 
 <!-- 页面自定义 JS (在子模板中按需追加) -->
 <script src="{{ asset_url('shared/cover-fallback.js') }}"></script>

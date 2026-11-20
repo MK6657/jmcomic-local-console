@@ -1,131 +1,269 @@
 ---
-name: 藏书阁 · JMComic 本地控制台（Atelier Edition）— 项目设计系统
-version: 2.0
-description: Apple Books × Linear × 茑屋书店（Tsutaya）装帧级书籍阅读与传输桌面界面规范，内置 4 套可持久化矿物手工纸护眼色谱
+name: 藏书阁 · JMComic 本地控制台（Fresh Eye-Care Atelier v3.4）— 项目设计系统
+version: 3.4
+description: 清新护眼与个性风格兼备的现代本地漫画控制台规范，内置 9 套经 WCAG AAA/AA 全表面与按钮悬停对比度校验的主题（6 套清新护眼 + 像素/科技/二次元 3 套个性风格），采用四节点复用池与独立交互动效、均衡比例设置页表单栅格，以及单行整合的 CBZ/ZIP/PDF 导出组件。
 
 project_theme:
   theme_mode: eye-care
-  default_theme: paper
-  available_themes: [paper, sage, linen, night]
-  fallback_theme: paper
+  default_theme: sage
+  available_themes: [sage, mint, paper, linen, apricot, night, pixel, cyber, anime]
+  fallback_theme: sage
   locked: true
   selected_by: user
   persistence_key: ui_theme
-  rule: "全站采用装帧级书籍美学，提供 paper（宣纸·古籍暖米，默认）、sage（青瓷·宋韵粉青）、linen（白麻·画册晨光）、night（玄墨·暗房夜读）四套矿物/手工纸护眼主题；严禁同屏混用未定义色值，严禁使用纯白 #FFFFFF 或纯黑 #000000 背景，全表面正文对比度 >= 10:1 (AAA)、次要/语义色 >= 4.5:1 (AA)"
+  fx_enabled_key: ui_fx_enabled
+  fx_preset_key: ui_fx_preset
+  available_fx_presets: [auto, calm, pixel, cyber, anime]
+  rule: "全站以清新护眼为基底，提供 6 套护眼主题（sage/mint/paper/linen/apricot/night）与 3 套高辨识度个性主题（pixel 像素复古、cyber 科技终端、anime 二次元樱风），全 9 套均通过 9 表面正文 >= 10:1 (AAA)、次要/语义色与全部按钮常态/悬停态 >= 4.5:1 (AA) 校验；交互特效与大面板/卡片/按钮过渡动画由 ui_fx_enabled 一键控制、ui_fx_preset 自由搭配（可随主题自动匹配或跨风格混搭），仅在入场、悬停、切主题或点击瞬间触发，零后台常驻循环，并完整遵守 prefers-reduced-motion。"
 
 # ============================================
-# Atelier 四套矿物手工纸护眼色谱 Token（实心预混表面，零半透明底色衰减）
+# Fresh Eye-Care 九套主题 Token（单源定义见 core/ui_themes.py）
 # ============================================
 
 themes:
-  paper:
-    title: "宣纸 · 古籍暖米"
-    color-scheme: light
-    bg-canvas: "#F3EFE6"
-    bg-sidebar: "#ECE6D9"
-    bg-card: "#FAF7F0"
-    bg-subtle: "#E7E0D2"
-    bg-elevated: "#FCF9F3"
-    bg-tint: "#E8EFF1"
-    ink: "#24201B"
-    ink-2: "#4F493F"
-    ink-3: "#5C5549"
-    line: "rgba(36, 32, 27, 0.10)"
-    line-strong: "rgba(36, 32, 27, 0.18)"
-    accent: "#215266"
-    accent-hover: "#194152"
-    accent-fg: "#FAF7F0"
-    ok: "#1B5B3A"
-    ok-bg: "#E8F1EC"
-    ok-line: "rgba(27, 91, 58, 0.24)"
-    warn: "#78460B"
-    warn-bg: "#F5EEE2"
-    warn-line: "rgba(120, 70, 11, 0.24)"
-    danger: "#962121"
-    danger-bg: "#F6EBEB"
-    danger-line: "rgba(150, 33, 33, 0.24)"
-    seal: "#8F2D22"
   sage:
-    title: "青瓷 · 宋韵粉青"
+    title: "青岚 · 晴竹护眼"
     color-scheme: light
-    bg-canvas: "#EBF0EC"
-    bg-sidebar: "#E2EAE4"
-    bg-card: "#F5F8F5"
-    bg-subtle: "#DCE5DE"
-    bg-elevated: "#F8FAF8"
-    bg-tint: "#E3EFEA"
-    ink: "#1E2621"
-    ink-2: "#435047"
-    ink-3: "#4E5C52"
-    line: "rgba(30, 38, 33, 0.10)"
-    line-strong: "rgba(30, 38, 33, 0.18)"
-    accent: "#1F5647"
-    accent-hover: "#174337"
-    accent-fg: "#F5F8F5"
-    ok: "#1B593C"
-    ok-bg: "#E3F0E8"
-    ok-line: "rgba(27, 89, 60, 0.24)"
-    warn: "#75460E"
-    warn-bg: "#F1ECE2"
-    warn-line: "rgba(117, 70, 14, 0.24)"
-    danger: "#942323"
-    danger-bg: "#F3EAEA"
-    danger-line: "rgba(148, 35, 35, 0.24)"
-    seal: "#2A5E4E"
+    bg-canvas: "#EDF4F0"
+    bg-sidebar: "#E3EFE8"
+    bg-card: "#F7FBF8"
+    bg-subtle: "#DCEAE2"
+    bg-elevated: "#FAFDFB"
+    bg-tint: "#E0F2EC"
+    ink: "#16241D"
+    ink-2: "#384D42"
+    ink-3: "#465D51"
+    line: "rgba(22, 36, 29, 0.09)"
+    line-strong: "rgba(22, 36, 29, 0.16)"
+    accent: "#146652"
+    accent-hover: "#0E5040"
+    accent-fg: "#F7FBF8"
+    ok: "#15633F"
+    ok-bg: "#E2F3EA"
+    ok-line: "rgba(21, 99, 63, 0.24)"
+    warn: "#7A4A0A"
+    warn-bg: "#F6EFE0"
+    warn-line: "rgba(122, 74, 10, 0.24)"
+    danger: "#9C2229"
+    danger-bg: "#F8E9EA"
+    danger-line: "rgba(156, 34, 41, 0.24)"
+    seal: "#1D6B57"
+  mint:
+    title: "青柚 · 薄荷清风"
+    color-scheme: light
+    bg-canvas: "#EBF5F5"
+    bg-sidebar: "#E0EFEF"
+    bg-card: "#F6FCFC"
+    bg-subtle: "#D8ECEC"
+    bg-elevated: "#F9FEFE"
+    bg-tint: "#DEF2F5"
+    ink: "#142326"
+    ink-2: "#354C50"
+    ink-3: "#435B60"
+    line: "rgba(20, 35, 38, 0.09)"
+    line-strong: "rgba(20, 35, 38, 0.16)"
+    accent: "#0E6370"
+    accent-hover: "#094E58"
+    accent-fg: "#F6FCFC"
+    ok: "#156343"
+    ok-bg: "#E1F3EC"
+    ok-line: "rgba(21, 99, 67, 0.24)"
+    warn: "#7A4A0B"
+    warn-bg: "#F5EFE1"
+    warn-line: "rgba(122, 74, 11, 0.24)"
+    danger: "#9C232B"
+    danger-bg: "#F7E9EB"
+    danger-line: "rgba(156, 35, 43, 0.24)"
+    seal: "#0F6B75"
+  paper:
+    title: "暖宣 · 晨曦护眼"
+    color-scheme: light
+    bg-canvas: "#F5F2EA"
+    bg-sidebar: "#ECE7DC"
+    bg-card: "#FCFBF7"
+    bg-subtle: "#E6E0D3"
+    bg-elevated: "#FDFCFA"
+    bg-tint: "#E5EFF2"
+    ink: "#211D18"
+    ink-2: "#4A433A"
+    ink-3: "#575046"
+    line: "rgba(33, 29, 24, 0.09)"
+    line-strong: "rgba(33, 29, 24, 0.16)"
+    accent: "#1C586E"
+    accent-hover: "#144557"
+    accent-fg: "#FCFBF7"
+    ok: "#185F3C"
+    ok-bg: "#E6F2EB"
+    ok-line: "rgba(24, 95, 60, 0.24)"
+    warn: "#7A470A"
+    warn-bg: "#F6EFE0"
+    warn-line: "rgba(122, 71, 10, 0.24)"
+    danger: "#9A2222"
+    danger-bg: "#F7EAE9"
+    danger-line: "rgba(154, 34, 34, 0.24)"
+    seal: "#8C3227"
   linen:
-    title: "白麻 · 画册晨光"
+    title: "晴空 · 晨雾护眼"
     color-scheme: light
-    bg-canvas: "#F6F5F1"
-    bg-sidebar: "#EFECE6"
-    bg-card: "#FCFBF8"
-    bg-subtle: "#EAE7DF"
-    bg-elevated: "#FDFCF9"
-    bg-tint: "#EBF0F6"
-    ink: "#21211F"
-    ink-2: "#4A4944"
-    ink-3: "#57554F"
-    line: "rgba(33, 33, 31, 0.09)"
-    line-strong: "rgba(33, 33, 31, 0.17)"
-    accent: "#284D7A"
-    accent-hover: "#1E3B5E"
-    accent-fg: "#FCFBF8"
-    ok: "#1D5D3E"
-    ok-bg: "#EBF3EF"
-    ok-line: "rgba(29, 93, 62, 0.24)"
-    warn: "#7A480E"
-    warn-bg: "#F7F0E5"
-    warn-line: "rgba(122, 72, 14, 0.24)"
-    danger: "#982222"
-    danger-bg: "#F8EDED"
-    danger-line: "rgba(152, 34, 34, 0.24)"
-    seal: "#7D3028"
+    bg-canvas: "#F1F5F8"
+    bg-sidebar: "#E7EEF4"
+    bg-card: "#FAFBFD"
+    bg-subtle: "#DFE8F0"
+    bg-elevated: "#FCFDFF"
+    bg-tint: "#E3EDF8"
+    ink: "#17202A"
+    ink-2: "#3D4B59"
+    ink-3: "#4C5A68"
+    line: "rgba(23, 32, 42, 0.09)"
+    line-strong: "rgba(23, 32, 42, 0.16)"
+    accent: "#1F5494"
+    accent-hover: "#174175"
+    accent-fg: "#FAFBFD"
+    ok: "#166140"
+    ok-bg: "#E4F3EC"
+    ok-line: "rgba(22, 97, 64, 0.24)"
+    warn: "#7A4A0B"
+    warn-bg: "#F6F0E2"
+    warn-line: "rgba(122, 74, 11, 0.24)"
+    danger: "#9A2329"
+    danger-bg: "#F8EBEB"
+    danger-line: "rgba(154, 35, 41, 0.24)"
+    seal: "#2B5B8F"
+  apricot:
+    title: "暖杏 · 柔光护眼"
+    color-scheme: light
+    bg-canvas: "#F6EFE8"
+    bg-sidebar: "#EFE4DA"
+    bg-card: "#FCF8F4"
+    bg-subtle: "#E9DDD1"
+    bg-elevated: "#FDFBF8"
+    bg-tint: "#F3E7DF"
+    ink: "#251C16"
+    ink-2: "#524237"
+    ink-3: "#5E4D41"
+    line: "rgba(37, 28, 22, 0.09)"
+    line-strong: "rgba(37, 28, 22, 0.16)"
+    accent: "#853D29"
+    accent-hover: "#6B2F1E"
+    accent-fg: "#FCF8F4"
+    ok: "#1A5F3C"
+    ok-bg: "#E7F2EA"
+    ok-line: "rgba(26, 95, 60, 0.24)"
+    warn: "#7A4709"
+    warn-bg: "#F7ECDC"
+    warn-line: "rgba(122, 71, 9, 0.24)"
+    danger: "#9A2125"
+    danger-bg: "#F7E8E7"
+    danger-line: "rgba(154, 33, 37, 0.24)"
+    seal: "#913B2A"
   night:
-    title: "玄墨 · 暗房夜读"
+    title: "星夜 · 柔暗护眼"
     color-scheme: dark
-    bg-canvas: "#171614"
-    bg-sidebar: "#1D1C19"
-    bg-card: "#21201D"
-    bg-subtle: "#2B2925"
-    bg-elevated: "#272521"
-    bg-tint: "#1E292D"
-    ink: "#E6E1D6"
-    ink-2: "#BFB8AB"
-    ink-3: "#ACA598"
-    line: "rgba(230, 225, 214, 0.09)"
-    line-strong: "rgba(230, 225, 214, 0.17)"
-    accent: "#84C0D4"
-    accent-hover: "#98CCE0"
-    accent-fg: "#171614"
-    ok: "#82D1A8"
-    ok-bg: "#1D2922"
-    ok-line: "rgba(130, 209, 168, 0.24)"
-    warn: "#ECC074"
-    warn-bg: "#2B251C"
-    warn-line: "rgba(236, 192, 116, 0.24)"
-    danger: "#F59898"
-    danger-bg: "#2C2020"
-    danger-line: "rgba(245, 152, 152, 0.24)"
-    seal: "#D67A6B"
+    bg-canvas: "#13171C"
+    bg-sidebar: "#181D24"
+    bg-card: "#1D232B"
+    bg-subtle: "#262E38"
+    bg-elevated: "#232A34"
+    bg-tint: "#1A2B33"
+    ink: "#E8EEF2"
+    ink-2: "#BDC8D2"
+    ink-3: "#AAB6C2"
+    line: "rgba(232, 238, 242, 0.09)"
+    line-strong: "rgba(232, 238, 242, 0.16)"
+    accent: "#7AC7DC"
+    accent-hover: "#92D4E6"
+    accent-fg: "#13171C"
+    ok: "#7CD6AA"
+    ok-bg: "#182923"
+    ok-line: "rgba(124, 214, 170, 0.24)"
+    warn: "#F0C475"
+    warn-bg: "#2B251B"
+    warn-line: "rgba(240, 196, 117, 0.24)"
+    danger: "#F69B9E"
+    danger-bg: "#2D1E22"
+    danger-line: "rgba(246, 155, 158, 0.24)"
+    seal: "#7AC7DC"
+  pixel:
+    title: "像素 · 复古掌机"
+    color-scheme: light
+    bg-canvas: "#EDF1E3"
+    bg-sidebar: "#E2E8D4"
+    bg-card: "#F8FAF1"
+    bg-subtle: "#D8E0C8"
+    bg-elevated: "#FBFDF6"
+    bg-tint: "#E0E8F6"
+    ink: "#182019"
+    ink-2: "#3A473B"
+    ink-3: "#485649"
+    line: "rgba(24, 32, 25, 0.16)"
+    line-strong: "rgba(24, 32, 25, 0.34)"
+    accent: "#263C8C"
+    accent-hover: "#1C2E6E"
+    accent-fg: "#F8FAF1"
+    ok: "#1B6135"
+    ok-bg: "#E1F2E3"
+    ok-line: "rgba(27, 97, 53, 0.30)"
+    warn: "#7D4808"
+    warn-bg: "#F7EFE0"
+    warn-line: "rgba(125, 72, 8, 0.30)"
+    danger: "#9C2124"
+    danger-bg: "#F8E8E8"
+    danger-line: "rgba(156, 33, 36, 0.30)"
+    seal: "#263C8C"
+  cyber:
+    title: "科技 · 霓虹终端"
+    color-scheme: dark
+    bg-canvas: "#0D131D"
+    bg-sidebar: "#111926"
+    bg-card: "#162030"
+    bg-subtle: "#1E2B40"
+    bg-elevated: "#1B273A"
+    bg-tint: "#122B38"
+    ink: "#EAF4FA"
+    ink-2: "#B9CEE0"
+    ink-3: "#A6BFD4"
+    line: "rgba(92, 225, 245, 0.14)"
+    line-strong: "rgba(92, 225, 245, 0.28)"
+    accent: "#5CE1F5"
+    accent-hover: "#7EEBF9"
+    accent-fg: "#0D131D"
+    ok: "#6CE0AC"
+    ok-bg: "#122923"
+    ok-line: "rgba(108, 224, 172, 0.28)"
+    warn: "#F5C969"
+    warn-bg: "#2A2316"
+    warn-line: "rgba(245, 201, 105, 0.28)"
+    danger: "#FF94A8"
+    danger-bg: "#2E1B24"
+    danger-line: "rgba(255, 148, 168, 0.28)"
+    seal: "#5CE1F5"
+  anime:
+    title: "二次元 · 樱风绘卷"
+    color-scheme: light
+    bg-canvas: "#F8F1F5"
+    bg-sidebar: "#F2E7EE"
+    bg-card: "#FDF9FB"
+    bg-subtle: "#ECE0E8"
+    bg-elevated: "#FEFCFD"
+    bg-tint: "#F8E6F0"
+    ink: "#261822"
+    ink-2: "#543B4C"
+    ink-3: "#63485B"
+    line: "rgba(38, 24, 34, 0.09)"
+    line-strong: "rgba(168, 38, 94, 0.22)"
+    accent: "#A8265E"
+    accent-hover: "#881D4B"
+    accent-fg: "#FDF9FB"
+    ok: "#166142"
+    ok-bg: "#E4F3EC"
+    ok-line: "rgba(22, 97, 66, 0.24)"
+    warn: "#7E480A"
+    warn-bg: "#F8EFE2"
+    warn-line: "rgba(126, 72, 10, 0.24)"
+    danger: "#A3203A"
+    danger-bg: "#FBE9ED"
+    danger-line: "rgba(163, 32, 58, 0.24)"
+    seal: "#A8265E"
 
 # ============================================
 # 全局设计 Token（跨主题共享）
@@ -149,14 +287,15 @@ rounded:
   full: 9999px
 
 shadow:
-  sm: "0 1px 3px rgba(36, 32, 27, 0.06)"
-  card: "0 2px 6px rgba(36, 32, 27, 0.04), 0 12px 32px rgba(36, 32, 27, 0.06)"
-  book: "-2px 6px 14px rgba(36, 32, 27, 0.16), 0 2px 4px rgba(36, 32, 27, 0.08)"
-  float: "0 18px 44px rgba(36, 32, 27, 0.16), 0 2px 8px rgba(36, 32, 27, 0.08)"
+  sm: "0 1px 2px rgba(22, 36, 29, 0.05)"
+  card: "0 1px 2px rgba(22, 36, 29, 0.04), 0 8px 24px rgba(22, 36, 29, 0.05)"
+  book: "0 2px 6px rgba(22, 36, 29, 0.08), 0 10px 20px rgba(22, 36, 29, 0.08)"
+  float: "0 14px 36px rgba(22, 36, 29, 0.14), 0 2px 8px rgba(22, 36, 29, 0.06)"
 
 typography:
+  font-display: "'HarmonyOS Sans SC', 'PingFang SC', 'Source Han Sans SC', 'Noto Sans SC', 'Microsoft YaHei UI', system-ui, -apple-system, 'Segoe UI', sans-serif"
   font-serif: "'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', 'STSong', '华文中宋', Georgia, serif"
-  font-sans: "'Source Han Sans SC', 'Noto Sans SC', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', system-ui, -apple-system, 'Segoe UI', sans-serif"
+  font-sans: "'HarmonyOS Sans SC', 'PingFang SC', 'Source Han Sans SC', 'Noto Sans SC', 'Microsoft YaHei UI', system-ui, -apple-system, 'Segoe UI', sans-serif"
   font-mono: "'JetBrains Mono', 'Cascadia Code', 'SFMono-Regular', Consolas, ui-monospace, monospace"
   font-size-xs: 12px
   font-size-sm: 14px
@@ -173,10 +312,15 @@ typography:
 
 ---
 
-# 藏书阁 · JMComic 本地控制台（Atelier Edition）— 设计文档
+# 藏书阁 · JMComic 本地控制台（Fresh Eye-Care Atelier v3.0）— 设计文档
 
 > Windows 本地控制台，Flask + 本地静态资产（零外部 CDN）；运行版本见 `requirements.txt`，便携包的实装版本见其 `release.json`。
-> 主题体系：`ui_theme` 支持 `paper | sage | linen | night` 四套矿物纸本护眼主题（服务端持久化 + `<html data-theme="{{ ui_theme }}">` 零闪屏直出）。
+> Atelier 的 `ui_theme` 使用文首 `project_theme` 锁定的九套主题，默认 `sage`。`core/ui_themes.py` 统一注册，由服务端持久化并通过 `<html data-theme="{{ ui_theme }}">` 直出。
+>
+> ### v3.0 重构原则（清新护眼 · 缩略图一致 · 低运行开销 · 上游低冲突）
+> 1. **统一 3:4 封面与缩略图契约**：首页任务、检索卡片、私人书阁、心愿典藏、传输中心、书目详情与单页阅读胶片条统一采用 `3:4` 竖版比例与 `object-fit: contain` 完整无裁切展示；移除遮挡封面边缘的假书脊伪元素；本地封面经 `core/thumb_cache.py` 按 `?w=` 等比轻量化缩放缓存（不裁切、不放大），既保证与漫画首页完全一致，又大幅降低内存与解码开销。
+> 2. **低运行开销**：移除全屏固定 `feTurbulence` SVG 噪点滤镜与阅读浮动栏 `backdrop-filter` 实时模糊；将传输中心 `static/atelier-ui/transfer.js` 由 53.8 KB Vue 3 运行时替换为 ~1.5 KB 零依赖原生脚本；卡片与传输卷宗启用 `content-visibility: auto` 延迟离屏绘制。
+> 3. **上游同步隔离边界**：所有核心抓取、SDK 适配、下载队列、发布快照、数据库与 API 路由保持上游原样；新主题注册、缩略图缓存、设计令牌与界面层严格隔离在 `core/ui_themes.py`、`core/thumb_cache.py`、`static/css/atelier*.css`、`static/css/{reader,preview}.css`、`static/atelier-ui/transfer.*` 与 `templates/*.html`，后续合并上游更新冲突面极小。
 
 ---
 
@@ -221,7 +365,7 @@ typography:
 
 | 功能 | 说明 |
 |------|------|
-| 🔍 漫画搜索 | 页面提供最新/浏览量/点赞排序，API 还支持图片数排序；原生标签语法（AND/OR/NOT） |
+| 🔍 漫画搜索 | 两版页面与 API 都支持最新、观看数、点赞数和图片数排序；原生标签语法（AND/OR/NOT） |
 | 📄 漫画详情 | 章节列表、标签、作者、浏览量、点赞数 |
 | ⬇️ 下载管理 | 多任务并发、暂停/继续/取消、指数退避重试 |
 | 📦 CBZ 打包 | 下载后自动打包，可选删除原始文件 |
@@ -568,7 +712,7 @@ CREATE TABLE jobs (
 
 ## 八、Eye-care 护眼风格详细设计说明
 
-> 以下规则适用于 theme_mode = eye-care 的本项目。
+> 本节记录 Classic 的护眼配色和控件规则。Atelier 使用文首的主题与全局 Token，以及本文末尾的 Atelier 规范。两版均遵守锁定的 `eye-care` 项目基调。
 
 首页只为可见页面上仍在运行的任务订阅进度。收到取消终态，原百分比徽章改用已有次要徽章显示“已取消”，隐藏进度条；返回标签或从页面缓存恢复都不重新订阅该任务。完成和失败沿用现有成功/失败徽章。复用已有元素、颜色和字号，不新增视觉 token。
 
@@ -829,34 +973,22 @@ Primary(蓝色) / Secondary(暖灰+边框) / Ghost(全透明) / Danger(红色)
 - 收藏的状态选项顺序与资源库、与“排序：下载状态”相同（2026-09-27）：全部 → 已下载内容·可离线阅读 → 排队中/下载中 → 失败 → 下载过·文件已删除 → 未下载；筛选键、数量和已收藏的链接不变。（“下载过·文件已删除”后改名为“下载过·本地文件不可用”，见“只剩压缩包也能离线阅读”）
 - 收藏筛选栏（2026-09-27）：≥1200px 搜索框、状态、排序、搜索按钮一行（4/3/3/2 列）；768–1199px 搜索框独占一行，状态、排序、按钮在第二行（5/5/2 列）；手机宽度每个控件一行。原来 768–991px 状态框只有约 166px，“下载过 · 文件已删除 / 已下载内容 · 可离线阅读 / 排队中 / 下载中”带上数量后显示不全，992–1199px 数量到三位数时也会截断。只改栅格列，不改文案、颜色、间距。
 
-### 藏书阁 · Atelier Edition 装帧美学升级规范（2026-11-18）
+### 藏书阁 · Atelier Edition v3.4（2026-11-20）
 
-- **四套可持久化矿物纸本护眼主题（`ui_theme`）**：
-  - 服务端 `core/settings.py` 原生支持 `ui_theme`（枚举 `paper | sage | linen | night`，默认 `paper`），由 `app.py` 上下文处理器注入模板根标签 `<html lang="zh-CN" data-theme="{{ ui_theme }}">`，配合 `<head>` 同步水合脚本实现零闪屏（Zero-FOUC）渲染。
-  - 全站统一采用实心预混表面色变量（`--bg-canvas`, `--bg-sidebar`, `--bg-card`, `--bg-subtle`, `--bg-elevated`, `--bg-tint`, `--ok-bg`, `--warn-bg`, `--danger-bg`）与墨色/语义色变量（`--ink`, `--ink-2`, `--ink-3`, `--line`, `--line-strong`, `--accent`, `--accent-hover`, `--accent-fg`, `--ok`, `--ok-line`, `--warn`, `--warn-line`, `--danger`, `--danger-line`, `--seal`），并将 Bootstrap 5 组件变量（`--bs-body-*`, `--bs-card-*`, `--bs-table-*`, `--bs-modal-*`, `--bs-btn-*`）完整映射至当前矿物色谱，严禁出现纯白 `#FFFFFF`、纯黑 `#000000` 或夜间亮白残块。
-- **建筑感左侧书斋边栏（`.atelier-shell` / `.atelier-sidebar`）**：
-  - 桌面端采用 `236px` 宣纸质感左侧导航栏：顶部篆刻章标 `藏 · 藏书阁 · JM · ATELIER`；中部六项胶囊导航（书斋总览 `/`、检索探索 `/search`、私人书阁 `/library`、心愿典藏 `/wishlist`、传输中心 `/downloads`、偏好与色谱 `/settings`），完整保留 `data-nav-memory` 导航记忆契约；下方内嵌活跃下载脉搏微卡与 4 枚温润矿物色石切换器（即时切换 `data-theme`、同步 `localStorage` 并静默 `POST /api/settings`）。
-  - 响应式断点：`<=992px` 自动收窄为 `76px` 窄图标轨，`<=640px` 切换为紧凑移动顶栏；阅读页与单页预览页支持全幅沉浸展阅。
-- **书籍装帧排版韵律与 3D 立体书封（`.serif-display` / `.bound-book` / `.paper-grain`）**：
-  - 三层字体分工：书名、专著大标题与章回标题使用人文宋刻衬线栈 `--font-serif`（字重 600，字距 `-0.02em`）；界面操作控件使用现代无衬线 `--font-sans`；车号、页码、卷标、速率与日志使用 `tabular-nums` 等宽字体 `--font-mono`。
-  - 全局叠加 `opacity: 0.022` 的内联 SVG `<feTurbulence>` 微宣纸纤维肌理（`pointer-events: none`）；所有交互过渡严格控制在 `150ms–180ms` 并遵循 `prefers-reduced-motion`，禁止循环条纹动画。
-  - `.bound-book` 立体书封：具备左侧书脊压槽高光/暗部渐变、右侧书口纸页层叠切边与漫射书影；无封面或加载失败时回退为压凹布面藏书票占位。
-- **同书聚合传输中心（`/downloads` · `.folio-card`）**：
-  - 顶部采用编辑风标题与单行细竖线等宽态势铭文（`.quiet-ledger`：`进行中` · `排队` · `已暂停` · `已完成` · `失败` · `已取消`），搭配胶囊筛选（含全景同屏与新增「已取消」筛选视图）。
-  - 同一 `album_id` 的多个章节下载任务聚合在同一张书目典藏卡（`.folio-card`）下：书目头展示 `.bound-book` 立体封面、宋刻书名与整册 `album_maintenance` 归档合卷状态签条及「重新整理整册」入口；子行分列各话进度与操作（暂停、继续、取消、重试、删除、打开目录、阅读、预览、单任务 ZIP/PDF 导出），直观呈现“单话完成立即可读”与“整册后台合卷整理”解耦机制。
-- **博物馆专著详情页与无框沉浸画廊阅读器（`/album/<id>` · `/read` · `/online` · `/preview`）**：
-  - 详情页采用左书封右专著扉页布局，集成车号钤印、本地状态/CBZ/`M/N 话` 徽章、`#album-update-status` 新章节检查条、交互式标签工坊与无框章节卷目表。
-  - 阅读器与单页预览适配全部 4 套矿物主题，底部 `#reader-tools` 升级为毛玻璃纸感悬浮控制舱 Dock，单页模式支持点击画面左/右 1/3 区域翻页，并在 `pagehide` 释放未完成图片连接、`pageshow` 自动恢复。
-- **双栏粘性偏好与矿物印谱台（`/settings` + `#logs`）**：
-  - 左侧粘性章节目录 + 右侧无框纸面分区；首节提供四色矿物护眼印谱可视化选卡，代理输入框提供密码遮罩/明文切换按钮（避免掩码回写），底部 `section#logs` 提供契合四主题的等宽系统诊断日志台。
+- **主题与表面**。`project_theme` 锁定 `eye-care`，默认和回退都是 `sage`。六套护眼主题为 `sage`、`mint`、`paper`、`linen`、`apricot`、`night`，三套个性主题为 `pixel`、`cyber`、`anime`。表面、墨色和语义色使用 `themes` 中的变量，Bootstrap 组件映射到当前主题的实心表面和文字色。
+- **导航与排版**。桌面边栏宽 `236px`，`641–992px` 为 `76px` 图标轨，`640px` 及以下使用移动顶栏。保留六个导航入口的 `data-nav-memory` 和九枚主题按钮。书名与章回标题用 `--font-serif`，界面用 `--font-sans`，车号、页码和日志用 `--font-mono`。书封沿用 `3:4` 和 `object-fit: contain`。
+- **动效**。`ui_fx_enabled` 控制交互过渡及特效，`ui_fx_preset` 可跟随主题或独立搭配。新增通用交互过渡取 `150–200ms`，现有紧凑控件反馈保留 `140ms`，像素步进保留 `100ms`。清新预设的装饰线伸展为 `220ms`，樱风预设的弹性悬停变换为 `220–240ms`。首页单次入场为 `210–340ms`，点击反馈为 `310–440ms`。这些动效均遵守 `prefers-reduced-motion`，禁止持续循环。全局纸面使用实心 Token。
+- **传输中心**。`/downloads` 保留全景、状态筛选和整册记录，按 `album_id` 聚合章节任务。整册整理进度与单次任务分开显示。完成行保留阅读、预览和 CBZ／ZIP／PDF 导出，更新行时按任务和控件恢复焦点。
+- **阅读**。连续与单页阅读适配九套主题。连续阅读的 `#reader-tools` 使用实心悬浮工具栏，单页工具栏位于画页下方。右下角快捷面板按可用视口高度内部滚动，阅读提示为按钮和展开的面板留出位置。单页模式保留画面两侧翻页，`pagehide` 释放未完成的图片请求，`pageshow` 恢复。
+- **设置**。Atelier 用双栏章节目录、九套主题卡和独立动效预设，关闭总开关时预设保持可读、可选。两版代理地址均在设置读取后以密码控件显示，按需揭示。两版共用图片保存与自动打包格式设置。
 
 本项目已锁定 `project_theme.locked = true`，后续所有 UI 修改必须遵守：
 
-1. **颜色**必须使用本文档 `themes`（`paper | sage | linen | night`）定义的矿物护眼 Token，严禁硬编码 `#FFF`/`#000`
+1. **颜色**必须使用文首 `themes` 中当前 Atelier 主题定义的 Token，严禁硬编码 `#FFF`／`#000`
 2. **表面对比度**必须保证正文 `>= 10:1` (AAA)，辅助文字与语义色在全部表面上 `>= 4.5:1` (AA)
 3. **间距**优先遵循标准尺度（4/8/16/24/32/48px）及已记录的紧凑布局尺度
 4. **字体**层级必须遵守 `typography` 三层字体栈规范（衬线标题 / 无衬线界面 / 等宽指标）
-5. **圆角/阴影/动效**必须遵守对应 Token，过渡时长 `150ms–180ms`，禁止持续循环动画
+5. **圆角、阴影与动效**遵守对应 Token 与本节的时长分层，禁止持续循环动画
 6. 如需覆盖上述规则，必须**先更新本 DESIGN.md**，再改代码
 7. 开发时同时遵守本项目 [AGENTS.md](AGENTS.md)。
 

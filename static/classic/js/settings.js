@@ -13,8 +13,6 @@
     resetBtnId: 'settings-reset-btn',
     apiEndpoint: '/api/settings',
     toastContainerId: 'toast-container',
-    // 敏感设置字段名（当前版本无敏感字段，预留）
-    sensitiveFields: [],
   };
 
   // ── DOM 缓存 ──
@@ -22,8 +20,7 @@
   var editVersion = 0;
   var fieldEdits = Object.create(null);
   var loadVersion = 0;
-  var saving = false;
-  var importing = false;
+  var writeOperation = null;
   var baseline = null;
   var pendingLoad = null;
   var loadEditsAfter = 0;
@@ -32,6 +29,14 @@
     els.form = document.getElementById(CONFIG.formId);
     els.saveBtn = document.getElementById(CONFIG.saveBtnId);
     els.resetBtn = document.getElementById(CONFIG.resetBtnId);
+    els.importBtn = document.getElementById('import-settings-btn');
+  }
+
+  function setWriteOperation(operation) {
+    writeOperation = operation;
+    [els.saveBtn, els.resetBtn, els.importBtn].forEach(function (button) {
+      if (button) button.disabled = Boolean(operation);
+    });
   }
 
   // ── API 调用（统一走 apiFetch，自带 AbortController/超时/pagehide 清理） ──
@@ -59,9 +64,13 @@
   function syncDeleteOriginals() {
     var autoPack = document.getElementById('auto_pack');
     var deleteOriginals = document.getElementById('delete_originals');
-    if (!autoPack || !deleteOriginals) return;
-    deleteOriginals.disabled = !autoPack.checked;
-    if (!autoPack.checked) deleteOriginals.checked = false;
+    var packFormat = document.getElementById('pack_format');
+    if (!autoPack) return;
+    if (deleteOriginals) {
+      deleteOriginals.disabled = !autoPack.checked;
+      if (!autoPack.checked) deleteOriginals.checked = false;
+    }
+    if (packFormat) packFormat.disabled = !autoPack.checked;
   }
 
   function settingValue(input, value) {
@@ -231,17 +240,15 @@
   }
 
   async function handleImport(file) {
-    if (!file || importing || saving) return;
-    importing = true;
+    if (!file || writeOperation) return;
+    setWriteOperation('import');
     var importedVersion = editVersion;
     var formData = new FormData();
     formData.append('file', file);
 
     // 导入按钮加载状态
-    var importBtn = document.getElementById('import-settings-btn');
-    if (importBtn) {
-      importBtn.disabled = true;
-      importBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span> 导入中...';
+    if (els.importBtn) {
+      els.importBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span> 导入中...';
     }
 
     try {
@@ -267,19 +274,19 @@
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默（finally 仍会恢复按钮）
       showToast('导入失败: ' + err.message, 'danger');
     } finally {
-      importing = false;
-      if (importBtn) {
-        importBtn.disabled = false;
-        importBtn.innerHTML = '<i class="bi bi-upload"></i> 导入设置';
+      if (els.importBtn) {
+        els.importBtn.innerHTML = '<i class="bi bi-upload"></i> 导入设置';
       }
+      setWriteOperation(null);
     }
   }
 
   // ── 恢复默认（暂未开放 UI 按钮，保留函数留待后续） ──
 
   async function handleReset() {
-    if (!confirm('确定要恢复所有设置为默认值吗？')) return;
+    if (writeOperation || !confirm('确定要恢复所有设置为默认值吗？')) return;
 
+    setWriteOperation('reset');
     var resetVersion = editVersion;
     try {
       await window.apiFetch('/api/settings', {
@@ -293,6 +300,8 @@
     } catch (err) {
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默
       showToast('恢复默认失败: ' + err.message, 'danger');
+    } finally {
+      setWriteOperation(null);
     }
   }
 
@@ -301,11 +310,10 @@
   async function handleSave(e) {
     if (e) e.preventDefault();
 
-    if (!els.form || saving || importing) return;
-    saving = true;
+    if (!els.form || writeOperation) return;
+    setWriteOperation('save');
     // 禁用提交按钮 + 加载状态
     if (els.saveBtn) {
-      els.saveBtn.disabled = true;
       els.saveBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span> 保存中...';
     }
 
@@ -356,11 +364,10 @@
       // draft so a transient failure can be retried without re-entering it.
       showToast('保存未确认: ' + err.message + '，当前修改已保留，请重试', 'danger');
     } finally {
-      saving = false;
       if (els.saveBtn) {
-        els.saveBtn.disabled = false;
         els.saveBtn.innerHTML = '<i class="bi bi-floppy me-1"></i> 保存设置';
       }
+      setWriteOperation(null);
     }
   }
 
@@ -449,7 +456,6 @@
       var settings = await fetchSettings();
       if (requestVersion !== loadVersion) return;
       populateForm(settings, function (key) { return fieldEdits[key] > preserveEditsAfter; });
-      initSensitiveFields();
     } catch (err) {
       if (requestVersion !== loadVersion) return;
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默
@@ -472,10 +478,10 @@
     }
 
     // 导入按钮 → 触发隐藏的 file input
-    var importBtn = document.getElementById('import-settings-btn');
     var importFile = document.getElementById('import-settings-file');
-    if (importBtn && importFile) {
-      importBtn.addEventListener('click', function () {
+    if (els.importBtn && importFile) {
+      els.importBtn.addEventListener('click', function () {
+        if (writeOperation) return;
         importFile.click();
       });
       importFile.addEventListener('change', function () {
@@ -493,8 +499,7 @@
 
     // 自动打包开关联动
     var autoPackCheckbox = document.getElementById('auto_pack');
-    var deleteOriginalsCheckbox = document.getElementById('delete_originals');
-    if (autoPackCheckbox && deleteOriginalsCheckbox) {
+    if (autoPackCheckbox) {
       autoPackCheckbox.addEventListener('change', syncDeleteOriginals);
       syncDeleteOriginals();
     }
@@ -538,50 +543,17 @@
     }
   }
 
-  // ── 敏感字段 —— 显示切换（预留） ──
-
-  function initSensitiveFields() {
-    if (!CONFIG.sensitiveFields || CONFIG.sensitiveFields.length === 0) return;
-
-    CONFIG.sensitiveFields.forEach(function (fieldName) {
-      var input = els.form.querySelector('[name="' + fieldName + '"]');
-      if (!input) return;
-
-      // 确保 input 是 password 类型
-      if (input.type !== 'password') {
-        input.type = 'password';
-      }
-
-      // 查找或创建切换按钮
-      var parent = input.closest('.input-group') || input.parentElement;
-      var toggleBtn = parent.querySelector('.toggle-sensitive-btn');
-
-      if (!toggleBtn) {
-        toggleBtn = document.createElement('button');
-        toggleBtn.type = 'button';
-        toggleBtn.className = 'btn btn-outline-secondary toggle-sensitive-btn';
-        toggleBtn.setAttribute('data-field', fieldName);
-        toggleBtn.innerHTML = '<i class="bi bi-eye"></i>';
-        toggleBtn.title = '显示/隐藏';
-
-        if (parent.classList.contains('input-group')) {
-          parent.appendChild(toggleBtn);
-        } else {
-          var wrapper = document.createElement('div');
-          wrapper.className = 'input-group';
-          input.parentNode.insertBefore(wrapper, input);
-          wrapper.appendChild(input);
-          wrapper.appendChild(toggleBtn);
-        }
-      }
-
-      toggleBtn.addEventListener('click', function () {
-        var isPassword = input.type === 'password';
-        input.type = isPassword ? 'text' : 'password';
-        this.innerHTML = isPassword ? '<i class="bi bi-eye-slash"></i>' : '<i class="bi bi-eye"></i>';
-        this.title = isPassword ? '隐藏' : '显示';
-      });
-    });
+  function bindProxyVisibility() {
+    var input = document.getElementById('proxy');
+    var toggle = document.getElementById('proxy-visibility');
+    if (!input || !toggle) return;
+    function reveal(visible) {
+      input.type = visible ? 'text' : 'password';
+      toggle.setAttribute('aria-pressed', String(visible));
+      toggle.textContent = visible ? '隐藏' : '显示';
+    }
+    toggle.addEventListener('click', function () { reveal(input.type === 'password'); });
+    window.addEventListener('pagehide', function () { reveal(false); });
   }
 
   // ── 初始化 ──
@@ -594,6 +566,7 @@
 
     // 绑定事件
     bindEvents();
+    bindProxyVisibility();
 
     // Bind edits before starting the asynchronous refresh of the server-rendered form.
     refreshSettings(0);

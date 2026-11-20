@@ -13,7 +13,8 @@ from .path_utils import get_data_dir, get_backup_dir, get_download_root
 from .instance_lock import maintenance_lock
 from .database_schema import (
     CURRENT_SCHEMA_VERSION, BASE_SCHEMA_SQL, RESOURCE_TABLE_SQL, RESOURCE_INDEX_SQL,
-    QUEUE_INDEX_SQL, PUBLICATION_DDL, catalog_triggers, validate_schema, SchemaError,
+    PUBLICATION_DDL, QUEUED_COLUMN, QUEUE_INDEX_SQL, SUPERSEDED_COLUMN,
+    SchemaError, catalog_triggers, validate_schema,
 )
 
 # 资源库最大条目安全上限（防止全表扫描 OOM）
@@ -40,6 +41,9 @@ def _existing_schema() -> int | None:
         version = source.execute("PRAGMA user_version").fetchone()[0]
         if version > CURRENT_SCHEMA_VERSION:
             raise RuntimeError("数据库版本高于当前程序，已停止初始化，请使用匹配版本")
+        if (version == 0 and source.execute("PRAGMA schema_version").fetchone()[0] == 0
+                and source.execute("SELECT 1 FROM sqlite_schema LIMIT 1").fetchone() is None):
+            return None
         try:
             validate_schema(source, version)
         except (SchemaError, sqlite3.Error) as error:
@@ -104,50 +108,24 @@ def init_db():
 def _initialize_db():
     conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.executescript(BASE_SCHEMA_SQL)
-        conn.commit()
-
-        # ── Schema 版本迁移 ──
         _run_migrations(conn)
-        validate_schema(conn, CURRENT_SCHEMA_VERSION)
-
-        # 存量回填：为已完成任务中缺少 album_meta 的条目补全元数据
-        backfill_missing_meta()
     finally:
         conn.close()
 
 
 def _run_migrations(conn):
-    """增量 Schema 迁移"""
-    version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version < 1:
-        conn.execute("PRAGMA user_version = 1")
-        conn.commit()
-    if version < 2:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS album_detail_cache (
-                album_id TEXT PRIMARY KEY,
-                detail_json TEXT NOT NULL,
-                cover_cdn_url TEXT DEFAULT '',
-                cached_at TEXT NOT NULL
-            );
-        """)
-        conn.execute("PRAGMA user_version = 2")
-        conn.commit()
-    # superseded_at（mark_completed_jobs_superseded）：按列是否存在补，不依赖 user_version
-    if "superseded_at" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
-        conn.execute("ALTER TABLE jobs ADD COLUMN superseded_at TEXT")
-        conn.commit()
-    if version < 3:
-        _migrate_resource_catalog(conn)
-    if version < 4:
-        with conn:
-            conn.execute("BEGIN IMMEDIATE")
-            if "queued_at" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
-                conn.execute("ALTER TABLE jobs ADD COLUMN queued_at TEXT")
-            # Queue bookkeeping must not replace independent catalog metadata
-            # with disposable job history. DDL and backfill roll back together.
+    """原子更新结构与存量数据，校验成功后才写入新版本号。"""
+    with conn:
+        conn.executescript("BEGIN IMMEDIATE;\n" + BASE_SCHEMA_SQL)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < 4:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+            if version < 3:
+                if SUPERSEDED_COLUMN not in columns:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {SUPERSEDED_COLUMN} TEXT")
+                _migrate_resource_catalog(conn)
+            if QUEUED_COLUMN not in columns:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {QUEUED_COLUMN} TEXT")
             triggers = catalog_triggers()
             for name in triggers:
                 conn.execute(f'DROP TRIGGER "{name}"')
@@ -155,13 +133,13 @@ def _run_migrations(conn):
             conn.execute(QUEUE_INDEX_SQL)
             for statement in triggers.values():
                 conn.execute(statement)
-            conn.execute("PRAGMA user_version = 4")
-    if version < 5:
-        with conn:
-            conn.execute('BEGIN IMMEDIATE')
-            for ddl in PUBLICATION_DDL.values():
-                conn.execute(ddl)
-            conn.execute('PRAGMA user_version = 5')
+        if version < 5:
+            for statement in PUBLICATION_DDL.values():
+                conn.execute(statement)
+        validate_schema(conn, CURRENT_SCHEMA_VERSION)
+        backfill_missing_meta(conn=conn)
+        if version < CURRENT_SCHEMA_VERSION:
+            conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
 
 
 def _migrate_resource_catalog(conn):
@@ -175,24 +153,29 @@ def _migrate_resource_catalog(conn):
                "created_at", "updated_at", "completed_at", "superseded_at")
     names = ", ".join(columns)
     assignments = ", ".join(f"{name}=excluded.{name}" for name in columns if name != "job_id")
-    with conn:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute(RESOURCE_TABLE_SQL)
-        conn.execute(RESOURCE_INDEX_SQL)
-        conn.execute(
-            f"INSERT INTO resource_catalog (job_order, {names}) "
-            f"SELECT id, {names} FROM jobs WHERE status='completed' "
-            f"ON CONFLICT(job_id) DO UPDATE SET job_order=excluded.job_order, {assignments}")
-        for statement in catalog_triggers().values():
-            conn.execute(statement)
-        conn.execute("PRAGMA user_version = 3")
+    conn.execute(RESOURCE_TABLE_SQL)
+    conn.execute(RESOURCE_INDEX_SQL)
+    conn.execute(
+        f"INSERT INTO resource_catalog (job_order, {names}) "
+        f"SELECT id, {names} FROM jobs WHERE status='completed' "
+        f"ON CONFLICT(job_id) DO UPDATE SET job_order=excluded.job_order, {assignments}")
+    for statement in catalog_triggers().values():
+        conn.execute(statement)
 
 
-def resource_records(album_ids, conn=None) -> list[dict]:
+_LATEST_RESOURCE_JOIN = """
+    JOIN resource_catalog r ON r.rowid = (
+        SELECT c.rowid FROM resource_catalog c WHERE c.album_id = albums.album_id
+        ORDER BY c.created_at DESC, c.job_order DESC LIMIT 1
+    )
+"""
+
+
+def resource_records(album_ids, conn=None, *, latest_only: bool = False) -> list[dict]:
     """Successful resource evidence, newest first, even after task-history cleanup.
 
-    Superseded entries remain present so a failed replacement cannot revive an
-    older directory. File availability and path safety stay with their callers.
+    latest_only uses the first record per album, including a superseded record
+    if it is newest. File availability and path safety stay with the caller.
     """
     ids = list(dict.fromkeys(str(album_id) for album_id in album_ids))
     if not ids:
@@ -200,15 +183,29 @@ def resource_records(album_ids, conn=None) -> list[dict]:
     own = conn is None
     conn = conn or get_db()
     try:
+        source = f"""
+            FROM (SELECT value AS album_id FROM json_each(?)) AS albums {_LATEST_RESOURCE_JOIN}
+        """ if latest_only else """
+            FROM resource_catalog r WHERE r.album_id IN (SELECT value FROM json_each(?))
+        """
         rows = conn.execute(
-            "SELECT *, job_order AS id FROM resource_catalog "
-            "WHERE album_id IN (SELECT value FROM json_each(?)) "
-            "ORDER BY created_at DESC, job_order DESC", (json.dumps(ids),),
+            f"SELECT r.*, r.job_order AS id {source} ORDER BY r.created_at DESC, r.job_order DESC",
+            (json.dumps(ids),),
         ).fetchall()
         return [dict(row) for row in rows]
     finally:
         if own:
             conn.close()
+
+
+def resource_locations(conn) -> tuple[tuple, ...]:
+    """Paths and revision evidence for the current public resource of each album."""
+    rows = conn.execute(f"""
+        SELECT r.album_id, r.job_id, r.output_path, r.superseded_at, r.updated_at
+        FROM (SELECT DISTINCT album_id FROM resource_catalog) AS albums {_LATEST_RESOURCE_JOIN}
+        ORDER BY r.album_id
+    """)
+    return tuple(tuple(row) for row in rows)
 
 
 # ─── Jobs 操作 ───
@@ -246,13 +243,15 @@ def insert_job_guarded(conn, job_id: str, album_id: str, title: str, photo_ids: 
     'forbidden' 时必须从没完成过（整部下载“未下载”的收藏），'any' 不看。返回是否插入（不满足条件时什么都不写）。"""
     if completed not in _GUARD_COMPLETED:
         raise ValueError(f"completed 取值无效: {completed}")
+    from .task_commands import queue_tail_time
+
     now = datetime.now().isoformat()
-    params = [job_id, album_id, title, _json(list(photo_ids)), now, now, album_id]
+    params = [job_id, album_id, title, _json(list(photo_ids)), now, now, queue_tail_time(conn), album_id]
     if _GUARD_COMPLETED[completed]:
         params.append(album_id)
     cur = conn.execute(
-        "INSERT INTO jobs (job_id, album_id, title, selected_photo_ids, status, created_at, updated_at) "
-        "SELECT ?, ?, ?, ?, 'queued', ?, ? "
+        "INSERT INTO jobs (job_id, album_id, title, selected_photo_ids, status, created_at, updated_at, queued_at) "
+        "SELECT ?, ?, ?, ?, 'queued', ?, ?, ? "
         "WHERE NOT EXISTS (SELECT 1 FROM jobs a WHERE a.album_id = ? AND a.status IN ('queued', 'running', 'paused'))"
         + _GUARD_COMPLETED[completed],
         params,
@@ -447,6 +446,7 @@ def claim_next_queued_job(excluded_album_ids=()) -> dict | None:
         )
         if cur.rowcount == 0:
             return None  # 已被其他调度器抢走
+        update_wishlist_download_status(job["album_id"], "downloading", conn=conn)
         job["status"] = "running"
         return job
 
@@ -521,7 +521,7 @@ def delete_job(job_id: str):
         conn.close()
 
 
-def clear_jobs_by_status(status: str | list[str]) -> int:
+def clear_jobs_by_status(status: str | list[str], *, removed_work=None) -> int:
     """Delete matching records, then derive affected bookmark states from remaining jobs."""
     statuses = [status] if isinstance(status, str) else list(status)
     if not statuses:
@@ -534,10 +534,18 @@ def clear_jobs_by_status(status: str | list[str]) -> int:
             affected = conn.execute(
                 f"SELECT DISTINCT album_id FROM jobs WHERE status IN ({placeholders})", statuses,
             ).fetchall()
+            if removed_work is not None:
+                removed = conn.execute(
+                    f"""SELECT job_id, album_id FROM jobs WHERE status IN ({placeholders})
+                         AND status IN ('failed','canceled')""",
+                    statuses,
+                ).fetchall()
             deleted = conn.execute(
                 f"DELETE FROM jobs WHERE status IN ({placeholders})", statuses,
             ).rowcount
             _refresh_wishlist_after_job_delete(conn, [row["album_id"] for row in affected])
+        if removed_work is not None:
+            removed_work.update((row["job_id"], row["album_id"]) for row in removed)
         return deleted
     finally:
         conn.close()
@@ -604,15 +612,17 @@ def library_ids_after(cursor, limit=50):
         return [row[0] for row in rows]
 
 
-def add_wishlist(album_id: str, title: str = "", author: str = "", cover_url: str = "") -> bool:
-    """添加收藏，返回 True 表示新增，False 表示已存在"""
-    now = datetime.now().isoformat()
+def add_wishlist(album_id: str, title: str = "", author: str = "", cover_url: str = "", *,
+                 added_at: str | None = "") -> bool:
+    """添加收藏。省略 added_at 用当前时间，None 保留旧收藏的空时间。"""
+    if added_at == "":
+        added_at = datetime.now().isoformat()
     conn = get_db()
     try:
         cur = conn.execute(
             """INSERT OR IGNORE INTO wishlist (album_id, title, author, cover_url, added_at, download_status)
                VALUES (?, ?, ?, ?, ?, 'none')""",
-            (album_id, title, author, cover_url, now),
+            (album_id, title, author, cover_url, added_at),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -651,13 +661,14 @@ def get_wishlist(album_id: str) -> dict | None:
 # 收藏筛选将 none 再拆成 missing / none；返回条目的 status_group 仍与资源库一致。
 # 任务表是事实来源；某部漫画一条任务都没有时（任务被清理 / 旧数据），才退回看 wishlist.download_status。
 WISHLIST_STATUS_GROUPS = ("readable", "active", "failed", "missing", "none")
+_WISHLIST_NEWEST = "added_at IS NULL, added_at DESC, album_id DESC"
 WISHLIST_SORTS = {
-    "added_at": "added_at IS NULL, added_at DESC, id DESC",  # 最新添加（默认）
-    "added_asc": "added_at IS NULL, added_at ASC, id ASC",  # 最早添加
+    "added_at": _WISHLIST_NEWEST,  # 最新添加（默认）
+    "added_asc": "added_at IS NULL, added_at ASC, album_id ASC",  # 最早添加
     "title": "title = '', LOWER(title), id DESC",  # 没有标题的排最后
     "author": "author = '', LOWER(author), title = '', LOWER(title), id DESC",  # 没有作者的排最后
     "status": ("CASE filter_group WHEN 'readable' THEN 0 WHEN 'active' THEN 1 WHEN 'failed' THEN 2 "
-               "WHEN 'missing' THEN 3 ELSE 4 END, added_at IS NULL, added_at DESC, id DESC"),
+               f"WHEN 'missing' THEN 3 ELSE 4 END, {_WISHLIST_NEWEST}"),
 }
 _WISHLIST_ACTIVITY = {"running": "downloading", "paused": "paused", "queued": "queued"}
 _LEGACY_ACTIVE = ("queued", "downloading", "running", "paused")
@@ -752,18 +763,32 @@ def _files_missing_sql(legacy: str) -> str:
 
 
 # 标题/作者/封面为空（如批量导入的车号）时用 album_meta 缓存补上，搜索和排序都按补齐后的值
+_WISHLIST_DISPLAY_SQL = """
+    SELECT w.id, w.album_id,
+           COALESCE(NULLIF(TRIM(w.title), ''), NULLIF(TRIM(m.title), ''), '') AS title,
+           COALESCE(NULLIF(TRIM(w.author), ''), NULLIF(TRIM(m.author), ''), '') AS author,
+           COALESCE(NULLIF(w.cover_url, ''), NULLIF(m.cover_url, ''), '') AS cover_url,
+           w.added_at, w.download_status
+    FROM wishlist w
+    LEFT JOIN album_meta m ON m.album_id = w.album_id
+"""
+
+
+def _wishlist_keyword_filter(keyword):
+    if not keyword:
+        return "", []
+    like = f"%{_escape_like(keyword)}%"
+    return " AND (title LIKE ? ESCAPE ? OR author LIKE ? ESCAPE ? OR album_id LIKE ? ESCAPE ?)", [like, chr(92)] * 3
+
+
 _WISHLIST_ITEMS_CTE = f"""
     WITH readable_ids(album_id) AS (SELECT value FROM json_each(?)),
+    display AS ({_WISHLIST_DISPLAY_SQL}),
     facts AS (
-        SELECT w.id, w.album_id,
-               COALESCE(NULLIF(TRIM(w.title), ''), NULLIF(TRIM(m.title), ''), '') AS title,
-               COALESCE(NULLIF(TRIM(w.author), ''), NULLIF(TRIM(m.author), ''), '') AS author,
-               COALESCE(NULLIF(w.cover_url, ''), NULLIF(m.cover_url, ''), '') AS cover_url,
-               w.added_at,
+        SELECT w.id, w.album_id, w.title, w.author, w.cover_url, w.added_at,
                COALESCE(NULLIF(LOWER(TRIM(w.download_status)), ''), 'none') AS download_status,
                w.album_id IN (SELECT album_id FROM readable_ids) AS readable,{_job_facts_sql('w.album_id')}
-        FROM wishlist w
-        LEFT JOIN album_meta m ON m.album_id = w.album_id
+        FROM display w
     ),
     classified AS (
         SELECT facts.*, {_status_group_sql('download_status')} AS status_group,
@@ -811,13 +836,8 @@ def get_all_wishlist(
     if status not in WISHLIST_STATUS_GROUPS:
         status = None
 
-    params: list = [json.dumps(sorted({str(a) for a in (readable_ids or ())}))]
-    where = ""
-    kw = (keyword or "").strip()
-    if kw:
-        like = f"%{_escape_like(kw)}%"
-        where += " AND (title LIKE ? ESCAPE ? OR author LIKE ? ESCAPE ? OR album_id LIKE ? ESCAPE ?)"
-        params.extend([like, chr(92)] * 3)
+    where, keyword_params = _wishlist_keyword_filter((keyword or "").strip())
+    params = [json.dumps(sorted({str(a) for a in (readable_ids or ())})), *keyword_params]
 
     with library_snapshot(conn) as conn:
         counts = {group: 0 for group in WISHLIST_STATUS_GROUPS}
@@ -874,20 +894,33 @@ def favourite_rows(conn, album_ids, readable_ids) -> dict[str, dict]:
     return {row["album_id"]: dict(row) for row in rows}
 
 
-def get_completed_album_ids(wishlist_only: bool = False, *, conn=None) -> list[str]:
+def get_completed_album_ids(wishlist_only: bool = False, *, keyword: str = "",
+                            tag: str | None = None, author: str | None = None, conn=None) -> list[str]:
     """Indexed resources: candidates whose actual files are checked by local_availability."""
+    keyword = (keyword or "").strip()
+    params = []
     sql = "SELECT DISTINCT album_id FROM resource_catalog WHERE 1=1"
-    if wishlist_only:
+    if wishlist_only and keyword:
+        where, params = _wishlist_keyword_filter(keyword)
+        sql = f"""SELECT w.album_id FROM ({_WISHLIST_DISPLAY_SQL}) w
+                  WHERE EXISTS (SELECT 1 FROM resource_catalog r WHERE r.album_id = w.album_id){where}"""
+    elif wishlist_only:
         sql += " AND album_id IN (SELECT album_id FROM wishlist)"
+    elif keyword or tag or author:
+        cte_sql, params = _library_matches(tag=tag, keyword=keyword, author=author)
+        sql = f"""{cte_sql} SELECT m.album_id FROM _matched m
+                  WHERE EXISTS (SELECT 1 FROM resource_catalog r WHERE r.album_id = m.album_id)"""
     with library_snapshot(conn) as conn:
-        return [row[0] for row in conn.execute(sql + " ORDER BY album_id")]
+        return [row[0] for row in conn.execute(sql + " ORDER BY album_id", params)]
 
 
 def export_all_wishlist() -> list[dict]:
     """获取全部收藏条目（不分页），用于导出"""
     conn = get_db()
     try:
-        rows = conn.execute("SELECT * FROM wishlist ORDER BY added_at DESC").fetchall()
+        rows = conn.execute(
+            f"SELECT * FROM ({_WISHLIST_DISPLAY_SQL}) ORDER BY {_WISHLIST_NEWEST}"
+        ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -962,24 +995,28 @@ def get_wishlist_downloading_count() -> int:
 
 # ─── Search History ───
 
+_SEARCH_HISTORY_LIMIT = 200
+_SEARCH_HISTORY_LATEST = """
+    SELECT id, keyword, created_at,
+           ROW_NUMBER() OVER (PARTITION BY keyword ORDER BY created_at DESC, id DESC) AS keyword_rank
+    FROM search_history
+"""
+
+
 def add_search_history(keyword: str):
-    """添加一条搜索历史记录（最多保留 200 条，自动清理最旧的）"""
-    conn = get_db()
-    try:
-        conn.execute("BEGIN")
+    """刷新关键词的最近搜索时间，同时清理旧表重复行并保留最近 200 个词。"""
+    with transaction() as conn:
+        conn.execute("DELETE FROM search_history WHERE keyword=?", (keyword,))
         conn.execute(
             "INSERT INTO search_history (keyword, created_at) VALUES (?, ?)",
             (keyword, datetime.now().isoformat()),
         )
-        # 原子清理：单事务内完成插入和清理，防止并发写入超过 200 条
-        conn.execute("""
+        conn.execute(f"""
             DELETE FROM search_history WHERE id NOT IN (
-                SELECT id FROM search_history ORDER BY created_at DESC LIMIT 200
+                SELECT id FROM ({_SEARCH_HISTORY_LATEST}) WHERE keyword_rank=1
+                ORDER BY created_at DESC, id DESC LIMIT ?
             )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
+        """, (_SEARCH_HISTORY_LIMIT,))
 
 
 def get_search_history(limit: int = 20) -> list[dict]:
@@ -987,10 +1024,8 @@ def get_search_history(limit: int = 20) -> list[dict]:
     conn = get_db()
     try:
         rows = conn.execute(
-            """SELECT keyword, MAX(created_at) as created_at
-               FROM search_history
-               GROUP BY keyword
-               ORDER BY created_at DESC LIMIT ?""", (limit,)
+            f"""SELECT keyword, created_at FROM ({_SEARCH_HISTORY_LATEST}) WHERE keyword_rank=1
+                ORDER BY created_at DESC, id DESC LIMIT ?""", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -1028,7 +1063,7 @@ def _json(obj) -> str:
 
 
 def add_album_tag(album_id: str, tag: str, source: str = 'auto') -> bool:
-    """添加单个标签。返回 True 表示新增，False 表示已存在或无效。"""
+    """添加单个标签。新增或将自动标签提升为手工标签时返回 True。"""
     tag = tag.strip().lower()[:50]
     if not tag:
         return False
@@ -1036,7 +1071,9 @@ def add_album_tag(album_id: str, tag: str, source: str = 'auto') -> bool:
     conn = get_db()
     try:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO album_tags (album_id, tag, source, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO album_tags (album_id, tag, source, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(album_id, tag) DO UPDATE SET source=excluded.source "
+            "WHERE album_tags.source='auto' AND excluded.source='user'",
             (album_id, tag, source, now),
         )
         conn.commit()
@@ -1283,6 +1320,75 @@ def _library_status_group_param(status: str) -> str:
     return "none" if status in ("missing", "undownloaded") else status
 
 
+def _library_matches(tag, keyword, author, album_id=None):
+    """Common non-status filters for the paginated list and local file candidates."""
+    kw = (keyword or "").strip().lower()
+    wanted_tags = list(dict.fromkeys(t.strip().lower() for t in tag.split(",") if t.strip())) if tag else []
+    author = (author or "").strip()
+    tag_having_sql = ""
+    params = []
+    if kw:
+        params.extend([f"%{_escape_like(kw)}%", chr(92)] * 4)
+    if wanted_tags:
+        tag_placeholders = ",".join("?" for _ in wanted_tags)
+        tag_having_sql = f"""
+            AND (
+                SELECT COUNT(DISTINCT t.tag) FROM album_tags t
+                WHERE t.album_id = ai.album_id
+                AND t.tag IN ({tag_placeholders})
+            ) = ?
+        """
+        params.extend([*wanted_tags, len(wanted_tags)])
+    if author:
+        params.append(author)
+    if album_id:
+        params.append(album_id)
+    sql = f"""
+        WITH wishlist_ext AS (
+            SELECT
+                w.album_id,
+                COALESCE(NULLIF(TRIM(w.title), ''), NULLIF(TRIM(wm.title), ''), '') AS title,
+                COALESCE(NULLIF(TRIM(w.author), ''), NULLIF(TRIM(wm.author), ''), '') AS author,
+                COALESCE(NULLIF(w.cover_url, ''), NULLIF(wm.cover_url, ''), '') AS cover_url,
+                CASE WHEN jc.album_id IS NOT NULL THEN 'completed' ELSE w.download_status END AS download_status,
+                w.added_at,
+                COALESCE(NULLIF(wm.updated_at, ''), '') AS updated_at,
+                1 AS is_wishlisted
+            FROM wishlist w
+            LEFT JOIN (SELECT DISTINCT album_id FROM resource_catalog) jc ON w.album_id = jc.album_id
+            LEFT JOIN album_meta wm ON wm.album_id = w.album_id
+        ),
+        completed_ext AS (
+            SELECT
+                j.album_id,
+                COALESCE(NULLIF(m.title, ''), '') AS title,
+                COALESCE(NULLIF(m.author, ''), '') AS author,
+                COALESCE(NULLIF(m.cover_url, ''), '') AS cover_url,
+                'completed' AS download_status,
+                '' AS added_at,
+                COALESCE(NULLIF(m.updated_at, ''), '') AS updated_at,
+                0 AS is_wishlisted
+            FROM (SELECT DISTINCT album_id FROM resource_catalog) j
+            LEFT JOIN album_meta m ON j.album_id = m.album_id
+            WHERE j.album_id NOT IN (SELECT album_id FROM wishlist)
+        ),
+        all_items AS (
+            SELECT * FROM wishlist_ext
+            UNION ALL
+            SELECT * FROM completed_ext
+        ),
+        _matched AS (
+            SELECT ai.* FROM all_items ai
+            WHERE 1=1
+              {_make_kw_combined_sql(kw)}
+              {tag_having_sql}
+              {"AND LOWER(TRIM(ai.author)) = LOWER(?)" if author else ""}
+              {"AND ai.album_id = ?" if album_id else ""}
+        )
+    """
+    return sql, params
+
+
 def get_library(
     page: int = 1,
     page_size: int = 50,
@@ -1303,7 +1409,7 @@ def get_library(
     author 传入时只看该作者（去首尾空格、ASCII 不分大小写的精确匹配）；
     status 取 LIBRARY_STATUS_FILTERS 之一时只看这一档（其他值 = 不筛选），分组规则与收藏清单相同；
     readable_ids 是本地可读的 album_id 集合（由调用方按 core.local_availability 算好），决定“可离线阅读”，
-    按状态筛选时必须传入整个资源库的可读集合（能读的漫画不会落进 失败 / 排队中 这些档）。
+    按状态筛选时必须传入匹配其他筛选条件的可读集合（能读的漫画不会落进 失败 / 排队中 这些档）。
     sort="author" 按作者升序、同作者按标题，没有作者的排最后。
 
     返回 {items, total, page, page_size}
@@ -1314,29 +1420,10 @@ def get_library(
     page_size = max(1, min(200, page_size))
     offset = (page - 1) * page_size
 
-    kw = keyword.strip().lower() if keyword else ""
-    # 标签统一小写存储（add_album_tag 会 lower()），查询侧同样归一化，否则大写输入永远查不到
-    wanted_tags = list(dict.fromkeys(t.strip().lower() for t in tag.split(",") if t.strip())) if tag else []
-    tag_count = len(wanted_tags)
-    author = author.strip() if author else ""
     if status not in LIBRARY_STATUS_FILTERS:
         status = None
 
     with library_snapshot(conn) as conn:
-        # ── 构建 tag AND 子查询 ──
-        if wanted_tags:
-            tag_placeholders = ",".join("?" for _ in wanted_tags)
-            tag_having_sql = f"""
-                AND (
-                    SELECT COUNT(DISTINCT t.tag) FROM album_tags t
-                    WHERE t.album_id = ai.album_id
-                    AND t.tag IN ({tag_placeholders})
-                ) = ?
-            """
-        else:
-            tag_having_sql = ""
-            tag_placeholders = ""
-
         # ── 排序子句 ──
         sort_lower = sort.lower()
         if sort_lower == "title":
@@ -1355,56 +1442,10 @@ def get_library(
                 "ORDER BY COALESCE(NULLIF(_base.updated_at, ''), _base.added_at, '') DESC, _base.album_id ASC"
             )
 
-        # ── 完整查询 SQL（公共 CTE + _base；列表与计数共用） ──
-        cte_sql = f"""
-            WITH wishlist_ext AS (
-                SELECT
-                    w.album_id,
-                    -- 收藏里没填的标题/作者/封面（如批量导入的车号）用 album_meta 缓存补上，作者排序/筛选才有意义
-                    COALESCE(NULLIF(TRIM(w.title), ''), NULLIF(TRIM(wm.title), ''), '') AS title,
-                    COALESCE(NULLIF(TRIM(w.author), ''), NULLIF(TRIM(wm.author), ''), '') AS author,
-                    COALESCE(NULLIF(w.cover_url, ''), NULLIF(wm.cover_url, ''), '') AS cover_url,
-                    CASE WHEN jc.album_id IS NOT NULL THEN 'completed' ELSE w.download_status END AS download_status,
-                    w.added_at,
-                    '' AS updated_at,
-                    1 AS is_wishlisted
-                FROM wishlist w
-                LEFT JOIN (
-                    SELECT DISTINCT album_id FROM resource_catalog
-                ) jc ON w.album_id = jc.album_id
-                LEFT JOIN album_meta wm ON wm.album_id = w.album_id
-            ),
-            completed_ext AS (
-                SELECT
-                    j.album_id,
-                    COALESCE(NULLIF(m.title, ''), '') AS title,
-                    COALESCE(NULLIF(m.author, ''), '') AS author,
-                    COALESCE(NULLIF(m.cover_url, ''), '') AS cover_url,
-                    'completed' AS download_status,
-                    '' AS added_at,
-                    COALESCE(NULLIF(m.updated_at, ''), '') AS updated_at,
-                    0 AS is_wishlisted
-                FROM (SELECT DISTINCT album_id FROM resource_catalog) j
-                LEFT JOIN album_meta m ON j.album_id = m.album_id
-                WHERE j.album_id NOT IN (SELECT album_id FROM wishlist)
-            ),
-            all_items AS (
-                SELECT we.* FROM wishlist_ext we
-                UNION
-                SELECT ce.* FROM completed_ext ce
-            ),
-            _matched AS (
-                SELECT ai.* FROM all_items ai
-                WHERE 1=1
-                  {_make_kw_combined_sql(kw)}
-                  {tag_having_sql}
-                  {"AND LOWER(TRIM(ai.author)) = LOWER(?)" if author else ""}
-                  {"AND ai.album_id = ?" if album_id else ""}
-            ),
-        """
+        cte_sql, params = _library_matches(tag, keyword, author, album_id)
         if status:
             # 按状态筛选：先按其他条件缩小范围，再给每条算出与收藏相同的分组（_status_group_sql）
-            cte_sql += f"""
+            cte_sql += f""",
             _facts AS (
                 SELECT m.*,
                        m.album_id IN (SELECT value FROM json_each(?)) AS readable,
@@ -1423,36 +1464,15 @@ def get_library(
                 {_library_status_where(status)}
             )
             """
+            params.append(json.dumps(sorted({str(a) for a in (readable_ids or ())})))
+            params.append(_library_status_group_param(status))
         else:
-            cte_sql += """
+            cte_sql += """,
             _base AS (SELECT * FROM _matched)
             """
         query_sql = f"{cte_sql} SELECT _base.* FROM _base {order_clause} LIMIT ? OFFSET ?"
         # COUNT 查询复用同一组 CTE（不 ORDER / LIMIT）；任务事实子查询里本身带 ORDER BY，不能再按它切字符串
         count_sql = f"{cte_sql} SELECT COUNT(*) FROM _base"
-
-        # ── 参数列表（必须与 SQL 中 ? 顺序一致）──
-        params = []
-
-        if kw:
-            like_val = f"%{_escape_like(kw)}%"
-            esc = chr(92)  # 反斜杠作为 LIKE 转义字符
-            # 8 个 ?: title LIKE, ESCAPE, author LIKE, ESCAPE, album_id LIKE, ESCAPE, tag LIKE, ESCAPE
-            params.extend([like_val, esc, like_val, esc, like_val, esc, like_val, esc])
-
-        if wanted_tags:
-            params.extend(wanted_tags)
-            params.append(tag_count)
-
-        if author:
-            params.append(author)
-
-        if album_id:
-            params.append(album_id)
-
-        if status:
-            params.append(json.dumps(sorted({str(a) for a in (readable_ids or ())})))
-            params.append(_library_status_group_param(status))
 
         total_row = conn.execute(count_sql, params).fetchone()
         total = total_row[0] if total_row else 0
@@ -1647,9 +1667,10 @@ def delete_cached_album_detail(album_id: str) -> int:
 # ─── 存量回填 ───
 
 
-def backfill_missing_meta() -> int:
+def backfill_missing_meta(*, conn=None) -> int:
     """为资源目录中缺少 album_meta 的条目回填元数据，不依赖任务历史。"""
-    conn = get_db()
+    own = conn is None
+    conn = conn or get_db()
     try:
         # 先检查是否有缺失，没有则直接跳过
         missing_count = conn.execute("""
@@ -1668,14 +1689,15 @@ def backfill_missing_meta() -> int:
             WHERE m.album_id IS NULL
         """).fetchall()
         count = 0
-        for r in rows:
-            title = r["title"] or r["album_id"]
+        for album_id, title in rows:
             conn.execute(
                 "INSERT OR IGNORE INTO album_meta (album_id, title, author, cover_url, updated_at) VALUES (?, ?, '', '', ?)",
-                (r["album_id"], title, datetime.now().isoformat()),
+                (album_id, title or album_id, datetime.now().isoformat()),
             )
             count += 1
-        conn.commit()
+        if own:
+            conn.commit()
         return count
     finally:
-        conn.close()
+        if own:
+            conn.close()

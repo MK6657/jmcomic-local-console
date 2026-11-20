@@ -382,7 +382,9 @@
     parts.list.hidden = empty;
 
     var skipped = p.skipped || [];
-    parts.skippedTitle.textContent = '这些不会下载（' + skipped.length + ' 部）';
+    var skippedTotal = p.skipped_total === undefined ? skipped.length : p.skipped_total;
+    parts.skippedTitle.textContent = '这些不会下载（' + skippedTotal + ' 部）' +
+      (skippedTotal > skipped.length ? '，列出前 ' + skipped.length + ' 部' : '');
     parts.skipped.textContent = '';
     skipped.forEach(function (skip) {
       var id = String(skip.album_id);

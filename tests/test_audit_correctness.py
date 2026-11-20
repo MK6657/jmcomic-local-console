@@ -29,7 +29,7 @@ class Album(list):
     episode_list = [("101", 1, "Old"), ("102", 2, "New")]
 
 
-def test_timed_out_chapter_returns_a_stable_snapshot(client):
+def test_timed_out_chapter_returns_a_stable_snapshot(client, monkeypatch):
     from core import jm_service as service
     entered, release, exited = threading.Event(), threading.Event(), threading.Event()
     photo = Photo(pages=[])
@@ -41,9 +41,15 @@ def test_timed_out_chapter_returns_a_stable_snapshot(client):
             working.page_arr.extend(["1.webp", "2.webp"])
         finally:
             exited.set()
+
+    def timeout_after_worker_starts(*args, **kwargs):
+        assert entered.wait(2)
+        raise service.FuturesTimeout()
+
+    monkeypatch.setattr(service, "wait", timeout_after_worker_starts)
     failed = []
     try:
-        result = service.check_album_photos(SimpleNamespace(check_photo=check), album, timeout=0.03, failed=failed)
+        result = service.check_album_photos(SimpleNamespace(check_photo=check), album, failed=failed)
         assert entered.is_set() and result[0].page_arr == []
         assert failed == [result[0]]
     finally:

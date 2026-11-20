@@ -81,11 +81,11 @@
         var html = '';
 
         html += '<div class="monograph-front"><div class="monograph-plate"><div class="bound-book monograph-cover">';
-        html += '<img src="/api/cover/' + encodeURIComponent(album.album_id) + '/portrait" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title) + ' 封面" decoding="async">';
+        html += '<img src="/api/cover/' + encodeURIComponent(album.album_id) + '/portrait" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title) + ' 封面" decoding="async" fetchpriority="high">';
         html += '</div></div><div class="monograph-imprint">';
         html += '<p class="folio-kicker">MONOGRAPH <b>书目扉页</b></p><h1 class="card-title">' + window.escapeHtml(album.title) + '</h1>';
         html += '<p class="monograph-byline">' + window.escapeHtml(album.author || '作者未署名') + '</p>';
-        html += '<div class="monograph-meta"><span class="album-id-seal">JM ' + window.escapeHtml(album.album_id) + '</span>';
+        html += '<div class="monograph-meta"><span class="album-id-seal" title="点击复制车号">JM ' + window.escapeHtml(album.album_id) + '</span>';
         if (album.views != null && album.views !== '') html += '<span>浏览 ' + window.escapeHtml(String(album.views)) + '</span>';
         if (album.likes != null && album.likes !== '') html += '<span>点赞 ' + window.escapeHtml(String(album.likes)) + '</span>';
         html += '</div>';

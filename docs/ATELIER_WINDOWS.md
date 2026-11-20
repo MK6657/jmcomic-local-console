@@ -10,4 +10,4 @@
 
 如果旧版在传输中心提示「下载路径过长」，新版会在较深的 Windows 便携目录里缩短临时写入路径，保留原有书库、任务编号和目录记录。**用新版打开旧实例**：先从旧版控制台按 Enter 正常退出，完整解压新版到另一个目录，再在新版目录中运行 `./JMComic.exe launch --home "旧 JMComic.exe 所在文件夹的绝对路径"`。核对显示的目录并输入 `y`。在传输中心对失败记录点一次「重试」即可；同一本书已有排队或运行中的相同任务时，先看该任务的进度。不必删除旧任务或移动书库，也不要只把新 EXE 复制到旧 `_internal` 旁边。若根目录本身过深，连最短的成品路径也放不下，仍须按备份恢复说明改用较短位置。
 
-开发者：`frontend/` 内 `npm ci`、`npm run build` 重建 Vue 3 / TypeScript / Vite 传输统计；生成的本地文件在 `static/atelier-ui/`，对应许可证随文件分发。其余页面保留 Flask 模板和原有客户端 API，不需要 CDN。切换经典页与更换程序版本是不同操作；后者的备份、实例选择与退出步骤见 `README-Windows.md`。
+开发者：传输中心顶部统计（`static/atelier-ui/transfer.js`）已重构为零依赖原生 JS（2.2 KB），无需 Node 构建；旧版 Vue/Vite 源码归档于 `tools/legacy-vue-transfer/`。其余页面保留 Flask 模板和原有客户端 API，不需要 CDN。切换经典页与更换程序版本是不同操作；后者的备份、实例选择与退出步骤见 `README-Windows.md`。

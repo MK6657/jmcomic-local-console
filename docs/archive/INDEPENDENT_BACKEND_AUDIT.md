@@ -10,17 +10,17 @@
 
 | 项目 | 固定位置或版本 |
 |---|---|
-| 本机待审源码 | `C:\Users\ggy\.codex\worktrees\windows-backend-refactor\jmcomic-local-console` |
+| 本机待审源码 | `<worktree-dir>` |
 | 开发分支 | `codex/refactor-windows` |
 | 原审计产品代码提交 | `7ae6ccbaea7a91296df1e211e8920190235d0df7`，简称 `7ae6ccb` |
 | 当前待审代码 | 克隆后记录 `git rev-parse HEAD`；首批修复范围见 `e4a6057..HEAD` |
 | 重构前基线 | `c310e3f584d077771324a02b8a611bddb1de404c`，简称 `c310e3f` |
 | 完整审查差异 | `c310e3f..7ae6ccb` |
 | 最后一批收尾差异 | `c64a1bc..7ae6ccb`；只看这一段会遗漏前面的重构 |
-| 原日常项目，**不是待审工作区** | `D:\jmcomic-local-console`，原 `main` 分支 |
+| 原日常项目，**不是待审工作区** | `<daily-instance-dir>`，原 `main` 分支 |
 | GitHub公开分支 | `https://github.com/MK6657/jmcomic-local-console/tree/codex/refactor-windows` |
 
-本次通过公开仓库的独立分支交付，`main` 保持重构前版本。**必须显式克隆 `codex/refactor-windows`；只下载GitHub默认分支，或在本机原日常项目 `D:\jmcomic-local-console` 审查，会拿到旧代码。** 需要复现原审计结论时使用 `7ae6ccb`；复核修复时使用当前HEAD。本机绝对路径仅用于原开发机定位，异机请使用自己的克隆目录，详见 [GitHub克隆与测试指南](GITHUB_REVIEW.md)。
+本次通过公开仓库的独立分支交付，`main` 保持重构前版本。**必须显式克隆 `codex/refactor-windows`；只下载GitHub默认分支，或在本机原日常项目 `<daily-instance-dir>` 审查，会拿到旧代码。** 需要复现原审计结论时使用 `7ae6ccb`；复核修复时使用当前HEAD。本机绝对路径仅用于原开发机定位，异机请使用自己的克隆目录，详见 [GitHub克隆与测试指南](GITHUB_REVIEW.md)。
 
 ```bash
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
@@ -34,7 +34,7 @@ git diff --stat e4a6057..HEAD
 本机先核实位置和版本，不切分支、不重置工作区：
 
 ```powershell
-Set-Location 'C:\Users\ggy\.codex\worktrees\windows-backend-refactor\jmcomic-local-console'
+Set-Location '<worktree-dir>'
 git status --short
 git branch --show-current
 git show -s --format='%H %s' 7ae6ccb
@@ -116,7 +116,7 @@ Write-Output $auditExport
 
 ## 6. 数据保护与运行限制
 
-- 不在 `D:\jmcomic-local-console` 安装依赖、启动候选、迁移、备份恢复或结束进程；不要把日常虚拟环境当作审核环境修改。
+- 不在 `<daily-instance-dir>` 安装依赖、启动候选、迁移、备份恢复或结束进程；不要把日常虚拟环境当作审核环境修改。
 - 不执行 `git reset --hard`、清理工作区、切换现有工作树分支、自动提交修复、推送或部署。发现问题先报告。
 - 普通服务使用原Windows单实例锁。不要为并行运行候选而手动取消生产锁、改生产mutex名或按端口/Python进程名批量结束程序。
 - 不直接双击 `start.bat`、`JMComic.exe` 或运行 `app.py` 作为第一步；普通启动可能检查/安装依赖、读取实例路径或与现有服务互斥。先使用下面的隔离测试。
@@ -178,7 +178,7 @@ git diff --check
 本机发行目录：
 
 ```text
-C:\Users\ggy\.codex\worktrees\windows-backend-refactor\jmcomic-local-console\releases\windows-x64-2e06f6438219
+<worktree-dir>\releases\windows-x64-2e06f6438219
 ```
 
 ZIP：`JMComic-windows-x64.zip`，34,104,283字节。

@@ -36,7 +36,7 @@ from . import sdk_adapter
 from . import background_calls
 from .background_calls import BackgroundCallsBusy, BackgroundCallsStopped
 from . import metadata_budget
-from .upstream import classify_failure
+from .upstream import UpstreamFailure, classify_failure
 from .storage import staged_file
 from . import image_download
 from .transfer import download_budget, DownloadInterrupted
@@ -50,6 +50,7 @@ _global_client = None
 _option_lock = threading.RLock()
 _factory_drained = threading.Condition(_option_lock)
 _shared_builders = 0
+_independent_builders = 0
 # 独立 client 活跃计数（用于 session 泄漏监控）
 _active_independent_clients = 0
 _clients_lock = threading.Lock()
@@ -167,7 +168,7 @@ def get_client(shared=True):
     """Acquire a client. Every acquisition must be balanced by close_client()."""
     global _shared_builders
     if not shared:
-        return _acquire_client("independent")
+        return _acquire_independent("independent")
     with _factory_drained:
         background_calls.require_accepting()
         if _global_client is not None:
@@ -188,6 +189,17 @@ def option_generation() -> int:
     return _option_generation
 
 
+def _acquire_independent(kind, timeout=None):
+    global _independent_builders
+    with _option_lock:
+        _independent_builders += 1
+    try:
+        return _acquire_client(kind, timeout)
+    finally:
+        with _option_lock:
+            _independent_builders -= 1
+
+
 def new_image_client():
     """在线阅读取图用的 client：由 online_reader 的连接池长期持有、逐个请求独占复用，用完 close_client() 关闭。
 
@@ -195,7 +207,7 @@ def new_image_client():
     curl_cffi 的 Session 默认每个线程一个 curl 句柄，换一个线程用同一个 client 仍是新连接、新 TLS 握手；
     池里的 client 会被不同的请求线程轮流使用，所以改用 client 自己的句柄，连接随 client 复用。
     不计入 get_active_client_count()（池的大小有上限，不是泄漏）。"""
-    return _acquire_client("image")[0]
+    return _acquire_independent("image")[0]
 
 
 def new_check_client(timeout: int):
@@ -206,12 +218,20 @@ def new_check_client(timeout: int):
       - retry_times = 0：第一次出错就抛出，换哪个域名由检查自己决定（每个域名最多问一次）；
       - timeout 覆盖 curl 的总超时（调用方已限制在 20 秒以内）。
     计入 get_active_client_count()。"""
-    return _acquire_client("check", timeout)[0]
+    return _acquire_independent("check", timeout)[0]
 
 
 def get_active_client_count() -> int:
     with _clients_lock:
         return _active_independent_clients
+
+
+def get_in_flight_client_count() -> int:
+    """Count work that would be interrupted by a source-launcher restart."""
+    with _option_lock:
+        shared = getattr(_global_client, "_jm_users", 0)
+        retired = sum(getattr(client, "_jm_users", 0) for client in _retired_clients.values())
+        return _shared_builders + _independent_builders + shared + retired + get_active_client_count()
 
 
 def _dispose_client(client):
@@ -310,12 +330,23 @@ def _should_stop(job_id: str, tracker, stop_event=None) -> bool:
     return job["status"] != "running" or (stop_event is not None and stop_event.is_set())
 
 
+_IMAGE_FORMAT_EXTENSIONS = {"webp": ".webp", "png": ".png", "jpg": ".jpg"}
+
+
+def _page_extension(settings: dict | None = None, *, gif: bool = False) -> str:
+    """Resolve output page extension from settings; animated GIFs stay animated WebP."""
+    if gif:
+        return ".webp"
+    fmt = str((settings or {}).get("image_format", "webp")).strip().lower()
+    return _IMAGE_FORMAT_EXTENSIONS.get(fmt, ".webp")
+
+
 def _download_image_single_attempt(
     client, job_id, album_id, album, output_path,
     photo, idx, img, img_url, img_path, scramble_id,
     done_pages, total_pages, failed_pages, pending_images,
     tracker, photo_dir, pass_num, timeout, lock, refetch_gif=False, stop_event=None, node_attempts=None,
-    checkpoint=None,
+    checkpoint=None, settings=None,
 ):
     """下载单页的一趟：在同一超时预算内最多尝试 node_attempts 个节点。
     成功 → done_pages +1
@@ -325,13 +356,11 @@ def _download_image_single_attempt(
     """
     if stop_event is not None and stop_event.is_set():
         return
-    img_name = f"{idx + 1:05d}.webp"
-    img_path = photo_dir / img_name if not str(img_path).startswith(str(photo_dir)) else img_path
-    if not is_safe_path(img_path) or not is_safe_path(photo_dir):
+    gif = image_is_gif(img)
+    settings = get_settings() if settings is None else settings
+    if img_path.parent != photo_dir or not is_safe_path(img_path) or not is_safe_path(photo_dir):
         raise ValueError("图片输出路径越权")
 
-    gif = image_is_gif(img)
-    settings = get_settings()
     skip = settings.get("skip_existing", "true") == "true"
 
     def check_publish():
@@ -347,7 +376,11 @@ def _download_image_single_attempt(
         # invalid/bomb image must be replaced or recorded, never abort a chapter.
         reusable = pass_num == 1 and ((not getattr(checkpoint, 'isolated', False) and skip and not (gif and refetch_gif))
                                       or (checkpoint is not None and checkpoint.contains(img_path)))
-        if not (reusable and _valid_image(img_path)):
+        verified_digest = None
+        if reusable and _valid_image(img_path):
+            if getattr(checkpoint, 'isolated', False):
+                verified_digest = checkpoint.receipt_digest(img_path)
+        else:
             with staged_file(img_path) as staged:
                 if node_attempts is None:
                     node_attempts = 1 + int(settings.get("retry_times", 2))
@@ -368,16 +401,18 @@ def _download_image_single_attempt(
                         scramble_id=scramble_id, decode_image=True, **options,
                     )
                 def verify_page(path):
+                    nonlocal verified_digest
                     if not _valid_image(path):
                         return False
                     if getattr(checkpoint, 'isolated', False):
-                        checkpoint.remember_digest(img_path, checkpoint.digest(path))
+                        verified_digest = checkpoint.digest(path)
+                        checkpoint.remember_digest(img_path, verified_digest)
                     return True
                 staged.publish(verify_page, before_replace=check_publish)
         # 确认下载成功后计数
         with lock:
             if checkpoint is not None:
-                checkpoint.confirm(img_path)
+                checkpoint.confirm(img_path, verified_digest)
             done_pages[0] += 1
     except DownloadInterrupted:
         return
@@ -574,7 +609,7 @@ def search_albums(keyword: str, page: int = 1, page_size: int = 20, sort: str = 
 
 
 def check_album_photos(client, album, timeout: float = 15, failed: list | None = None,
-                       *, deadline=None, stop_event=None) -> list:
+                       *, deadline=None, stop_event=None, failures: list | None = None) -> list:
     """并行补全各章节的图片列表（page_arr），避免逐章串行 HTTP 请求。
 
     SDK只更新工作副本；超时返回的对象不会被晚到的线程修改。
@@ -599,6 +634,8 @@ def check_album_photos(client, album, timeout: float = 15, failed: list | None =
     stopped = background_calls.stop_event()
     check_pool = ThreadPoolExecutor(max_workers=min(len(pending), 4))
     fut_map, completed, next_index = {}, set(), 0
+    errors = {}
+    interrupted = None
     try:
         while next_index < len(pending) or fut_map:
             left = metadata_budget.remaining(deadline, stopped, stop_event)
@@ -624,16 +661,19 @@ def check_album_photos(client, album, timeout: float = 15, failed: list | None =
                 try:
                     fut.result()
                 except Exception as e:
+                    errors[index] = classify_failure(e).detached()
                     log.warning(f"获取 photo 详情失败 photo_id={working.photo_id} error={type(e).__name__}: {e}")
                 else:
                     if getattr(working, "page_arr", None) is not None:
                         photo_list[index] = working
                         completed.add(index)
                     else:
+                        errors[index] = UpstreamFailure("invalid_response", "上游未返回章节图片列表，请稍后重试")
                         log.warning(f"获取 photo 详情未返回图片列表 photo_id={working.photo_id}")
-    except (FuturesTimeout, BackgroundCallsStopped, metadata_budget.MetadataStopped):
+    except (FuturesTimeout, BackgroundCallsStopped, metadata_budget.MetadataStopped) as error:
+        interrupted = classify_failure(error).detached()
         unfinished = len(pending) - len(completed)
-        log.warning(f"check_photo 超时（{timeout}s），album_id={getattr(album, 'album_id', '?')}，"
+        log.warning(f"check_photo 中断 kind={interrupted.kind}，album_id={getattr(album, 'album_id', '?')}，"
                     f"已跳过 {unfinished} 个未完成章节")
     finally:
         check_pool.shutdown(wait=False, cancel_futures=True)
@@ -641,6 +681,8 @@ def check_album_photos(client, album, timeout: float = 15, failed: list | None =
         # Use the outcome observed before the deadline, not a second Future.done
         # check that could race a late completion and mislabel an empty result.
         failed.extend(photo_list[index] for index, _ in pending if index not in completed)
+    if failures is not None:
+        failures.extend(errors.get(index, interrupted) for index, _ in pending if index not in completed)
     return photo_list
 
 
@@ -823,7 +865,7 @@ def _reusable_album_dir(album_id: str) -> Path | None:
 def _download_chapter(
     job_id, album_id, album, album_dir, photo, total_pages,
     done_pages, pending_images, failed_pages, tracker, checkpoint, lock, pass_num, timeout,
-    stop_event=None, node_attempts=None,
+    stop_event=None, node_attempts=None, settings=None,
 ):
     """下载单个章节的所有图片（支持章节内多图并行，每图独立 client）"""
     if _should_stop(job_id, tracker, stop_event):
@@ -839,7 +881,7 @@ def _download_chapter(
                 None, job_id, album_id, album, photo, photo_dir,
                 index, image, total_pages, done_pages, pending_images,
                 failed_pages, tracker, checkpoint, lock, pass_num, timeout, refetch_gif,
-                stop_event, node_attempts,
+                stop_event, node_attempts, settings,
             )
         except Exception as error:
             log.warning(f"图片下载线程异常 job_id={job_id} page={index + 1} error={error}")
@@ -856,7 +898,7 @@ def _download_chapter_image(
     _, job_id, album_id, album, photo, photo_dir,
     i, img, total_pages, done_pages, pending_images,
     failed_pages, tracker, checkpoint, lock, pass_num, timeout, refetch_gif=False,
-    stop_event=None, node_attempts=None,
+    stop_event=None, node_attempts=None, settings=None,
 ):
     """下载单张图片（每个线程独立 client，避免 HTTP 非线程安全问题）"""
     # _should_stop 内部已持锁（db 查询），无需额外保护
@@ -865,17 +907,19 @@ def _download_chapter_image(
     img_client, _ = get_client(shared=False)
     try:
         img_url = img.download_url
-        img_name = f"{i + 1:05d}.webp"
+        gif = image_is_gif(img)
+        settings = get_settings() if settings is None else settings
+        img_name = f"{i + 1:05d}{_page_extension(settings, gif=gif)}"
         img_path = photo_dir / img_name
         # GIF 不加扰：不传 scramble_id（不切片）；_download_image_single_attempt 原样取回后存成动画 WebP
-        scramble_id = int(img.scramble_id) if img.scramble_id and not image_is_gif(img) else None
+        scramble_id = int(img.scramble_id) if img.scramble_id and not gif else None
         _download_image_single_attempt(
             img_client, job_id, album_id, album, "",
             photo, i, img, img_url, img_path, scramble_id,
             done_pages, total_pages, failed_pages,
             pending_images if pass_num == 1 else None,
             tracker, photo_dir, pass_num=pass_num, timeout=timeout, lock=lock, refetch_gif=refetch_gif,
-            stop_event=stop_event, node_attempts=node_attempts, checkpoint=checkpoint,
+            stop_event=stop_event, node_attempts=node_attempts, checkpoint=checkpoint, settings=settings,
         )
     finally:
         close_client(img_client)
@@ -914,7 +958,6 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
     try:
         if _should_stop(job_id, tracker, stop_event):
             return
-        db.update_wishlist_download_status(album_id, "downloading")
         tracker.push("progress", {
             "job_id": job_id, "status": "running",
             "done_pages": checkpoint.previous_done, "total_pages": checkpoint.previous_total,
@@ -932,10 +975,12 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
         total_pages = 0
         photos_to_download = []
         seen_photo_ids = set()
+        selected = set(map(str, photo_ids))
+        empty = []
         for photo in album:
             if _should_stop(job_id, tracker, stop_event):
                 return
-            if str(photo.photo_id) in photo_ids or not photo_ids:
+            if not selected or str(photo.photo_id) in selected:
                 if str(photo.photo_id) in seen_photo_ids:
                     continue
                 seen_photo_ids.add(str(photo.photo_id))
@@ -945,9 +990,20 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
                 if _should_stop(job_id, tracker, stop_event):
                     return
                 pages = len(photo) if hasattr(photo, "__len__") and photo.page_arr else 0
+                if not pages:
+                    empty.append(str(photo.photo_id))
+                    continue
                 total_pages += pages
                 photos_to_download.append(photo)
 
+        missing = selected - seen_photo_ids
+        if selected and (missing or empty):
+            problems = []
+            if missing:
+                problems.append("缺失：" + "、".join(sorted(missing)[:10]))
+            if empty:
+                problems.append("无图片：" + "、".join(empty[:10]))
+            raise ValueError(f"选中的章节不完整（{'；'.join(problems)}），请刷新章节列表后重试")
         if not photos_to_download or total_pages <= 0:
             raise ValueError("选中的章节不存在或没有可下载图片")
 
@@ -960,7 +1016,8 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
 
         dl_root = str(DOWNLOAD_ROOT)
         album_dir = None
-        organize_mode = get_settings().get("organize_mode", "none")
+        settings = get_settings()
+        organize_mode = settings.get("organize_mode", "none")
         existing = _reusable_album_dir(album_id)
         if existing is not None and (photo_ids or organize_mode == "by_author"):
             album_dir = existing
@@ -968,7 +1025,7 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
             album_dir = checkpoint.directory
         from .download_layout import album_output_dir
         album_dir = album_output_dir(dl_root, job_id, album.name, album_id, photos_to_download,
-                                     preferred=album_dir, pack=get_settings().get('auto_pack') == 'true')
+                                     preferred=album_dir, pack=settings.get('auto_pack') == 'true')
         os.makedirs(dl_root, exist_ok=True)
         if not is_safe_path(album_dir):
             raise ValueError("专辑输出路径越权")
@@ -980,7 +1037,8 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
             db.mark_completed_jobs_superseded(album_id, str(album_dir), job_id)
         workspace = Workspace(dl_root, job_id, album_id, album_dir, checkpoint)
         seeds = workspace.seed(photos_to_download, existing or album_dir,
-                               get_settings().get('skip_existing') == 'true', _valid_image, image_is_gif)
+                               settings.get('skip_existing') == 'true', _valid_image, image_is_gif,
+                               page_extension=lambda gif: _page_extension(settings, gif=gif))
         album_dir = workspace.work
         checkpoint.own(album_dir)
         for seed in seeds:
@@ -1004,7 +1062,6 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
         _lock = job_lock  # 每个任务独立锁，传递到下载函数
 
         # ── 首趟：章节级并行，每章独立线程 ──
-        settings = get_settings()
         node_attempts = 1 + int(settings.get("retry_times", 2))
         pending_images = [] if node_attempts > 1 else None
         photo_threads = int(settings.get("photo_threads", "3"))
@@ -1017,7 +1074,7 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
                     bind_request_id(_download_chapter),
                     job_id, album_id, album, album_dir, photo, total_pages,
                     done_pages, pending_images, failed_pages,
-                    tracker, checkpoint, _lock, 1, _FIRST_PASS_TIMEOUT, stop_event, node_attempts,
+                    tracker, checkpoint, _lock, 1, _FIRST_PASS_TIMEOUT, stop_event, node_attempts, settings,
                 )
                 futs.append(fut)
             # 等待所有章节完成，不阻塞 cancel（每个 chapter 线程内检查 _should_stop）
@@ -1046,7 +1103,7 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
                 _download_chapter_image(None, job_id, album_id, album, page["photo"], page["photo_dir"],
                                         page["idx"], page["img"], total_pages, done_pages, None, failed_pages,
                                         tracker, checkpoint, job_lock, 2, _RETRY_TIMEOUT,
-                                        stop_event=stop_event, node_attempts=node_attempts)
+                                        stop_event=stop_event, node_attempts=node_attempts, settings=settings)
 
             download_capacity.run_images(pending_images, retry_page, workers=1,
                                          should_stop=lambda: _should_stop(job_id, None, stop_event))
@@ -1070,7 +1127,7 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
             if begin_file_finalization is not None and not begin_file_finalization(job_id):
                 return
             manifest = workspace.seal(photos_to_download, check_file_control)
-            view, publication = workspace.project(manifest, album, get_settings(), check_file_control)
+            view, publication = workspace.project(manifest, album, settings, check_file_control)
             publication[2]['keep_location'] = existing is not None and workspace.target == existing
             output_path = str(view)
             written_dirs.append(view)
@@ -1080,6 +1137,12 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
         try:
             db.upsert_album_meta(album_id, title=album.name, author=album.author,
                                 cover_url=JmcomicText.get_album_cover_url(album_id))
+            resolved_title = _safe_str(album.name).strip()[:500]
+            if resolved_title and resolved_title != album_id:
+                current_job = db.get_job(job_id)
+                stored_title = (current_job.get("title") or "").strip() if current_job else ""
+                if not stored_title or stored_title == album_id:
+                    db.update_job(job_id, title=resolved_title)
         except Exception as e:
             log.warning(f"写入 album_meta 失败 album_id={album_id} error={e}")
 

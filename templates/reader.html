@@ -7,7 +7,7 @@
 <main class="continuous-reader" data-album-id="{{ album_id }}" data-source="{{ 'online' if online else 'local' }}" tabindex="-1">
     <header class="reader-toolbar">
         <div class="reader-heading">
-            <span class="folio-kicker">ATELIER　/　长卷画廊</span>
+            <span class="folio-kicker">ATELIER / 长卷阅读</span>
             <h1 id="reader-title">{{ title }}</h1>
             <span class="source-slip">{{ '在线展阅' if online else '本地典藏' }}</span>
             <p class="folio-note">{% if online %}在线阅读：页面实时从网络加载，不下载、不保存到资源库。{% endif %}轻触画页或按 M 显示阅读工具；← → 翻页，Esc 收起。</p>
@@ -56,8 +56,8 @@
     <p class="text-center text-muted my-3 d-none" id="reader-end">已到末页</p>
 </main>
 {% endblock %}
-{# 阅读页有自己的底部阅读工具，不放右下角快捷导航（会压在正在读的图片上） #}
-{% block quick_nav %}{% endblock %}
+{# 阅读页提供轻量可收起悬浮快捷钮（不与底部阅读工具冲突，也不渲染普通页 #quick-nav） #}
+{% block quick_nav %}{% include "partials/reader-fab.html" %}{% endblock %}
 {% block scripts_extra %}
 <script src="{{ asset_url('js/utils.js') }}"></script>
 <script src="{{ asset_url('js/reading-nav.js') }}"></script>

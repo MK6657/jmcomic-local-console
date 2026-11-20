@@ -68,4 +68,4 @@ def test_polling_does_not_override_a_reconnect_backoff():
 
 @pytest.mark.skipif(NODE is None, reason="Node required")
 def test_home_canceled_event_is_terminal_across_visibility_and_page_restore():
-    subprocess.run([NODE, str(ROOT / "tests/home_sse.cjs")], check=True, timeout=15)
+    subprocess.run([NODE, str(ROOT / "tests/js/home_sse.cjs")], check=True, timeout=15)

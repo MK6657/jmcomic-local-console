@@ -12,6 +12,7 @@
   9. JSON null → 400
 """
 import json
+from pathlib import Path
 import sys
 import time
 import requests
@@ -496,7 +497,7 @@ report = {
     "errors": errors,
     "links": {k: "pass" for k in links},
 }
-report_path = "D:/Hermes/禁漫下载搜索插件/tests/test_key_e2e_report.json"
+report_path = Path(__file__).resolve().parent / "test_key_e2e_report.json"
 with open(report_path, "w", encoding="utf-8") as f:
     json.dump(report, f, ensure_ascii=False, indent=2)
 print(f"\n  📄 报告已保存: {report_path}")

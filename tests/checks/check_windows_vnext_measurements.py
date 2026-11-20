@@ -1,6 +1,6 @@
 """Opt-in Windows probes, one fresh process and disposable instance per invocation.
 
-See docs/WINDOWS_VNEXT_MEASUREMENTS.md. No service, upstream, timing assertions or real library.
+See docs/archive/WINDOWS_VNEXT_MEASUREMENTS.md. No service, upstream, timing assertions or real library.
 """
 import argparse
 from collections import Counter

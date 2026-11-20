@@ -6,23 +6,36 @@ on:
     branches: [codex/refactor-windows, codex/windows-vnext, codex/atelier-windows]
     tags: ['windows-v*']
     paths:
-      - 'frontend/**'
+      - 'app.py'
+      - 'desktop.py'
+      - 'launcher.py'
+      - 'launcher.pyw'
+      - 'jmcomic_cli.py'
+      - 'start.bat'
+      - 'core/**'
+      - 'routes/**'
       - 'templates/**'
       - 'static/**'
-      - 'desktop.py'
-      - 'core/atelier_demo.py'
       - 'tools/Preview-Atelier.cmd'
       - '.github/workflows/windows-portable.yml'
       - 'build.spec'
       - 'tools/*.py'
       - 'tools/licenses/**'
+      - 'LICENSE'
       - 'THIRD_PARTY_NOTICES.md'
       - 'tools/windows-portable.manifest'
       - 'requirements*.txt'
-      - 'core/release_check.py'
-      - 'core/release_lifecycle.py'
-      - 'tests/check_windows_release.py'
-      - 'tests/check_vnext_portable.py'
+      - 'pytest.ini'
+      - 'tests/**'
+      - 'docs/WINDOWS_RELEASE.md'
+      - 'docs/DATA_MAINTENANCE.md'
+      - 'docs/ATELIER_WINDOWS.md'
+      - 'docs/BACKEND_REVIEW.md'
+      - 'docs/AUDIT_FIXES.md'
+      - 'docs/WINDOWS_VNEXT_REVIEW.md'
+      - 'docs/archive/BACKEND_REVIEW.md'
+      - 'docs/archive/AUDIT_FIXES.md'
+      - 'docs/archive/WINDOWS_VNEXT_REVIEW.md'
 
 permissions:
   contents: read
@@ -59,15 +72,15 @@ jobs:
         run: python -m pip install -r requirements-build.txt -r requirements-dev.txt
       - run: python -m pip check
       - run: python -m pytest -q -rs
-      - run: python tests/check_download_queue.py --two-stalls
-      - run: python tests/check_download_queue.py --pause
-      - run: python tests/check_download_queue.py --quick-resume
+      - run: python tests/checks/check_download_queue.py --two-stalls
+      - run: python tests/checks/check_download_queue.py --pause
+      - run: python tests/checks/check_download_queue.py --quick-resume
       - name: Package and run EXE self-check and restart checks
         run: python tools/build_windows.py --output releases/ci-windows-x64
       - name: Verify extracted ZIP, busy launcher and v2 backup/restore
-        run: python tests/check_windows_release.py releases/ci-windows-x64 --check-launcher --check-restore --check-vnext
+        run: python tests/checks/check_windows_release.py releases/ci-windows-x64 --check-launcher --check-restore --check-vnext
       - name: Verify Atelier EXE pages, exports, theme persistence and classic UI
-        run: python tests/check_atelier_release.py releases/ci-windows-x64/JMComic/JMComic.exe
+        run: python tests/checks/check_atelier_release.py releases/ci-windows-x64/JMComic/JMComic.exe
       - uses: actions/upload-artifact@v4
         with:
           name: JMComic-windows-x64

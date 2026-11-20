@@ -79,7 +79,8 @@ def _enqueue(conn, album_id: str, title: str, photo_ids: list[str], output_path=
     conn.execute(
         "INSERT INTO jobs (job_id, album_id, title, selected_photo_ids, status, "
         "output_path, created_at, updated_at, queued_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
-        (job_id, album_id, title, json.dumps(photo_ids, ensure_ascii=False), output_path, now, now, now),
+        (job_id, album_id, title, json.dumps(photo_ids, ensure_ascii=False), output_path, now, now,
+         queue_tail_time(conn)),
     )
     _sync_wishlist(conn, album_id)
     return EnqueueResult(job_id, True)

@@ -96,10 +96,11 @@ def test_source_setup_checks_instance_before_pip_and_stamps_only_success(tmp_pat
             raise subprocess.CalledProcessError(1, command)
     monkeypatch.setattr(launcher, "stop_outdated_server", stop)
     monkeypatch.setattr(launcher, "acquire_instance_lock", lock)
+    monkeypatch.setattr(launcher, "_source_python_startable", lambda path: path == executable)
     monkeypatch.setattr(launcher.subprocess, "run", run)
     monkeypatch.setattr(launcher, "launch_flask", lambda: events.append("launch") or Mock(pid=888))
     monkeypatch.setattr(launcher, "wait_until_ready", lambda proc: 5000)
-    monkeypatch.setattr(launcher.webbrowser, "open", lambda *args: events.append("open"))
+    monkeypatch.setattr(launcher.webbrowser, "open", lambda *args: events.append("open") or True)
     if scenario.startswith("failed-"):
         with pytest.raises(subprocess.CalledProcessError):
             launcher.main(["--source-setup"], quiet=True)

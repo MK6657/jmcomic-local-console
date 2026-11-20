@@ -19,8 +19,7 @@
   var editVersion = 0;
   var fieldEdits = Object.create(null);
   var loadVersion = 0;
-  var saving = false;
-  var importing = false;
+  var writeOperation = null;
   var baseline = null;
   var pendingLoad = null;
   var loadEditsAfter = 0;
@@ -30,6 +29,21 @@
     els.form = document.getElementById(CONFIG.formId);
     els.saveBtn = document.getElementById(CONFIG.saveBtnId);
     els.resetBtn = document.getElementById(CONFIG.resetBtnId);
+    els.importBtn = document.getElementById('import-settings-btn');
+    els.resetAppearanceBtn = document.getElementById('pref-reset-appearance-btn');
+    els.appearanceControls = window.atelierAppearance
+      ? document.querySelectorAll('[data-pref-theme], [data-pref-fx], #ui-fx-enabled-toggle, [data-set-theme], #shell-fx-toggle')
+      : [];
+  }
+
+  function setWriteOperation(operation) {
+    writeOperation = operation;
+    [els.saveBtn, els.resetBtn, els.importBtn, els.resetAppearanceBtn].forEach(function (button) {
+      if (button) button.disabled = Boolean(operation);
+    });
+    els.appearanceControls.forEach(function (control) {
+      control.disabled = Boolean(operation && operation !== 'save');
+    });
   }
 
   // ── API 调用（统一走 apiFetch，自带 AbortController/超时/pagehide 清理） ──
@@ -57,9 +71,15 @@
   function syncDeleteOriginals() {
     var autoPack = document.getElementById('auto_pack');
     var deleteOriginals = document.getElementById('delete_originals');
-    if (!autoPack || !deleteOriginals) return;
-    deleteOriginals.disabled = !autoPack.checked;
-    if (!autoPack.checked) deleteOriginals.checked = false;
+    var packFormat = document.getElementById('pack_format');
+    var packPanel = document.getElementById('pack-options-panel');
+    if (!autoPack) return;
+    if (deleteOriginals) {
+      deleteOriginals.disabled = !autoPack.checked;
+      if (!autoPack.checked) deleteOriginals.checked = false;
+    }
+    if (packFormat) packFormat.disabled = !autoPack.checked;
+    if (packPanel && packPanel.classList) packPanel.classList.toggle('is-inactive', !autoPack.checked);
   }
 
   function settingValue(input, value) {
@@ -229,21 +249,16 @@
   }
 
   async function handleImport(file) {
-    if (!file || importing || saving) return;
-    importing = true;
+    if (!file || writeOperation) return;
+    setWriteOperation('import');
     var importedVersion = editVersion;
-    var importedThemeVersion = themeVersion;
-    var formData = new FormData();
-    formData.append('file', file);
-
-    // 导入按钮加载状态
-    var importBtn = document.getElementById('import-settings-btn');
-    if (importBtn) {
-      importBtn.disabled = true;
-      importBtn.textContent = '正在导入…';
-    }
+    if (els.importBtn) els.importBtn.textContent = '正在导入…';
 
     try {
+      if (window.atelierAppearance) await window.atelierAppearance.whenSaved();
+      var importedThemeVersion = themeVersion;
+      var formData = new FormData();
+      formData.append('file', file);
       var data = await window.apiFetch('/api/settings/import', {
         method: 'POST',
         body: formData,
@@ -259,8 +274,12 @@
         }
         // 刷新页面显示最新设置
         var refreshed = await refreshSettings(importedVersion);
-        if (refreshed && themeVersion === importedThemeVersion && ['paper', 'sage', 'linen', 'night'].includes(refreshed.ui_theme)) {
-          document.dispatchEvent(new CustomEvent('atelier-theme', { detail: { theme: refreshed.ui_theme } }));
+        if (refreshed && themeVersion === importedThemeVersion) {
+          if (window.atelierAppearance && window.atelierAppearance.syncFromSettings) {
+            window.atelierAppearance.syncFromSettings(refreshed);
+          } else if (refreshed.ui_theme) {
+            document.dispatchEvent(new CustomEvent('atelier-theme', { detail: { theme: refreshed.ui_theme } }));
+          }
         }
       } else {
         showToast('导入失败: ' + (data.message || '未知错误'), 'danger');
@@ -269,32 +288,40 @@
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默（finally 仍会恢复按钮）
       showToast('导入失败: ' + err.message, 'danger');
     } finally {
-      importing = false;
-      if (importBtn) {
-        importBtn.disabled = false;
-        importBtn.innerHTML = '<i class="bi bi-upload"></i> 导入设置';
-      }
+      if (els.importBtn) els.importBtn.innerHTML = '<i class="bi bi-upload"></i> 导入设置';
+      setWriteOperation(null);
     }
   }
 
-  // ── 恢复默认（暂未开放 UI 按钮，保留函数留待后续） ──
+  // ── 恢复全部默认配置 ──
 
   async function handleReset() {
-    if (!confirm('确定要恢复所有设置为默认值吗？')) return;
+    if (writeOperation || !confirm('确定要将全部设置（含主题与动效）恢复为默认值吗？')) return;
 
+    setWriteOperation('reset');
     var resetVersion = editVersion;
     try {
-      await window.apiFetch('/api/settings', {
+      if (window.atelierAppearance) await window.atelierAppearance.whenSaved();
+      var result = await window.apiFetch('/api/settings/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ _reset: true }),
+        body: JSON.stringify({ scope: 'all' }),
         timeoutMs: 15000,
       });
-      showToast('已恢复默认设置', 'info');
+      if (!result || result.status !== 'ok' || !result.settings ||
+          typeof result.settings !== 'object' || Array.isArray(result.settings)) {
+        throw new Error((result && result.message) || '服务器没有确认设置已还原');
+      }
+      if (window.atelierAppearance) window.atelierAppearance.syncFromSettings(result.settings);
+      var warnings = Array.isArray(result.warnings) ? result.warnings : [];
+      if (warnings.length) showToast('已还原全部默认配置；' + warnings.join('；'), 'warning');
+      else showToast('已还原全部默认配置', 'success');
       await refreshSettings(resetVersion);
     } catch (err) {
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默
       showToast('恢复默认失败: ' + err.message, 'danger');
+    } finally {
+      setWriteOperation(null);
     }
   }
 
@@ -303,11 +330,10 @@
   async function handleSave(e) {
     if (e) e.preventDefault();
 
-    if (!els.form || saving || importing) return;
-    saving = true;
+    if (!els.form || writeOperation) return;
+    setWriteOperation('save');
     // 禁用提交按钮 + 加载状态
     if (els.saveBtn) {
-      els.saveBtn.disabled = true;
       els.saveBtn.textContent = '正在保存…';
     }
 
@@ -358,11 +384,8 @@
       // draft so a transient failure can be retried without re-entering it.
       showToast('保存未确认: ' + err.message + '，当前修改已保留，请重试', 'danger');
     } finally {
-      saving = false;
-      if (els.saveBtn) {
-        els.saveBtn.disabled = false;
-        els.saveBtn.innerHTML = '<i class="bi bi-floppy me-1"></i> 保存设置';
-      }
+      if (els.saveBtn) els.saveBtn.innerHTML = '<i class="bi bi-floppy me-1"></i> 保存设置';
+      setWriteOperation(null);
     }
   }
 
@@ -474,10 +497,10 @@
     }
 
     // 导入按钮 → 触发隐藏的 file input
-    var importBtn = document.getElementById('import-settings-btn');
     var importFile = document.getElementById('import-settings-file');
-    if (importBtn && importFile) {
-      importBtn.addEventListener('click', function () {
+    if (els.importBtn && importFile) {
+      els.importBtn.addEventListener('click', function () {
+        if (writeOperation) return;
         importFile.click();
       });
       importFile.addEventListener('change', function () {
@@ -557,30 +580,101 @@
     var group = document.getElementById('pref-palettes');
     if (!group) return;
     var cards = group.querySelectorAll('[data-pref-theme]');
-    function markSelected(theme) {
+    var fxGrid = document.getElementById('pref-fx-presets');
+    var fxCards = fxGrid ? fxGrid.querySelectorAll('[data-pref-fx]') : [];
+    var fxToggle = document.getElementById('ui-fx-enabled-toggle');
+    var fxCombo = document.getElementById('pref-fx-combo');
+
+    var themeLabels = Object.create(null);
+    cards.forEach(function (card) {
+      themeLabels[card.dataset.prefTheme] = card.dataset.themeLabel || card.dataset.prefTheme;
+    });
+    var fxLabels = { calm: '清新柔动', pixel: '像素街机', cyber: '科技终端', anime: '二次元樱风', none: '已关闭' };
+    fxCards.forEach(function (card) {
+      if (card.dataset.prefFx && card.dataset.fxLabel) fxLabels[card.dataset.prefFx] = card.dataset.fxLabel;
+    });
+
+    function syncAppearanceUI() {
+      var ds = document.documentElement.dataset;
+      var theme = ds.theme || 'sage';
+      var fxEnabled = ds.fxEnabled !== 'false';
+      var fxPreset = ds.fxPreset || 'auto';
+      var activeFx = ds.fx || 'none';
       cards.forEach(function (card) {
         card.setAttribute('aria-pressed', String(card.dataset.prefTheme === theme));
       });
+      fxCards.forEach(function (card) {
+        card.setAttribute('aria-pressed', String(card.dataset.prefFx === fxPreset));
+      });
+      if (fxToggle) fxToggle.checked = fxEnabled;
+      if (fxGrid) fxGrid.classList.toggle('is-fx-off', !fxEnabled);
+      if (fxCombo) {
+        var tName = themeLabels[theme] || theme;
+        var fName = !fxEnabled
+          ? '特效已关闭，选择预设可开启'
+          : (fxPreset === 'auto' ? '自动 · ' + (fxLabels[activeFx] || activeFx) : (fxLabels[fxPreset] || fxPreset));
+        fxCombo.textContent = '当前搭配：' + tName + ' × ' + fName;
+      }
     }
+
     cards.forEach(function (card) {
       card.addEventListener('click', function () {
-        var stone = document.querySelector('.mineral-dock [data-set-theme="' + card.dataset.prefTheme + '"]');
-        if (stone) stone.click();
+        if (window.atelierAppearance) {
+          window.atelierAppearance.setTheme(card.dataset.prefTheme);
+        } else {
+          var stone = document.querySelector('.mineral-dock [data-set-theme="' + card.dataset.prefTheme + '"]');
+          if (stone) stone.click();
+        }
+        syncAppearanceUI();
       });
     });
+
+    fxCards.forEach(function (card) {
+      card.addEventListener('click', function () {
+        if (window.atelierAppearance) {
+          if (document.documentElement.dataset.fxEnabled === 'false') {
+            window.atelierAppearance.setFxEnabled(true);
+          }
+          window.atelierAppearance.setFxPreset(card.dataset.prefFx);
+        }
+        syncAppearanceUI();
+      });
+    });
+
+    if (fxToggle) {
+      fxToggle.addEventListener('change', function () {
+        if (window.atelierAppearance) {
+          window.atelierAppearance.setFxEnabled(fxToggle.checked);
+        }
+        syncAppearanceUI();
+      });
+    }
+
+    if (els.resetAppearanceBtn) {
+      els.resetAppearanceBtn.addEventListener('click', async function () {
+        if (!window.atelierAppearance || writeOperation) return;
+        setWriteOperation('appearance-reset');
+        try {
+          await window.atelierAppearance.resetAppearance();
+          syncAppearanceUI();
+        } finally {
+          setWriteOperation(null);
+        }
+      });
+    }
+
     document.querySelectorAll('.mineral-dock [data-set-theme]').forEach(function (stone) {
       stone.addEventListener('click', function () {
         themeVersion++;
-        markSelected(document.documentElement.dataset.theme);
+        syncAppearanceUI();
       });
     });
-    document.addEventListener('atelier-theme', function (event) {
-      if (event.detail && ['paper', 'sage', 'linen', 'night'].includes(event.detail.theme)) {
-        themeVersion++;
-        markSelected(event.detail.theme);
-      }
+    document.addEventListener('atelier-theme', function () {
+      themeVersion++;
+      syncAppearanceUI();
     });
-    markSelected(document.documentElement.dataset.theme);
+    document.addEventListener('atelier-appearance', syncAppearanceUI);
+    syncAppearanceUI();
   }
 
   // ── 初始化 ──

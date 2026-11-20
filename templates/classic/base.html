@@ -155,7 +155,7 @@ function escapeHtml(str) {
  * @param {string} message - 显示内容
  * @param {string} type    - 'success' | 'danger' | 'warning' | 'info'
  */
-window.showToast = function (message, type) {
+window.showToast = function (message, type, action) {
   type = type || 'success';
   var bgClass, icon;
   switch (type) {
@@ -186,22 +186,43 @@ window.showToast = function (message, type) {
   toastEl.setAttribute('aria-live', 'assertive');
   toastEl.setAttribute('aria-atomic', 'true');
 
-  toastEl.innerHTML = '<div class="d-flex">'
-    + '<div class="toast-body"><i class="bi ' + icon + ' me-2"></i>' + escapeHtml(message) + '</div>'
-    + '<button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="关闭"></button>'
-    + '</div>';
+  var row = document.createElement('div');
+  row.className = 'd-flex align-items-center';
+  var body = document.createElement('div');
+  body.className = 'toast-body';
+  body.innerHTML = '<i class="bi ' + icon + ' me-2"></i>' + escapeHtml(message);
+  row.appendChild(body);
+  if (action && action.label && typeof action.onClick === 'function') {
+    var actionBtn = document.createElement('button');
+    actionBtn.type = 'button';
+    actionBtn.className = 'btn btn-sm me-1 flex-shrink-0';
+    actionBtn.style.cssText = 'color:inherit;border:1px solid currentColor;background:transparent;padding:2px 9px;border-radius:999px;font-size:12px;line-height:1.4;';
+    actionBtn.textContent = String(action.label);
+    actionBtn.addEventListener('click', function () {
+      action.onClick();
+    });
+    row.appendChild(actionBtn);
+  }
+  var closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'btn-close btn-close-white me-2 m-auto';
+  closeBtn.setAttribute('data-bs-dismiss', 'toast');
+  closeBtn.setAttribute('aria-label', '关闭');
+  row.appendChild(closeBtn);
+  toastEl.appendChild(row);
 
   container.appendChild(toastEl);
 
+  var delay = action && action.label ? 7000 : 5000;
   if (typeof bootstrap !== 'undefined' && bootstrap.Toast) {
-    var bsToast = new bootstrap.Toast(toastEl, { autohide: true, delay: 5000 });
+    var bsToast = new bootstrap.Toast(toastEl, { autohide: true, delay: delay });
     bsToast.show();
   } else {
     toastEl.classList.add('show');
     setTimeout(function () {
       toastEl.classList.remove('show');
       setTimeout(function () { toastEl.remove(); }, 300);
-    }, 5000);
+    }, delay);
   }
 
   toastEl.addEventListener('hidden.bs.toast', function () {

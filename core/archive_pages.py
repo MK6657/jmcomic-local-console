@@ -20,7 +20,7 @@ ComicInfo.xml 等其他文件不算页，__MACOSX/ 和 “._” 开头的 macOS 
   ok       至少有一页阅读器能显示的图片
   empty    能打开，但没有一页阅读器能显示的图片
   corrupt  打不开（目录损坏、不是 ZIP、条目多到不合理），或者第一页读出来校验不对
-条目目录按压缩包的（大小, 修改时间）记住（最近用过的 _CACHE_MAX 个），压缩包一变就重新读；另记每个压缩包的状态
+条目目录按压缩包的文件身份、大小和时间记住（最近用过的 _CACHE_MAX 个），压缩包一变就重新读；另记每个压缩包的状态
 （轻量，_STATUS_MAX 个），“本地可读”判断整个资源库时不必重新打开没变的压缩包。读页时逐页校验 CRC 与大小，
 压缩包在建目录之后变了就报错（ArchiveError），不会读到别的内容。读不出来的任何错误都算“损坏”，不会变成 500；
 打开文件本身出错（被占用、没有权限）只是暂时的（transient）：不记住，也不据此做不可逆的决定（取代旧任务、覆盖旧包）。
@@ -30,6 +30,7 @@ skipped 是被跳过的图片条目数（不支持的压缩方式、加密、太
 一页不会出现两次——自动打包后没删原图时两边相同，只显示散图；重新下载到一半、或只下载了新章节时，
 压缩包里其余的页仍然看得到。
 """
+import hashlib
 import os
 import posixpath
 import stat
@@ -44,9 +45,11 @@ from pathlib import Path, PurePosixPath
 from .file_tree import _REPARSE_POINT, natural_key
 from .validation import EXPORT_IMAGE_EXTENSIONS, is_allowed_image
 from .storage import is_temporary_path
+from .zip_preflight import BoundedZipFile
 
 ARCHIVE_SUFFIXES = (".cbz", ".zip")
 MAX_ENTRIES = 200000                       # 条目数上限（很长的连载几百话 × 几十页也远小于此；自动打包不会超过）
+MAX_DIRECTORY_BYTES = 64 * 1024 * 1024
 MAX_PAGE_BYTES = 64 * 1024 * 1024          # 一页解压后最大
 MAX_TOTAL_BYTES = 256 * 1024 ** 3          # 整个压缩包里的图片解压后合计最大（自动打包不会超过）
 MAX_NAME = 1024
@@ -65,6 +68,11 @@ class ArchiveError(Exception):
 
 class ArchiveBusy(ArchiveError):
     """压缩包暂时打不开（被别的程序占用、没有权限、内存不足）：不是损坏，稍后再试"""
+
+
+class _IndexedZipFile(zipfile.ZipFile):
+    def _RealGetContents(self):
+        """Page reads supply a ZipInfo from the verified index to ZipFile.open."""
 
 
 def _is_transient(error: BaseException) -> bool:
@@ -99,9 +107,10 @@ class ArchiveIndex:
     status: str                 # 'ok' | 'empty' | 'corrupt'
     pages: tuple = ()           # 所有图片页（导出用，含 bmp / avif）
     reason: str = ""            # 打不开的原因（日志用）
-    signature: tuple | None = None  # 建目录时压缩包的（大小, 修改时间）
+    signature: tuple | None = None  # 建目录时压缩包的文件版本
     skipped: int = 0            # 被跳过的图片条目数（见模块说明）
     transient: bool = False     # 打开文件本身出错：可能只是暂时的
+    _verified_pages: set[ArchivePage] = field(default_factory=set, compare=False, repr=False)
 
     @property
     def format(self) -> str:
@@ -201,7 +210,7 @@ def quick_status(path) -> tuple:
     signature = _signature(path)
     if signature is None:
         return "corrupt", path.suffix.lower().lstrip("."), False
-    key = os.path.normcase(os.path.abspath(path))
+    key = _path_key(path)
     with _cache_lock:
         cached = _status.get(key)
         if cached and cached[0] == signature:
@@ -253,15 +262,14 @@ def _is_image_entry(info: zipfile.ZipInfo) -> bool:
     return PurePosixPath(name).suffix.lower() in EXPORT_IMAGE_EXTENSIONS
 
 
-def _build_index(path: Path, signature) -> tuple[ArchiveIndex, bool]:
+def _build_index(path: Path, signature, *, verify_first=True) -> tuple[ArchiveIndex, bool]:
     """(页目录, 能不能记住)。读文件本身出错（被占用、没有权限、内存不足）时不记住，下次再试。"""
     try:
-        with zipfile.ZipFile(path) as zf:
+        with _open_current(path, signature) as handle, BoundedZipFile(
+                handle, max_entries=MAX_ENTRIES, max_directory_bytes=MAX_DIRECTORY_BYTES) as zf:
             infos = zf.infolist()
             if any(info.header_offset < 0 for info in infos):   # 文件头部被截掉：偏移量指到文件前面
                 return ArchiveIndex(path, "corrupt", reason="条目位置不对", signature=signature), True
-            if len(infos) > MAX_ENTRIES:
-                return ArchiveIndex(path, "corrupt", reason=f"条目太多（{len(infos)}）", signature=signature), True
             found: dict[str, ArchivePage] = {}
             skipped = 0
             for info in infos:
@@ -281,8 +289,14 @@ def _build_index(path: Path, signature) -> tuple[ArchiveIndex, bool]:
             first = next(iter(index.reader_pages), None)
             if first is None:
                 return ArchiveIndex(path, "empty", pages, signature=signature, skipped=skipped), True
-            _read_member(zf, first)  # 读一页：截断、数据损坏多半在这里就能发现
+            if verify_first:
+                _read_member(zf, first)
+                index._verified_pages.add(first)
             return index, True
+    except ArchiveBusy as e:
+        return ArchiveIndex(path, "corrupt", reason=str(e), signature=signature, transient=True), False
+    except ArchiveError as e:
+        return ArchiveIndex(path, "corrupt", reason=str(e), signature=signature), True
     except zipfile.BadZipFile as e:
         return ArchiveIndex(path, "corrupt", reason=str(e) or "BadZipFile", signature=signature), True
     except (OSError, MemoryError) as e:
@@ -293,23 +307,66 @@ def _build_index(path: Path, signature) -> tuple[ArchiveIndex, bool]:
         return ArchiveIndex(path, "corrupt", reason=f"{e.__class__.__name__}: {e}", signature=signature), True
 
 
-def _signature(path: Path):
-    try:
-        info = os.lstat(path)
-    except (OSError, ValueError):
-        return None
+def _file_signature(info):
     if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & _REPARSE_POINT:
         return None
-    return (info.st_size, info.st_mtime_ns)
+    return info.st_size, info.st_mtime_ns, info.st_dev, info.st_ino, info.st_ctime_ns
+
+
+def _signature(path: Path):
+    try:
+        return _file_signature(os.lstat(path))
+    except (OSError, ValueError):
+        return None
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+@contextmanager
+def _open_current(path: Path, signature):
+    """Pin the expected generation for this request and verify it before returning."""
+    changed = "压缩包已经变了，请重新打开"
+    if signature is None or signature != _signature(path):
+        raise ArchiveBusy(changed)
+    try:
+        handle = path.open("rb")
+    except (OSError, MemoryError) as error:
+        kind = ArchiveBusy if _is_transient(error) else ArchiveError
+        raise kind(str(error) or type(error).__name__) from error
+
+    def check():
+        try:
+            opened = _file_signature(os.fstat(handle.fileno()))
+        except OSError as error:
+            kind = ArchiveBusy if _is_transient(error) else ArchiveError
+            raise kind(str(error) or type(error).__name__) from error
+        if signature != opened or signature != _signature(path):
+            raise ArchiveBusy(changed)
+
+    with handle:
+        check()
+        yield handle
+        check()
+
+
+def read_staged_index(path) -> ArchiveIndex:
+    """Check reader limits before the packer verifies every member's CRC."""
+    path = Path(os.path.abspath(path))
+    signature = _signature(path)
+    if signature is None:
+        return ArchiveIndex(path, "corrupt", reason="文件不在或不是普通文件")
+    return _build_index(path, signature, verify_first=False)[0]
 
 
 def read_index(path) -> ArchiveIndex:
     """压缩包的页目录与状态；压缩包没变时直接用记住的。已不在 / 不是普通文件 → corrupt（调用方先用 select 找）。"""
-    path = Path(path)
+    path = Path(os.path.abspath(path))
     signature = _signature(path)
     if signature is None:
         return ArchiveIndex(path, "corrupt", reason="文件不在或不是普通文件")
-    key = os.path.normcase(os.path.abspath(path))
+    key = _path_key(path)
     with _cache_lock:
         cached = _cache.get(key)
         if cached and cached[0] == signature:
@@ -330,35 +387,44 @@ def read_index(path) -> ArchiveIndex:
 
 
 def version(index: ArchiveIndex) -> str:
-    """页地址里的版本号：压缩包换了（大小或修改时间变了）地址就变，浏览器不会拿到旧页"""
-    signature = index.signature or (0, 0)
-    return f"{signature[0]:x}-{signature[1]:x}"
+    """Bind page URLs and caches to the archive path and file generation."""
+    signature = index.signature or ()
+    digest = hashlib.blake2s(os.fsencode(_path_key(index.path)), digest_size=16)
+    digest.update(repr(signature).encode("ascii"))
+    return f"{(signature[0] if signature else 0):x}-{digest.hexdigest()}"
+
+
+def can_revalidate(index: ArchiveIndex, page: ArchivePage) -> bool:
+    """A previously verified page may use its ETag while its archive still opens."""
+    with _cache_lock:
+        verified = page in index._verified_pages
+    if verified:
+        with _open_current(index.path, index.signature):
+            pass
+    return verified
 
 
 @contextmanager
 def open_pages(index: ArchiveIndex):
     """打开压缩包一次，逐页读：with open_pages(index) as read: data = read(page)。
     压缩包在建目录之后变了、打不开、某页读不出来 → ArchiveError。"""
-    if index.signature is None or _signature(index.path) != index.signature:
+    if index.signature is None:
         raise ArchiveError("压缩包已经变了，请重新打开")
-    try:
-        zf = zipfile.ZipFile(index.path)
-    except Exception as e:
-        raise (ArchiveBusy if _is_transient(e) else ArchiveError)(str(e) or e.__class__.__name__) from e
 
-    def read(page: ArchivePage) -> bytes:
-        try:
-            return _read_member(zf, page)
-        except ArchiveError:
-            raise
-        except Exception as e:  # 被占用等是暂时的；校验不对、偏移量不对等是坏了
-            kind = ArchiveBusy if _is_transient(e) else ArchiveError
-            raise kind(f"{page.name}: {e.__class__.__name__}: {e}") from e
+    with _open_current(index.path, index.signature) as handle, _IndexedZipFile(handle) as zf:
+        def read(page: ArchivePage) -> bytes:
+            try:
+                data = _read_member(zf, page)
+            except ArchiveError:
+                raise
+            except Exception as e:  # 被占用等是暂时的；校验不对、偏移量不对等是坏了
+                kind = ArchiveBusy if _is_transient(e) else ArchiveError
+                raise kind(f"{page.name}: {e.__class__.__name__}: {e}") from e
+            with _cache_lock:
+                index._verified_pages.add(page)
+            return data
 
-    try:
         yield read
-    finally:
-        zf.close()
 
 
 def read_page(index: ArchiveIndex, page: ArchivePage) -> bytes:

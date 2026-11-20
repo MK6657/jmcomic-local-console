@@ -20,10 +20,21 @@ OPTIONAL_REVIEW = "WINDOWS_VNEXT_REVIEW.md"
 SOURCE_PATTERNS = ("app.py", "desktop.py", "launcher.py", "jmcomic_cli.py", "core/*.py", "routes/*.py",
                    "templates/**/*.html", "static/**/*", "requirements*.txt", "build.spec", "tools/*.py",
                    "tools/windows-portable.manifest", "tools/licenses/**/*",
-                   "docs/WINDOWS_RELEASE.md", "docs/BACKEND_REVIEW.md", "docs/DATA_MAINTENANCE.md",
-                   "docs/AUDIT_FIXES.md", f"docs/{OPTIONAL_REVIEW}",
-                   "frontend/src/**/*", "frontend/package*.json", "frontend/tsconfig.json", "frontend/vite.config.js",
+                   "docs/WINDOWS_RELEASE.md", "docs/DATA_MAINTENANCE.md",
+                   "docs/BACKEND_REVIEW.md", "docs/archive/BACKEND_REVIEW.md",
+                   "docs/AUDIT_FIXES.md", "docs/archive/AUDIT_FIXES.md",
+                   f"docs/{OPTIONAL_REVIEW}", f"docs/archive/{OPTIONAL_REVIEW}",
                    "tools/Preview-Atelier.cmd", "docs/ATELIER_WINDOWS.md", "LICENSE", "THIRD_PARTY_NOTICES.md")
+
+
+def _find_doc(root, name):
+    """Locate a release doc in docs/ first, falling back to docs/archive/."""
+    root = Path(root)
+    for rel in (Path("docs") / name, Path("docs") / "archive" / name):
+        candidate = root / rel
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def source_fingerprint(root=ROOT):
@@ -116,11 +127,16 @@ def verified_packages():
 
 
 def copy_release_docs(root, bundle):
-    shutil.copyfile(root / "docs/WINDOWS_RELEASE.md", bundle / "README-Windows.md")
     for name in ("BACKEND_REVIEW.md", "DATA_MAINTENANCE.md", "AUDIT_FIXES.md"):
-        shutil.copyfile(root / "docs" / name, bundle / name)
-    review = root / "docs" / OPTIONAL_REVIEW
-    if review.is_file():
+        source = _find_doc(root, name)
+        if source is None:
+            raise FileNotFoundError(root / "docs" / name)
+        shutil.copyfile(source, bundle / name)
+    guide = (root / "docs/WINDOWS_RELEASE.md").read_text(encoding="utf-8")
+    (bundle / "README-Windows.md").write_text(
+        guide.replace("](archive/BACKEND_REVIEW.md)", "](BACKEND_REVIEW.md)"), encoding="utf-8")
+    review = _find_doc(root, OPTIONAL_REVIEW)
+    if review is not None:
         shutil.copyfile(review, bundle / review.name)
     for item in ('tools/Preview-Atelier.cmd', 'docs/ATELIER_WINDOWS.md'):
         source = root / item

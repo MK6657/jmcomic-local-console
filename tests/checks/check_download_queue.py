@@ -19,9 +19,11 @@ scenario = parser.add_mutually_exclusive_group()
 scenario.add_argument("--two-stalls", action="store_true", help="stall both bad pages instead of returning corrupt bytes for page 3")
 scenario.add_argument("--pause", action="store_true", help="resume only after the waiting album finishes")
 scenario.add_argument("--quick-resume", action="store_true", help="resume while the second page is still in flight")
+parser.add_argument("--image-format", choices=("webp", "jpg", "png"), default="webp")
 args = parser.parse_args()
 pause_run = args.pause or args.quick_resume
-ROOT = Path(__file__).resolve().parent.parent
+suffix = "." + args.image_format
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 temporary = tempfile.TemporaryDirectory(prefix="jm-stalled-queue-")
 for name, relative in (("JMCONSOLE_HOME", ""), ("JMCONSOLE_DOWNLOAD_DIR", "downloads"),
@@ -38,7 +40,7 @@ assert jm_service.DOWNLOAD_ROOT.resolve().is_relative_to(Path(temporary.name).re
 app.create_app()
 settings.update_settings({"timeout": 5, "retry_times": 0, "image_threads": 1,
                           "photo_threads": 1, "max_running_jobs": 1, "auto_update_check": False,
-                          "skip_existing": not pause_run})
+                          "skip_existing": not pause_run, "image_format": args.image_format})
 payload = io.BytesIO()
 Image.new("RGB", (16, 16), "blue").save(payload, "PNG")
 payload = payload.getvalue()
@@ -133,7 +135,7 @@ try:
         assert inflight.wait(5)
         partial = db.get_job(bad)
         assert partial["done_pages"] == 1
-        saved, = Path(partial["output_path"]).rglob("00001.webp")
+        saved, = Path(partial["output_path"]).rglob("00001" + suffix)
         digest = hashlib.sha256(saved.read_bytes()).hexdigest()
         assert manager.pause_job(bad)[0]
         if args.quick_resume:
@@ -155,26 +157,27 @@ try:
     first, second = db.get_job(bad), db.get_job(good)
     if pause_run:
         assert requests == [slow_path, second_path, next_path, third_path], requests
-        final_page, = Path(first['output_path']).rglob('00001.webp')
+        final_page, = Path(first['output_path']).rglob('00001' + suffix)
         assert hashlib.sha256(final_page.read_bytes()).hexdigest() == digest
         assert len(db.get_all_jobs()) == 2 and first["done_pages"] == first["total_pages"] == 3
-        expected_first = ["00001.webp", "00002.webp", "00003.webp"]
+        expected_first = [f"{number:05d}{suffix}" for number in (1, 2, 3)]
     else:
         assert requests == [slow_path, second_path, third_path, next_path], requests
         assert stalled == ([slow_path, third_path] if args.two_stalls else [slow_path])
         assert (first["done_pages"], first["total_pages"]) == (1, 3)
         assert all(f"第 {page} 页下载失败" in first["error_message"] for page in (1, 3))
-        expected_first = ["00002.webp"]
+        expected_first = ["00002" + suffix]
     assert second["done_pages"] == second["total_pages"] == 1
-    for job, expected in ((first, expected_first), (second, ["00001.webp"])):
-        images = sorted(Path(job["output_path"]).rglob("*.webp"))
+    for job, expected in ((first, expected_first), (second, ["00001" + suffix])):
+        images = sorted(Path(job["output_path"]).rglob("*" + suffix))
         assert [path.name for path in images] == expected
         for path in images:
             with Image.open(path) as image:
-                assert image.format == "WEBP"
+                assert image.format == {"webp": "WEBP", "jpg": "JPEG", "png": "PNG"}[args.image_format]
                 image.load()
     mode = "quick_resume" if args.quick_resume else "pause" if args.pause else "two_stalls" if args.two_stalls else "stall_and_corrupt"
-    print(json.dumps({"scenario": mode, ("first_status" if pause_run else "bad_status"): first["status"],
+    print(json.dumps({"scenario": mode, "image_format": args.image_format,
+                      ("first_status" if pause_run else "bad_status"): first["status"],
                       "good_status": second["status"],
                       "seconds": round(time.monotonic()-start, 3),
                       "requests_per_page": dict(Counter(requests)), "request_order": requests, "stalled_pages": stalled,

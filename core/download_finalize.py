@@ -121,7 +121,7 @@ def _published_sources(directory, published_pages, check_control):
             continue
         for name, digest in digests.items():
             check_control()
-            if not re.fullmatch(r'(?:[0-9]{5}|[1-9][0-9]{5,})\.webp', name) or name == '00000.webp':
+            if not re.fullmatch(r'(?:[0-9]{5}|[1-9][0-9]{5,})\.(?:webp|png|jpg)', name) or name.startswith('00000.'):
                 continue
             path = chapter / name
             if path.is_file() and not is_link(path):
@@ -147,10 +147,10 @@ def finalize_published(directory, settings, check_control, save_progress, publis
                 save_progress()
             for path in directory.iterdir():
                 check_control()
-                match = re.search(r'__([0-9]+)_p([0-9]{5,})(?:~[0-9]+)?\.webp\Z', path.name)
+                match = re.search(r'__([0-9]+)_p([0-9]{5,})(?:~[0-9]+)?(\.(?:webp|png|jpg))\Z', path.name)
                 if match and match[1] in published_pages:
-                    digest = published_pages[match[1]][1].get(match[2] + '.webp')
-                    signature = tuple(receipts.get(':'.join(match.groups()), ()))
+                    digest = published_pages[match[1]][1].get(match[2] + match[3])
+                    signature = tuple(receipts.get(f'{match[1]}:{match[2]}', ()))
                     if _matches_publication(path, digest, signature):
                         proofs[path] = (digest, signature)
         with ExitStack() as stack:

@@ -1,0 +1,43 @@
+{# 阅读页 / 单页预览右下角悬浮快捷展开钮：默认收起，悬停或点击展开，一键到顶/到底/阅读工具/返回/主页/设置 #}
+<div class="reader-fab" id="reader-fab">
+    <button type="button" class="reader-fab-toggle" aria-expanded="false" aria-controls="reader-fab-panel"
+            title="快捷跳转（悬停或点击展开）" aria-label="快捷跳转">
+        <i class="bi bi-plus-lg" aria-hidden="true"></i>
+    </button>
+    <div class="reader-fab-panel" id="reader-fab-panel" role="region" aria-label="快捷跳转面板">
+        <div class="reader-fab-group reader-fab-group--actions" role="group" aria-label="页面操作">
+            <button type="button" class="reader-fab-btn" data-fab-action="top" title="回到顶部">
+                <i class="bi bi-chevron-bar-up" aria-hidden="true"></i><span>到顶部</span>
+            </button>
+            <button type="button" class="reader-fab-btn" data-fab-action="bottom" title="直达底部">
+                <i class="bi bi-chevron-bar-down" aria-hidden="true"></i><span>到底部</span>
+            </button>
+            <button type="button" class="reader-fab-btn" data-fab-action="tools" title="显隐阅读工具 (M)">
+                <i class="bi bi-sliders" aria-hidden="true"></i><span>阅读工具</span>
+            </button>
+            <button type="button" class="reader-fab-btn" data-fab-action="back" title="返回上一页">
+                <i class="bi bi-arrow-return-left" aria-hidden="true"></i><span>返回</span>
+            </button>
+        </div>
+        <nav class="reader-fab-group reader-fab-group--nav" aria-label="快捷前往">
+            <a class="reader-fab-link" href="/" title="书斋总览">
+                <i class="bi bi-house-door" aria-hidden="true"></i><span>主页</span>
+            </a>
+            <a class="reader-fab-link" href="/search" data-nav-memory="/search" title="检索探索">
+                <i class="bi bi-search" aria-hidden="true"></i><span>搜索</span>
+            </a>
+            <a class="reader-fab-link" href="/library" data-nav-memory="/library" title="私人书阁">
+                <i class="bi bi-collection" aria-hidden="true"></i><span>书阁</span>
+            </a>
+            <a class="reader-fab-link" href="/wishlist" data-nav-memory="/wishlist" title="心愿典藏">
+                <i class="bi bi-bookmark-heart" aria-hidden="true"></i><span>收藏</span>
+            </a>
+            <a class="reader-fab-link" href="/downloads" title="传输中心">
+                <i class="bi bi-list-ul" aria-hidden="true"></i><span>传输</span>
+            </a>
+            <a class="reader-fab-link" href="/settings" title="偏好与主题设置">
+                <i class="bi bi-gear" aria-hidden="true"></i><span>设置</span>
+            </a>
+        </nav>
+    </div>
+</div>

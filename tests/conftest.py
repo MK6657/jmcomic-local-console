@@ -15,11 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 # Legacy scripts perform network requests and mutations at import time.
-# Keep them for reference, but never import them during pytest collection.
-collect_ignore = [
-    "test_smoke.py", "test_endpoints.py", "test_key_e2e.py",
-    "test_e2e_integration.py", "test_export_integrity.py", "test_stress.py",
-]
+# Archived in tests/legacy/ for reference; never collected by pytest.
+collect_ignore = ["legacy"]
 
 # The app root is redirected here, before any test module is imported. core binds module-level paths when it is
 # first imported (core.database DB_DIR / DB_PATH, core.path_guard DOWNLOAD_ROOT, core.logger LOG_DIR and its open

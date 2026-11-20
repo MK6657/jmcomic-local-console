@@ -10,23 +10,23 @@
 这是一个**本地 Python 应用**，不是浏览器扩展，也不是在线托管服务。
 请仅访问和下载你有权使用的内容。仓库不包含下载内容、个人凭据或第三方参考项目。
 
-**直接在 Windows 上使用：** [下载上一版已验收的 x64 便携包，查看校验值](docs/WINDOWS_ACCEPTANCE.md)。完整解压后双击 `JMComic.exe`，无需安装 Python 或 Node。升级已有实例前请先看[备份与升级步骤](docs/WINDOWS_RELEASE.md)。[vNext 审计处置表](docs/AUDIT_DISPOSITION_2026-11-18.md)记录旧包基线，不代表新版已验收。
+**直接在 Windows 上使用：** [下载上一版已验收的 x64 便携包，查看校验值](docs/archive/WINDOWS_ACCEPTANCE.md)。完整解压后双击 `JMComic.exe`，无需安装 Python 或 Node。升级已有实例前请先看[备份与升级步骤](docs/WINDOWS_RELEASE.md)。[vNext 审计处置表](docs/archive/AUDIT_DISPOSITION_2026-11-18.md)记录旧包基线，不代表新版已验收。完整目录与归档索引见 [docs/README.md](docs/README.md)。
 
 ## 后端复检分支
 
-**当前 v5 Windows 后端候选：** 本地分支 `codex/windows-vnext`，从 `552bb65` 分出。[复检手册](docs/WINDOWS_VNEXT_REVIEW.md)说明如何只在副本上测试；[本次验收记录](docs/WINDOWS_VNEXT_ACCEPTANCE.md)给出实际包的 SHA-256 和覆盖范围。以下克隆命令用于取得上一版公开基线。
+**当前 v5 Windows 后端候选：** 本地分支 `codex/windows-vnext`，从 `552bb65` 分出。[复检手册](docs/archive/WINDOWS_VNEXT_REVIEW.md)说明如何只在副本上测试；[本次验收记录](docs/archive/WINDOWS_VNEXT_ACCEPTANCE.md)给出实际包的 SHA-256 和覆盖范围。以下克隆命令用于取得上一版公开基线。
 
 上一版 Windows 后端重构发布在 **`codex/refactor-windows`** 分支，`main` 保留原版本。
-请审核者先阅读[克隆与测试指南](docs/GITHUB_REVIEW.md)和[独立审查委托](docs/INDEPENDENT_BACKEND_AUDIT.md)。
+请审核者先阅读[克隆与测试指南](docs/archive/GITHUB_REVIEW.md)和[独立审查委托](docs/archive/INDEPENDENT_BACKEND_AUDIT.md)。
 
-[项目详细交接说明](docs/PROJECT_HANDOFF.md)记录早期后端审查的架构、固定产品提交和当时证据。审查 `552bb65` 请用上面的 vNext 处置表。
+[项目详细交接说明](docs/archive/PROJECT_HANDOFF.md)记录早期后端审查的架构、固定产品提交和当时证据。审查 `552bb65` 请用上面的 vNext 处置表。
 
 ```bash
 git clone --branch codex/refactor-windows --single-branch https://github.com/MK6657/jmcomic-local-console.git jmcomic-backend-review
 cd jmcomic-backend-review
 ```
 
-原审计快照为 `7ae6ccb`，此分支现已继续加入[审计修复](docs/AUDIT_FIXES.md)，包含SSE/导出容量、任务分页、元数据预算、更新检查停止、数据库忙时的任务控制及启动/恢复共用的可信结构校验。
+原审计快照为 `7ae6ccb`，此分支现已继续加入[审计修复](docs/archive/AUDIT_FIXES.md)，包含SSE/导出容量、任务分页、元数据预算、更新检查停止、数据库忙时的任务控制及启动/恢复共用的可信结构校验。
 复检当前版本时请记录克隆后的 HEAD。完整运行验收使用 Windows；仅下载 GitHub 默认分支会拿到原版本。
 
 ## 环境要求

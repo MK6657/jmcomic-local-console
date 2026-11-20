@@ -2,10 +2,12 @@
 资源库 + 标签管理 API
 """
 
+from time import monotonic
+
 from flask import Blueprint, jsonify, request
 
 import core.database as db
-from core import tag_sync, update_store
+from core import path_guard, tag_sync, update_store
 from core.jm_service import get_album_detail_cached
 from core.local_availability import states_among, readable_among  # readable_among also imported by other routes
 from core.logger import log
@@ -14,6 +16,22 @@ from core.upstream import known_failure
 from core.validation import validate_numeric  # 统一 album_id 纯数字校验
 
 api_library_bp = Blueprint("api_library", __name__, url_prefix="/api/library")
+
+_READABLE_COUNT_TTL = 3.0
+_readable_count_cache = None
+
+
+def _note_local_states(states):
+    """Let fresh listing probes invalidate a disagreeing stats entry."""
+    global _readable_count_cache
+    cached = _readable_count_cache
+    if cached is None:
+        return
+    key, _, readable_ids = cached
+    if key[:2] == (db.DB_PATH, path_guard.DOWNLOAD_ROOT) and any(
+        state.readable != (album_id in readable_ids) for album_id, state in states.items()
+    ):
+        _readable_count_cache = None
 
 
 def _sanitize_tag(tag: str) -> str:
@@ -30,6 +48,7 @@ def mark_local_details(items, states):
     “阅读”按钮的外观按它决定。
     update：检查新章节已确认有新章节时的摘要（core.update_store.summaries，与 POST /api/updates/states 同一形状），
     只给本地可读的条目，否则 None——列表只显示确认过的事实。条目需已带 readable / files_missing。"""
+    _note_local_states(states)
     try:
         # 一次查询；检查记录读不出来时列表照常显示，只是没有“有新章节”标记
         updates = update_store.summaries(str(item["album_id"]) for item in items if item.get("readable"))
@@ -97,10 +116,11 @@ def library_list():
         if sort not in _VALID_SORTS_LIBRARY:
             sort = "updated_at"
 
-        # 按状态筛选时先判断整个资源库里哪些真能读（只有完成过下载的才可能），再交给 SQL 分组、过滤和分页：
-        # 能读的漫画属于“可离线阅读”，哪怕之后又排了新任务或新任务失败了（与收藏清单相同）
         with db.library_snapshot() as conn:
-            states = states_among(db.get_completed_album_ids(conn=conn), conn) if status else {}
+            states = {}
+            if status:
+                candidates = db.get_completed_album_ids(keyword=keyword, tag=tag, author=author, conn=conn)
+                states = states_among(candidates, conn)
             result = db.get_library(page=page, page_size=page_size, tag=tag, keyword=keyword,
                                     status=status, sort=sort, author=author, conn=conn,
                                     readable_ids=(aid for aid, state in states.items() if state.readable))
@@ -138,14 +158,28 @@ def tag_cloud():
 # ─── 统计信息 ───
 
 
+def _readable_count(conn):
+    """Reuse file availability briefly while keeping the SQLite totals current."""
+    global _readable_count_cache
+    locations = db.resource_locations(conn)
+    key = (db.DB_PATH, path_guard.DOWNLOAD_ROOT, locations)
+    now = monotonic()
+    cached = _readable_count_cache
+    if cached is not None and cached[0] == key and now < cached[1]:
+        return len(cached[2])
+    states = states_among((row[0] for row in locations), conn)
+    readable_ids = frozenset(album_id for album_id, state in states.items() if state.readable)
+    _readable_count_cache = key, now + _READABLE_COUNT_TTL, readable_ids
+    return len(readable_ids)
+
+
 @api_library_bp.get("/stats")
 def library_stats():
     """统计信息 GET /api/library/stats"""
     try:
         with db.library_snapshot() as conn:
             stats = db.get_library_stat(conn=conn)
-            states = states_among(db.get_completed_album_ids(conn=conn), conn)
-        stats["readable_count"] = sum(state.readable for state in states.values())
+            stats["readable_count"] = _readable_count(conn)
         return jsonify({"status": "ok", **stats})
     except Exception as e:
         log.error(f"API资源库统计失败 error={e}")

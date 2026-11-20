@@ -9,6 +9,9 @@ import sqlite3
 
 CURRENT_SCHEMA_VERSION = 5
 
+SUPERSEDED_COLUMN = "superseded_at"
+QUEUED_COLUMN = "queued_at"
+
 BASE_SCHEMA_SQL = r"""
             CREATE TABLE IF NOT EXISTS jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,7 +261,7 @@ def _expected_objects():
         connection.executescript(BASE_SCHEMA_SQL)
         connection.execute(RESOURCE_TABLE_SQL)
         connection.execute(RESOURCE_INDEX_SQL)
-        connection.execute("ALTER TABLE jobs ADD COLUMN queued_at TEXT")
+        connection.execute(f"ALTER TABLE jobs ADD COLUMN {QUEUED_COLUMN} TEXT")
         connection.execute(QUEUE_INDEX_SQL)
         for ddl in PUBLICATION_DDL.values():
             connection.execute(ddl)
@@ -274,7 +277,7 @@ def _expected_objects():
 def validate_schema(connection, version):
     """Read-only contract check before any application or restore writes.
 
-    V4 requires every table, index and trigger. Historical versions may omit
+    V4 and later require every table, index and trigger. Historical versions may omit
     tables/indexes that startup added independently of user_version. Each
     existing definition must still be known; a pre-v3 catalog is never guessed.
     """
@@ -290,6 +293,7 @@ def validate_schema(connection, version):
     if len(rows) > _MAX_SCHEMA_OBJECTS:
         raise SchemaError("数据库结构对象过多")
     actual, internal = {}, set()
+    has_queued_at = False
     for kind, name, sql in rows:
         if kind == "table" and name in _INTERNAL_TABLES:
             # ANALYZE is supported, but these are still executable schema.
@@ -305,12 +309,11 @@ def validate_schema(connection, version):
         if kind == "table" and name == "jobs" and version < 4:
             header, fields, suffix = _table_parts(tokens)
             target_header, target_fields, target_suffix = _table_parts(target)
-            names = {field[0] for field in fields if field}
-            # superseded_at predates versioned migrations; queued_at may already
-            # exist after an interrupted migration. No arbitrary fields allowed.
-            target_fields = [field for field in target_fields
-                             if field[0] not in {"superseded_at", "queued_at"} or field[0] in names]
-            matches = (header, fields, suffix) == (target_header, target_fields, target_suffix)
+            has_queued_at = fields == target_fields
+            supported_fields = [target_fields, target_fields[:-1]]
+            if version < 3:
+                supported_fields.append(target_fields[:-2])
+            matches = (header, suffix) == (target_header, target_suffix) and fields in supported_fields
         else:
             matches = tokens == target
         if not matches:
@@ -331,6 +334,8 @@ def validate_schema(connection, version):
         raise SchemaError("数据库资源目录触发器缺失或版本不一致")
     if version >= 3 and ("index", "idx_resource_catalog_album_latest") not in actual:
         raise SchemaError("数据库资源目录索引缺失")
+    if version < 4 and ("index", "idx_jobs_queue") in actual and not has_queued_at:
+        raise SchemaError("数据库任务队列索引与列不一致")
     if version >= 4 and actual.keys() != expected.keys():
         missing = sorted(name for _, name in expected.keys() - actual.keys())
         raise SchemaError("数据库结构对象缺失：" + ", ".join(missing))

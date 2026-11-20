@@ -1,14 +1,17 @@
 """
-ZIP / PDF 导出 API
+ZIP / CBZ / PDF 导出 API
 
-两个端点共用同一套模式：
+三个端点共用同一套模式：
   校验任务 → 收集文件 → 写入临时文件（避免大文件全量缓冲内存）
   → send_file 返回 → response.call_on_close 延迟清理临时文件
+
+CBZ 导出采用 ZIP_STORED（零重压缩直存）+ 仅含图片条目（images_only=True）+ 去除外层冗余套娃目录，
+极大降低导出 CPU 开销并让主流 CBZ 漫画阅读器实现零解压延迟翻页。
 
 页从哪里来与阅读器相同（core.archive_pages.merge_pages）：散图优先，目录里的压缩包（CBZ / 本程序打包的 ZIP）
 补齐散图没有的页，同一页不会出现两次；只剩压缩包时全从压缩包来。页只在内存 / 系统临时目录里解出，
 从不写进下载目录。只剩压缩包而它损坏或没有图片时给出明确的错误（422）；一页都没有 → 404。
-ZIP 导出永远不把 .cbz / .zip 压缩包本身再装进去。
+ZIP / CBZ 导出永远不把 .cbz / .zip 压缩包本身再装进去。
 """
 import hashlib
 import io
@@ -22,18 +25,20 @@ from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 
-from flask import Blueprint, Response, g, jsonify, send_file
+from flask import Blueprint, Response, g, jsonify, request, send_file
 
 import core.database as db
-from core import archive_pages, publication
+from core import album_maintenance, archive_pages, desktop_platform, publication
 from core.logger import log
 from core.path_guard import DOWNLOAD_ROOT, is_safe_path
+from core.path_utils import get_export_dir
 from core.publication_access import published_path, snapshot_page_digests
 from core.validation import validate_job_id, validate_numeric, is_allowed_image, EXPORT_IMAGE_EXTENSIONS
 from core.file_tree import is_link, _entry_is_link, natural_key
 from core.download_layout import CHAPTER_MARKER
 from core.storage import is_temporary_path
 from core.export_budget import ExportBudget, ExportLimit, ExportTimeout, BudgetedWriter
+from core.zip_preflight import BoundedZipFile, ZipMetadataLimit
 
 api_export_bp = Blueprint("api_export", __name__)
 
@@ -68,7 +73,7 @@ def _export_capacity(view):
             budget = ExportBudget()
             response = view(budget=budget, **source)
             budget.check()
-            if isinstance(response, Response) and response.status_code == 200:
+            if isinstance(response, _ExportResponse) and response.status_code == 200:
                 response.call_on_close(release)
                 g._export_response = response
                 transferred = True
@@ -187,6 +192,16 @@ def _export_directory(job_id=None, album_id=None):
     output_dir = Path(output_path) if snapshot is None else snapshot
     if snapshot is None:
         allowed = published_path(output_dir, DOWNLOAD_ROOT, directory=True) is not None
+        if album_id is not None and (not allowed or not output_dir.is_dir()):
+            album_maintenance.wait_for_active_move()
+            record = db.get_completed_job_by_album_id(album_id)
+            if not record or record.get("superseded_at"):
+                return None, (jsonify(status="error", message="未找到可导出的本地资源"), 404)
+            output_path = record.get("output_path")
+            if not output_path:
+                return None, (jsonify({"status": "error", "message": "任务无输出路径"}), 404)
+            output_dir = Path(output_path)
+            allowed = published_path(output_dir, DOWNLOAD_ROOT, directory=True) is not None
     else:
         allowed = is_safe_path(output_dir) and output_dir.resolve() != DOWNLOAD_ROOT.resolve()
     if not allowed:
@@ -215,31 +230,13 @@ _ARCHIVE_BUSY = "本地压缩包暂时打不开（可能被别的程序占用）
 
 
 def _check_export_archive_metadata(handle, budget):
-    """Bound the stdlib parser, including records omitted from EOCD's count.
-
-    Reuse ZipFile's ZIP64/SFX/comment handling instead of maintaining a second
-    directory parser. Its filelist includes every record (also duplicate names
-    and non-images); stop appending before an unbounded SDK index can be built.
-    """
-    class BoundedEntries(list):
-        def append(self, info):
+    """Apply the export budget before constructing the reader index."""
+    try:
+        with BoundedZipFile(handle, max_entries=budget.limits.archive_entries,
+                            max_directory_bytes=budget.limits.archive_metadata_bytes, check=budget.check):
             budget.check()
-            if len(self) >= budget.limits.archive_entries:
-                raise ExportLimit("压缩包目录条目或元数据超过导出限制")
-            super().append(info)
-
-    class MetadataZipFile(zipfile.ZipFile):
-        def _RealGetContents(self):
-            end = zipfile._EndRecData(self.fp)  # also resolves ZIP64 end records
-            budget.check()
-            if end and (end[zipfile._ECD_ENTRIES_TOTAL] > budget.limits.archive_entries
-                        or end[zipfile._ECD_SIZE] > budget.limits.archive_metadata_bytes):
-                raise ExportLimit("压缩包目录条目或元数据超过导出限制")
-            self.filelist = BoundedEntries()
-            super()._RealGetContents()
-
-    with MetadataZipFile(handle):
-        budget.check()
+    except ZipMetadataLimit:
+        raise ExportLimit("压缩包目录条目或元数据超过导出限制") from None
 
 
 def _archive_for_export(output_dir: Path, has_loose_images: bool, budget):
@@ -455,6 +452,47 @@ def _cleanup_tmp(tmp_path: str | None):
             pass
 
 
+def _wants_local_save() -> bool:
+    return (
+        request.headers.get("X-Export-Target", "").strip().lower() == "local"
+        or request.args.get("save", "").strip().lower() == "local"
+    )
+
+
+def _prepare_local_export_dir() -> Path:
+    export_dir = get_export_dir()
+    if export_dir.exists() and (is_link(export_dir) or not export_dir.is_dir()):
+        raise OSError("导出目录不可用或为符号链接")
+    export_dir.mkdir(parents=True, exist_ok=True)
+    if is_link(export_dir) or not export_dir.is_dir():
+        raise OSError("导出目录不可用或为符号链接")
+    return export_dir
+
+
+def _finalize_local_export(tmp_path: str, export_dir: Path, filename: str) -> Path:
+    root = export_dir.resolve()
+    clean = Path(filename).name
+    if not clean or clean in (".", "..") or clean != filename:
+        raise ValueError("导出文件名无效")
+    stem, suffix = Path(clean).stem, Path(clean).suffix
+    candidates = [export_dir / f"{stem}{suffix}"] + [
+        export_dir / f"{stem} ({index}){suffix}" for index in range(2, 100)
+    ]
+    last_error = None
+    for candidate in candidates:
+        if candidate.parent.resolve() != root:
+            raise ValueError("导出目标路径越权")
+        if os.path.lexists(candidate) and (is_link(candidate) or candidate.is_dir()):
+            continue
+        try:
+            os.replace(tmp_path, candidate)
+            return candidate
+        except PermissionError as exc:
+            last_error = exc
+            continue
+    raise last_error or OSError("无法写入导出文件（同名文件可能正被占用）")
+
+
 def _send_tmp_file(tmp_path: str, mimetype: str, download_name: str):
     """send_file 返回临时文件，并在响应真正发送完毕后清理临时文件。
 
@@ -484,29 +522,40 @@ def _send_tmp_file(tmp_path: str, mimetype: str, download_name: str):
         raise
 
 
-@api_export_bp.post("/api/export/<job_id>/zip")
-@api_export_bp.post("/api/library/<album_id>/export/zip")
-@_export_capacity
-def export_zip(budget, job_id=None, album_id=None):
-    """导出下载目录为 ZIP 文件"""
+def _export_archive(budget, *, job_id=None, album_id=None, as_cbz: bool = False):
+    """导出下载目录为 ZIP 或 CBZ 文件。
+
+    CBZ 模式采用 ZIP_STORED 零重压缩直存 + 仅含图片页 + 省略外层书名套娃目录，
+    既节省服务端 CPU，又让外部 CBZ 阅读器获得最佳随机读取性能。
+    """
     source_dir, err = _export_directory(job_id, album_id)
     if err:
         return err
     tmp_path = None
     sent = False
     try:
-        # 打包出的 .cbz / .zip 不再装进导出的 ZIP；章节标记等其他文件照旧放进去；空文件（中断的下载留下的）不算页
-        entries, index, err = _export_entries(source_dir, budget, images_only=False, library=album_id is not None)
+        # 打包出的 .cbz / .zip 不再装进导出的归档；ZIP 保留章节标记，CBZ 仅写入可阅读图片页
+        entries, index, err = _export_entries(source_dir, budget, images_only=as_cbz, library=album_id is not None)
         if err:
             return err
         safe_name = _safe_export_name(source_dir.album_name)
-        # 使用临时文件避免大 ZIP 全量缓冲内存
-        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        suffix = ".cbz" if as_cbz else ".zip"
+        compression = zipfile.ZIP_STORED if as_cbz else zipfile.ZIP_DEFLATED
+        mimetype = "application/vnd.comicbook+zip" if as_cbz else "application/zip"
+        local_save = _wants_local_save()
+        export_dir = _prepare_local_export_dir() if local_save else None
+        # 使用临时文件避免大压缩包全量缓冲内存；本地保存时直接在导出目录同盘暂存以便原子重命名
+        tmp = tempfile.NamedTemporaryFile(
+            dir=export_dir if local_save else None,
+            prefix=".jm-export-" if local_save else "tmp",
+            suffix=".tmp" if local_save else suffix,
+            delete=False,
+        )
         tmp_path = tmp.name
-        with tmp, zipfile.ZipFile(BudgetedWriter(tmp, budget), "w", zipfile.ZIP_DEFLATED) as zf, _reader_for(index, entries) as read:
+        with tmp, zipfile.ZipFile(BudgetedWriter(tmp, budget), "w", compression) as zf, _reader_for(index, entries) as read:
             for name, source in entries:
                 budget.check()
-                arcname = f"{source_dir.album_name}/{name}"
+                arcname = name if as_cbz else f"{source_dir.album_name}/{name}"
                 with zf.open(arcname, "w", force_zip64=True) as target:
                     if isinstance(source, archive_pages.ArchivePage):
                         data = _read_archive_page(read, source, budget)
@@ -520,12 +569,41 @@ def export_zip(budget, job_id=None, album_id=None):
                             for chunk in chunks:
                                 target.write(chunk)
         budget.check()
-        response = _send_tmp_file(tmp_path, "application/zip", f"{safe_name}.zip")
+        if local_save:
+            final_path = _finalize_local_export(tmp_path, export_dir, f"{safe_name}{suffix}")
+            sent = True
+            size = final_path.stat().st_size
+            log.info(f"归档本地导出完成 album_id={album_id} job_id={job_id} path={final_path} size={size}")
+            return jsonify(
+                status="ok",
+                saved=True,
+                filename=final_path.name,
+                folder=str(final_path.parent),
+                path=str(final_path),
+                size=size,
+            )
+        response = _send_tmp_file(tmp_path, mimetype, f"{safe_name}{suffix}")
         sent = True
         return response
     finally:
         if not sent:
             _cleanup_tmp(tmp_path)
+
+
+@api_export_bp.post("/api/export/<job_id>/zip")
+@api_export_bp.post("/api/library/<album_id>/export/zip")
+@_export_capacity
+def export_zip(budget, job_id=None, album_id=None):
+    """导出下载目录为 ZIP 文件"""
+    return _export_archive(budget, job_id=job_id, album_id=album_id, as_cbz=False)
+
+
+@api_export_bp.post("/api/export/<job_id>/cbz")
+@api_export_bp.post("/api/library/<album_id>/export/cbz")
+@_export_capacity
+def export_cbz(budget, job_id=None, album_id=None):
+    """导出下载目录为 CBZ 漫画压缩包（ZIP_STORED 零重压缩直存）"""
+    return _export_archive(budget, job_id=job_id, album_id=album_id, as_cbz=True)
 
 
 def _check_pixels(image, budget):
@@ -833,7 +911,14 @@ def export_pdf(budget, job_id=None, album_id=None):
         else:
             pages = [source for _, source in entries]
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        local_save = _wants_local_save()
+        export_dir = _prepare_local_export_dir() if local_save else None
+        tmp = tempfile.NamedTemporaryFile(
+            dir=export_dir if local_save else None,
+            prefix=".jm-export-" if local_save else "tmp",
+            suffix=".tmp" if local_save else ".pdf",
+            delete=False,
+        )
         tmp_path = tmp.name
         with tmp:
             page_count = _build_pdf(pages, BudgetedWriter(tmp, budget), budget)
@@ -842,6 +927,19 @@ def export_pdf(budget, job_id=None, album_id=None):
             return jsonify(status="error", message="PDF 页数不完整，已取消导出，请检查原图"), 422
 
         safe_name = _safe_export_name(source_dir.album_name)
+        if local_save:
+            final_path = _finalize_local_export(tmp_path, export_dir, f"{safe_name}.pdf")
+            sent = True
+            size = final_path.stat().st_size
+            log.info(f"PDF 本地导出完成 album_id={album_id} job_id={job_id} pages={page_count}/{len(pages)} path={final_path}")
+            return jsonify(
+                status="ok",
+                saved=True,
+                filename=final_path.name,
+                folder=str(final_path.parent),
+                path=str(final_path),
+                size=size,
+            )
         log.info(f"PDF 导出完成 album_id={album_id} job_id={job_id} pages={page_count}/{len(pages)}")
         response = _send_tmp_file(tmp_path, "application/pdf", f"{safe_name}.pdf")
         sent = True
@@ -857,3 +955,41 @@ def export_pdf(budget, job_id=None, album_id=None):
             for key in tuple(budget.staging):
                 if Path(key).parent == Path(extract_dir):
                     budget.forget_staging(key)
+
+
+@api_export_bp.post("/api/export/open-folder")
+def open_export_folder():
+    """在系统文件管理器中前置打开统一「导出」目录（可选高亮指定刚导出的文件）。"""
+    if not desktop_platform.supports_open_folder():
+        return jsonify(status="error", message="当前系统不支持直接打开文件夹，请手动前往导出目录"), 501
+    try:
+        export_dir = _prepare_local_export_dir()
+    except OSError as e:
+        log.warning(f"API打开导出目录失败 error={e}")
+        return jsonify(status="error", message="导出目录不可用"), 403
+
+    body = request.get_json(silent=True)
+    selected = None
+    if isinstance(body, dict):
+        filename = body.get("filename")
+        if isinstance(filename, str) and filename and Path(filename).name == filename and filename not in (".", ".."):
+            candidate = export_dir / filename
+            try:
+                if (candidate.parent.resolve() == export_dir.resolve()
+                        and not is_link(candidate) and candidate.is_file()):
+                    selected = candidate
+            except OSError:
+                selected = None
+
+    try:
+        if selected is not None:
+            desktop_platform.open_folder(export_dir, select=selected)
+        else:
+            desktop_platform.open_folder(export_dir)
+        log.info(f"API打开导出目录 path={export_dir} select={selected.name if selected else ''}")
+        return jsonify(status="ok", message="已打开导出文件夹", folder=str(export_dir))
+    except desktop_platform.UnsupportedDesktopOperation:
+        return jsonify(status="error", message="当前系统不支持直接打开文件夹，请手动前往导出目录"), 501
+    except Exception as e:
+        log.warning(f"API打开导出目录失败 path={export_dir} error={e}")
+        return jsonify(status="error", message="打开导出文件夹失败"), 500

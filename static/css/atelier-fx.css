@@ -1,0 +1,541 @@
+/* ==========================================================================
+   藏书阁 v3.4 — Theme Geometry Skins (pixel / cyber / anime) & Zero-Stutter GPU FX
+   Pre-allocated WAAPI click pool; zero clip-path masks; zero giant-frame GPU promotion
+   ========================================================================== */
+
+/* ── Layout/Style Containment for Large Static Frames (Perf Isolation) ── */
+.desk-search,
+.desk-ledger,
+.monograph-front,
+.monograph-contents,
+.pref-pages .settings-section {
+  contain: layout style;
+}
+
+/* ==========================================================================
+   1. Expressive Theme Geometry Skins (Independent from FX Preset)
+   ========================================================================== */
+
+/* ── Pixel Theme: Crisp 2px Borders, Stepped Hard Shadows, Cartridge Style ── */
+[data-theme="pixel"] {
+  --r-sm: 2px; --r-md: 2px; --r-lg: 4px; --r-xl: 4px; --r-pill: 4px;
+}
+[data-theme="pixel"] .atelier-sidebar {
+  border-right: 2px solid var(--line-strong);
+}
+[data-theme="pixel"] .seal-stamp {
+  border: 2px solid var(--ink);
+  box-shadow: 2px 2px 0 rgba(24, 32, 25, .30);
+}
+/* Pixel buttons keep 2px border width WITHOUT overriding semantic border colors */
+[data-theme="pixel"] .btn {
+  border-width: 2px !important;
+}
+[data-theme="pixel"] .form-control,
+[data-theme="pixel"] .form-select,
+[data-theme="pixel"] .export-picker,
+[data-theme="pixel"] .mineral-dock,
+[data-theme="pixel"] .sidebar-pulse,
+[data-theme="pixel"] .shelf-filter-sheet,
+[data-theme="pixel"] .desk-search,
+[data-theme="pixel"] .desk-tile,
+[data-theme="pixel"] .desk-ledger,
+[data-theme="pixel"] .album-card,
+[data-theme="pixel"] .library-card,
+[data-theme="pixel"] .folio-card,
+[data-theme="pixel"] .folio-tools,
+[data-theme="pixel"] .monograph-front,
+[data-theme="pixel"] .monograph-contents,
+[data-theme="pixel"] .monograph-workshop,
+[data-theme="pixel"] .pref-index,
+[data-theme="pixel"] .pref-pages .settings-section,
+[data-theme="pixel"] .pref-palette,
+[data-theme="pixel"] .pref-fx-card,
+[data-theme="pixel"] .bound-book,
+[data-theme="pixel"] .preview-image-wrapper,
+[data-theme="pixel"] .thumbnail-bar {
+  border-width: 2px !important;
+  border-color: var(--line-strong) !important;
+}
+[data-theme="pixel"] .sidebar-nav .nav-link.active {
+  border: 2px solid var(--accent);
+  box-shadow: 2px 2px 0 rgba(38, 60, 140, .25);
+}
+[data-theme="pixel"] .sidebar-nav .nav-link.active::before {
+  width: 4px; border-radius: 0; left: 4px;
+}
+[data-theme="pixel"] .shelf-kicker,
+[data-theme="pixel"] .folio-kicker,
+[data-theme="pixel"] .pref-kicker,
+[data-theme="pixel"] .brand-type small {
+  letter-spacing: .14em;
+  font-weight: 700;
+}
+
+/* ── Cyber Theme: Precision Neon Terminal Hairlines & Tactical Grid ── */
+[data-theme="cyber"] {
+  --r-sm: 4px; --r-md: 6px; --r-lg: 8px; --r-xl: 10px;
+}
+[data-theme="cyber"] .atelier-sidebar {
+  border-right: 1px solid rgba(92, 225, 245, .20);
+}
+[data-theme="cyber"] .seal-stamp {
+  border: 1px solid rgba(92, 225, 245, .55);
+  box-shadow: 0 0 10px rgba(92, 225, 245, .24);
+}
+[data-theme="cyber"] .desk-search,
+[data-theme="cyber"] .monograph-front,
+[data-theme="cyber"] .folio-tools,
+[data-theme="cyber"] .desk-ledger {
+  background-image:
+    linear-gradient(rgba(92, 225, 245, .045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(92, 225, 245, .045) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+[data-theme="cyber"] .sidebar-nav .nav-link.active {
+  border: 1px solid rgba(92, 225, 245, .40);
+}
+[data-theme="cyber"] :is(.album-card, .library-card, .desk-tile, .desk-search, .desk-ledger, .folio-card, .pref-pages .settings-section) {
+  border-color: rgba(92, 225, 245, .18);
+}
+[data-theme="cyber"] :is(.album-card, .library-card, .desk-tile, .folio-card):hover {
+  border-color: rgba(92, 225, 245, .56);
+}
+
+/* ── Anime Theme: Airy Sakura Storybook Curves & Soft Pastel Rim ── */
+[data-theme="anime"] {
+  --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 22px;
+}
+[data-theme="anime"] .seal-stamp {
+  border-radius: 14px;
+}
+[data-theme="anime"] .btn-primary,
+[data-theme="anime"] .btn-outline-primary {
+  border-radius: var(--r-pill);
+}
+[data-theme="anime"] .sidebar-nav .nav-link.active {
+  border: 1px solid rgba(168, 38, 94, .24);
+}
+[data-theme="anime"] .desk-search,
+[data-theme="anime"] .desk-ledger,
+[data-theme="anime"] .monograph-front,
+[data-theme="anime"] .pref-pages .settings-section {
+  border-color: rgba(168, 38, 94, .16);
+}
+[data-theme="anime"] :is(.album-card, .library-card, .desk-tile, .desk-search, .desk-ledger):hover {
+  border-color: rgba(168, 38, 94, .44);
+}
+
+/* ==========================================================================
+   2. GPU-Only Staggered Entrance (Non-Reading Pages Only, Backwards Fill)
+   Never promotes the giant Reader/Preview canvas; layers release upon settle.
+   ========================================================================== */
+
+html:not([data-fx="none"]) .atelier-shell:not(.atelier-reading) :is(
+  .desk-search, .desk-tile, .desk-ledger,
+  .folio-card, .monograph-front, .monograph-contents,
+  .pref-pages .settings-section, .album-card, .library-card
+) {
+  position: relative;
+}
+
+/* ── Calm Entrance ── */
+html[data-fx="calm"] .atelier-shell:not(.atelier-reading) :is(.desk-search, .shelf-filter-sheet, .folio-tools, .monograph-front, .pref-index) {
+  animation: fxPanelCalm 280ms cubic-bezier(.22, 1, .36, 1) 25ms backwards;
+}
+html[data-fx="calm"] .atelier-shell:not(.atelier-reading) :is(.desk-tile, .desk-ledger, .monograph-contents, .folio-card[data-enter="true"], .pref-pages .settings-section) {
+  animation: fxPanelCalm 300ms cubic-bezier(.22, 1, .36, 1) 55ms backwards;
+}
+html[data-fx="calm"] .desk-tile:nth-child(2) { animation-delay: 85ms; }
+html[data-fx="calm"] .desk-tile:nth-child(3) { animation-delay: 115ms; }
+html[data-fx="calm"] .desk-tile:nth-child(4) { animation-delay: 145ms; }
+html[data-fx="calm"] .desk-ledger { animation-delay: 110ms; }
+@keyframes fxPanelCalm {
+  from { opacity: 0; transform: translate3d(0, 12px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+/* ── Pixel Entrance ── */
+html[data-fx="pixel"] .atelier-shell:not(.atelier-reading) :is(.desk-search, .shelf-filter-sheet, .folio-tools, .monograph-front, .pref-index) {
+  animation: fxPanelPixel 210ms steps(4, end) 20ms backwards;
+}
+html[data-fx="pixel"] .atelier-shell:not(.atelier-reading) :is(.desk-tile, .desk-ledger, .monograph-contents, .folio-card[data-enter="true"], .pref-pages .settings-section) {
+  animation: fxPanelPixel 220ms steps(4, end) 50ms backwards;
+}
+html[data-fx="pixel"] .desk-tile:nth-child(2) { animation-delay: 80ms; }
+html[data-fx="pixel"] .desk-tile:nth-child(3) { animation-delay: 110ms; }
+html[data-fx="pixel"] .desk-tile:nth-child(4) { animation-delay: 140ms; }
+html[data-fx="pixel"] .desk-ledger { animation-delay: 100ms; }
+@keyframes fxPanelPixel {
+  from { opacity: 0; transform: translate3d(-4px, 10px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+/* ── Cyber Entrance ── */
+html[data-fx="cyber"] .atelier-shell:not(.atelier-reading) :is(.desk-search, .shelf-filter-sheet, .folio-tools, .monograph-front, .pref-index) {
+  animation: fxPanelCyber 260ms cubic-bezier(.16, 1, .3, 1) 25ms backwards;
+}
+html[data-fx="cyber"] .atelier-shell:not(.atelier-reading) :is(.desk-tile, .desk-ledger, .monograph-contents, .folio-card[data-enter="true"], .pref-pages .settings-section) {
+  animation: fxPanelCyber 280ms cubic-bezier(.16, 1, .3, 1) 55ms backwards;
+}
+html[data-fx="cyber"] .desk-tile:nth-child(2) { animation-delay: 85ms; }
+html[data-fx="cyber"] .desk-tile:nth-child(3) { animation-delay: 115ms; }
+html[data-fx="cyber"] .desk-tile:nth-child(4) { animation-delay: 145ms; }
+html[data-fx="cyber"] .desk-ledger { animation-delay: 115ms; }
+@keyframes fxPanelCyber {
+  from { opacity: 0; transform: translate3d(0, 10px, 0) scale(.988); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+/* ── Anime Entrance ── */
+html[data-fx="anime"] .atelier-shell:not(.atelier-reading) :is(.desk-search, .shelf-filter-sheet, .folio-tools, .monograph-front, .pref-index) {
+  animation: fxPanelAnime 320ms cubic-bezier(.34, 1.38, .64, 1) 25ms backwards;
+}
+html[data-fx="anime"] .atelier-shell:not(.atelier-reading) :is(.desk-tile, .desk-ledger, .monograph-contents, .folio-card[data-enter="true"], .pref-pages .settings-section) {
+  animation: fxPanelAnime 340ms cubic-bezier(.34, 1.38, .64, 1) 55ms backwards;
+}
+html[data-fx="anime"] .desk-tile:nth-child(2) { animation-delay: 90ms; }
+html[data-fx="anime"] .desk-tile:nth-child(3) { animation-delay: 125ms; }
+html[data-fx="anime"] .desk-tile:nth-child(4) { animation-delay: 160ms; }
+html[data-fx="anime"] .desk-ledger { animation-delay: 120ms; }
+@keyframes fxPanelAnime {
+  from { opacity: 0; transform: translate3d(0, 14px, 0) scale(.972); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+/* ==========================================================================
+   3. 60fps Compositor-Only Hover & Frame Motion (Compact Cards/Buttons Only)
+   Giant sections stay unpromoted (border & accent line only) to prevent layer churn.
+   ========================================================================== */
+
+html:not([data-fx="none"]) .desk-tile .desk-tile-icon {
+  transition: transform 180ms cubic-bezier(.34, 1.48, .64, 1), background-color 140ms ease, color 140ms ease;
+}
+
+/* ── FX Pack: Calm (Silky Accent Top Hairline & Gentle GPU Lift) ── */
+html[data-fx="calm"] :is(
+  .desk-search, .desk-tile, .desk-ledger, .shelf-filter-sheet,
+  .album-card, .library-card, .folio-card, .monograph-front, .monograph-contents,
+  .pref-palette, .pref-fx-card, .pref-pages .settings-section
+) {
+  transition: transform 180ms cubic-bezier(.22, 1, .36, 1), border-color 150ms ease;
+}
+html[data-fx="calm"] :is(.desk-search, .desk-ledger, .desk-tile, .folio-card, .monograph-front, .monograph-contents, .pref-pages .settings-section)::before {
+  content: '';
+  position: absolute;
+  left: 16px; right: 16px; top: 0; height: 2px;
+  border-radius: 0 0 4px 4px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0;
+  transform: scaleX(.35);
+  transition: opacity 180ms ease, transform 220ms cubic-bezier(.22, 1, .36, 1);
+  pointer-events: none;
+  z-index: 2;
+}
+html[data-fx="calm"] :is(.desk-search, .desk-ledger, .desk-tile, .folio-card, .monograph-front, .monograph-contents, .pref-pages .settings-section):hover::before,
+html[data-fx="calm"] :is(.desk-search, .pref-pages .settings-section):focus-within::before {
+  opacity: .92;
+  transform: scaleX(1);
+}
+html[data-fx="calm"] :is(.album-card, .library-card, .desk-tile, .pref-palette, .pref-fx-card):hover {
+  transform: translate3d(0, -3px, 0);
+  border-color: rgba(var(--accent-rgb), .42);
+}
+html[data-fx="calm"] :is(.desk-search, .desk-ledger, .shelf-filter-sheet, .folio-card, .monograph-front):hover {
+  border-color: rgba(var(--accent-rgb), .38);
+}
+html[data-fx="calm"] .desk-tile:hover .desk-tile-icon {
+  transform: scale(1.08);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+html[data-fx="calm"] .btn {
+  transition: transform 140ms cubic-bezier(.22, 1, .36, 1), background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+html[data-fx="calm"] .btn:hover:not(:disabled) { transform: translate3d(0, -1px, 0); }
+html[data-fx="calm"] .btn:active:not(:disabled) { transform: scale(.97); }
+html[data-fx="calm"] .sidebar-nav .nav-link { transition: transform 140ms ease, background-color 140ms ease, color 140ms ease; }
+html[data-fx="calm"] .sidebar-nav .nav-link:hover { transform: translate3d(3px, 0, 0); }
+
+/* ── FX Pack: Pixel (Stepped Arcade Pop & 8-Bit Corner Ticks — Zero Shadow Blur) ── */
+html[data-fx="pixel"] :is(
+  .desk-search, .desk-tile, .desk-ledger, .shelf-filter-sheet,
+  .album-card, .library-card, .folio-card, .monograph-front, .monograph-contents,
+  .pref-palette, .pref-fx-card, .pref-pages .settings-section,
+  .btn, .sidebar-nav .nav-link
+) {
+  transition: transform 100ms steps(2, end), border-color 100ms steps(2, end), background-color 100ms steps(2, end), color 100ms steps(2, end);
+}
+html[data-fx="pixel"] :is(.desk-search, .desk-tile, .desk-ledger, .folio-card, .monograph-front, .monograph-contents, .pref-pages .settings-section)::before {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+  background:
+    linear-gradient(var(--accent), var(--accent)) top left / 6px 6px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) top right / 6px 6px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom left / 6px 6px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom right / 6px 6px no-repeat;
+  transition: opacity 100ms steps(2, end);
+}
+html[data-fx="pixel"] :is(.desk-search, .desk-tile, .desk-ledger, .folio-card, .monograph-front, .monograph-contents, .pref-pages .settings-section):hover::before,
+html[data-fx="pixel"] .desk-search:focus-within::before {
+  opacity: .92;
+}
+html[data-fx="pixel"] :is(.album-card, .library-card, .desk-tile, .pref-palette, .pref-fx-card):hover {
+  transform: translate3d(-2px, -2px, 0);
+}
+html[data-fx="pixel"] :is(.desk-search, .desk-ledger, .folio-card, .monograph-front, .pref-pages .settings-section):hover {
+  border-color: var(--accent);
+}
+html[data-fx="pixel"] .desk-tile:hover .desk-tile-icon {
+  transform: translate3d(-1px, -1px, 0);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+html[data-fx="pixel"] .btn:hover:not(:disabled) { transform: translate3d(-2px, -2px, 0); }
+html[data-fx="pixel"] .btn:active:not(:disabled) { transform: translate3d(2px, 2px, 0); }
+html[data-fx="pixel"] .sidebar-nav .nav-link:hover { transform: translate3d(4px, 0, 0); }
+
+/* ── FX Pack: Cyber (Glowing HUD Corner Reticles & GPU Holo Sweep) ── */
+html[data-fx="cyber"] :is(
+  .desk-search, .desk-tile, .desk-ledger, .shelf-filter-sheet,
+  .album-card, .library-card, .folio-card, .monograph-front, .monograph-contents,
+  .pref-palette, .pref-fx-card, .pref-pages .settings-section
+) {
+  transition: transform 160ms cubic-bezier(.16, 1, .3, 1), border-color 150ms ease;
+}
+html[data-fx="cyber"] :is(
+  .desk-search, .desk-tile, .desk-ledger, .folio-card,
+  .monograph-front, .monograph-contents, .pref-pages .settings-section,
+  .album-card, .library-card
+)::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+  transform: scale(.985);
+  background:
+    linear-gradient(var(--accent), var(--accent)) top left / 14px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) top left / 2px 14px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) top right / 14px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) top right / 2px 14px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom left / 14px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom left / 2px 14px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom right / 14px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom right / 2px 14px no-repeat;
+  transition: opacity 160ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1);
+}
+html[data-fx="cyber"] :is(
+  .desk-search, .desk-tile, .desk-ledger, .folio-card,
+  .monograph-front, .monograph-contents, .pref-pages .settings-section,
+  .album-card, .library-card
+):hover::before,
+html[data-fx="cyber"] :is(.desk-search, .pref-pages .settings-section):focus-within::before {
+  opacity: 1;
+  transform: scale(1);
+}
+html[data-fx="cyber"] :is(.btn-primary, .desk-tile) {
+  position: relative;
+  overflow: hidden;
+}
+html[data-fx="cyber"] :is(.btn-primary, .desk-tile)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(112deg, transparent 22%, rgba(var(--accent-rgb), .24) 48%, rgba(255, 255, 255, .36) 52%, transparent 78%);
+  transform: translate3d(-140%, 0, 0);
+  pointer-events: none;
+  z-index: 1;
+}
+html[data-fx="cyber"] :is(.btn-primary, .desk-tile):hover::after {
+  animation: fxCyberSweep 440ms cubic-bezier(.16, 1, .3, 1);
+}
+@keyframes fxCyberSweep {
+  from { transform: translate3d(-140%, 0, 0); }
+  to   { transform: translate3d(140%, 0, 0); }
+}
+html[data-fx="cyber"] :is(.album-card, .library-card, .desk-tile, .pref-palette, .pref-fx-card):hover {
+  transform: translate3d(0, -3px, 0);
+  border-color: rgba(var(--accent-rgb), .58);
+}
+html[data-fx="cyber"] :is(.desk-search, .desk-ledger, .folio-card, .monograph-front, .monograph-contents, .pref-pages .settings-section):hover {
+  border-color: rgba(var(--accent-rgb), .50);
+}
+html[data-fx="cyber"] .desk-tile:hover .desk-tile-icon {
+  transform: scale(1.08);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+html[data-fx="cyber"] .btn {
+  transition: transform 140ms cubic-bezier(.16, 1, .3, 1), background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+html[data-fx="cyber"] .btn:hover:not(:disabled) { transform: translate3d(0, -1px, 0); }
+html[data-fx="cyber"] .btn:active:not(:disabled) { transform: scale(.96); }
+html[data-fx="cyber"] .sidebar-nav .nav-link { transition: transform 140ms ease, background-color 140ms ease, color 140ms ease; }
+html[data-fx="cyber"] .sidebar-nav .nav-link:hover { transform: translate3d(4px, 0, 0); }
+
+/* ── FX Pack: Anime (Elastic Spring Pop, Pastel Shimmer Bar & Corner ✦ Star) ── */
+html[data-fx="anime"] :is(
+  .desk-search, .desk-tile, .desk-ledger, .shelf-filter-sheet,
+  .album-card, .library-card, .folio-card, .monograph-front, .monograph-contents,
+  .pref-palette, .pref-fx-card, .pref-pages .settings-section
+) {
+  transition: transform 220ms cubic-bezier(.34, 1.52, .64, 1), border-color 160ms ease;
+}
+html[data-fx="anime"] :is(.desk-search, .desk-tile, .desk-ledger, .folio-card, .monograph-front, .monograph-contents, .pref-pages .settings-section)::after {
+  content: '✦';
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--accent);
+  opacity: 0;
+  transform: scale(.35) rotate(-45deg);
+  transition: opacity 180ms ease, transform 240ms cubic-bezier(.34, 1.65, .64, 1);
+  pointer-events: none;
+  z-index: 2;
+}
+html[data-fx="anime"] .desk-tile::after {
+  top: auto;
+  bottom: 10px;
+  right: 12px;
+  font-size: 13px;
+}
+html[data-fx="anime"] :is(.desk-search, .desk-tile, .desk-ledger, .folio-card, .monograph-front, .monograph-contents, .pref-pages .settings-section):hover::after,
+html[data-fx="anime"] .desk-search:focus-within::after {
+  opacity: .92;
+  transform: scale(1.1) rotate(0deg);
+}
+html[data-fx="anime"] :is(.desk-search, .desk-ledger, .monograph-front, .monograph-contents)::before {
+  content: '';
+  position: absolute;
+  left: 20px; right: 20px; top: 0; height: 3px;
+  border-radius: 0 0 6px 6px;
+  background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), .55), rgba(242, 140, 177, .85), rgba(126, 184, 240, .75), transparent);
+  opacity: 0;
+  transform: scaleX(.5);
+  transition: opacity 180ms ease, transform 240ms cubic-bezier(.34, 1.45, .64, 1);
+  pointer-events: none;
+  z-index: 2;
+}
+html[data-fx="anime"] :is(.desk-search, .desk-ledger, .monograph-front, .monograph-contents):hover::before,
+html[data-fx="anime"] .desk-search:focus-within::before {
+  opacity: .95;
+  transform: scaleX(1);
+}
+html[data-fx="anime"] :is(.album-card, .library-card, .desk-tile, .pref-palette, .pref-fx-card):hover {
+  transform: translate3d(0, -3px, 0);
+  border-color: rgba(var(--accent-rgb), .50);
+}
+html[data-fx="anime"] :is(.desk-search, .desk-ledger, .folio-card, .monograph-front, .monograph-contents, .pref-pages .settings-section):hover {
+  border-color: rgba(var(--accent-rgb), .42);
+}
+html[data-fx="anime"] .desk-tile:hover .desk-tile-icon {
+  transform: translate3d(0, -2px, 0) rotate(-8deg) scale(1.12);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+html[data-fx="anime"] .btn {
+  transition: transform 200ms cubic-bezier(.34, 1.6, .64, 1), background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+html[data-fx="anime"] .btn:hover:not(:disabled) { transform: translate3d(0, -2px, 0) scale(1.03); }
+html[data-fx="anime"] .btn:active:not(:disabled) { transform: scale(.94); }
+html[data-fx="anime"] .sidebar-nav .nav-link { transition: transform 160ms cubic-bezier(.34, 1.5, .64, 1), background-color 140ms ease, color 140ms ease; }
+html[data-fx="anime"] .sidebar-nav .nav-link:hover { transform: translate3d(4px, 0, 0); }
+
+/* ==========================================================================
+   4. Zero-Stutter Recycled WAAPI Click Micro-Burst Layer
+   No box-shadow, no clip-path masks, no idle will-change promotion.
+   ========================================================================== */
+.atelier-fx-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1090;
+  overflow: hidden;
+  contain: strict;
+}
+.fx-node {
+  position: fixed;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  contain: layout style;
+}
+
+/* Calm: crisp water-ripple ring */
+.fx-calm-ring {
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+}
+
+/* Pixel: crisp 8-bit square spark */
+.fx-pixel-bit {
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  background: var(--fx-c, var(--accent));
+}
+
+/* Cyber: rotating diamond HUD reticle + laser ticks */
+.fx-cyber-ring {
+  width: 24px;
+  height: 24px;
+  margin: -12px 0 0 -12px;
+  border: 2px solid var(--accent);
+  border-radius: 3px;
+}
+.fx-cyber-tick {
+  width: 12px;
+  height: 2px;
+  margin: -1px 0 0 -6px;
+  background: var(--accent);
+}
+
+/* Anime: sakura petals & rotated diamond sparkles (pure GPU quads, zero clip-path) */
+.fx-anime-petal {
+  width: 10px;
+  height: 7px;
+  margin: -3.5px 0 0 -5px;
+  border-radius: 75% 25% 75% 25%;
+  background: var(--fx-c, var(--accent));
+}
+.fx-anime-star {
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 2px;
+  background: var(--fx-c, var(--accent));
+}
+
+/* ==========================================================================
+   5. Master FX Off Switch & Reduced Motion Override (Zero Overhead When Off)
+   ========================================================================== */
+html[data-fx="none"] .atelier-fx-layer {
+  display: none !important;
+}
+html[data-fx="none"] *,
+html[data-fx="none"] *::before,
+html[data-fx="none"] *::after {
+  animation: none !important;
+  transition-duration: 0ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atelier-fx-layer { display: none !important; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

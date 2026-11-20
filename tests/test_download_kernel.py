@@ -264,7 +264,7 @@ def test_nested_downloads_leave_foreground_and_prefetch_capacity(pipeline, tmp_p
     reader.clear_cache()
     for photo_id, pages in [("901", 3), ("902", 1), ("903", 1), ("904", 1), ("905", 1)]:
         reader._remember_photos([Photo(photo_id, "online", pages)])
-    cached = reader.CACHE_ROOT / "901/00001.webp"
+    cached = reader._page_path("901", 0)
     cached.parent.mkdir(parents=True)
     cached.write_bytes(payload)
     with ThreadPoolExecutor(6) as pool:

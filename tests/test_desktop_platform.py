@@ -145,3 +145,61 @@ def test_no_desktop_capability_does_not_bypass_authorization(client, directories
     assert client.post("/api/jobs/job_desktop/open-folder").status_code == 403
     assert not outside.exists()
     assert client.post("/api/jobs/job_missing/open-folder").status_code == 404
+
+
+def test_explorer_foreground_matcher_handles_new_window_tab_switch_and_existing(tmp_path, monkeypatch):
+    from core import desktop_platform
+
+    folder = tmp_path / "导出"
+    assert desktop_platform._title_matches_folder("导出 - 文件资源管理器", folder)
+    assert desktop_platform._title_matches_folder(f"{folder} - File Explorer", folder)
+    assert not desktop_platform._title_matches_folder("下载 - 文件资源管理器", folder)
+
+    focused = []
+    monkeypatch.setattr(desktop_platform, "_force_window_foreground", focused.append)
+    monkeypatch.setattr(desktop_platform.time, "sleep", lambda _s: None)
+
+    # Tier 1: brand-new Explorer window opened
+    monkeypatch.setattr(desktop_platform, "_snapshot_explorer_windows", lambda: {101: "下载 - 文件资源管理器", 202: "导出 - 文件资源管理器"})
+    desktop_platform._focus_explorer_window(folder, {101: "下载 - 文件资源管理器"})
+    assert focused == [202]
+
+    # Tier 2: Windows 11 tab added inside an existing Explorer window (title changed)
+    focused.clear()
+    monkeypatch.setattr(desktop_platform, "_snapshot_explorer_windows", lambda: {101: "导出 - 文件资源管理器"})
+    desktop_platform._focus_explorer_window(folder, {101: "下载 - 文件资源管理器"})
+    assert focused == [101]
+
+
+def test_export_open_folder_route_respects_capability_and_file_selection(client, tmp_path, monkeypatch):
+    from core import desktop_platform
+    from routes import api_export
+
+    export_dir = tmp_path / "导出"
+    monkeypatch.setattr(api_export, "get_export_dir", lambda: export_dir)
+
+    # Unsupported platform -> 501 without creating export directory
+    monkeypatch.delattr(os, "startfile", raising=False)
+    res = client.post("/api/export/open-folder")
+    assert res.status_code == 501
+    assert not export_dir.exists()
+
+    # Supported platform -> creates directory and opens/selects safely
+    calls = []
+    monkeypatch.setattr(os, "startfile", Mock(), raising=False)
+    monkeypatch.setattr(desktop_platform, "open_folder", lambda path, *, select=None: calls.append((path, select)))
+
+    res = client.post("/api/export/open-folder")
+    assert res.status_code == 200 and export_dir.is_dir()
+    assert calls[-1] == (export_dir, None)
+
+    sample = export_dir / "Sample_123.cbz"
+    sample.write_bytes(b"PK")
+    res = client.post("/api/export/open-folder", json={"filename": "Sample_123.cbz"})
+    assert res.status_code == 200
+    assert calls[-1] == (export_dir, sample)
+
+    # Traversal filename is ignored (opens folder only, never selects outside file)
+    res = client.post("/api/export/open-folder", json={"filename": "../secret.txt"})
+    assert res.status_code == 200
+    assert calls[-1] == (export_dir, None)

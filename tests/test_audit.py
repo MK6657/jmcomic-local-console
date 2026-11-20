@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -396,14 +397,106 @@ def test_retired_client_survives_timed_out_background_call(client, monkeypatch):
     close.assert_called_once()
 
 
-def test_diagnose_counts_error_lines(client, tmp_path, monkeypatch):
+@pytest.fixture
+def diagnose_logs(tmp_path, monkeypatch):
     from routes import api_system
+
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    (log_dir / "error.log").write_text("2026-09-08 ERROR test\n" * 23, encoding="utf-8")
+    now = datetime(2026, 11, 20, 12, 0, 0)
     monkeypatch.setattr(api_system, "LOG_DIR", log_dir)
+    monkeypatch.setattr(api_system, "time", SimpleNamespace(time=now.timestamp))
+    monkeypatch.setattr(api_system, "socket", SimpleNamespace(create_connection=Mock(return_value=Mock())))
+    return log_dir, now
+
+
+def _diagnostic_log_line(when, level, message="fixture"):
+    return f"[{when:%Y-%m-%d %H:%M:%S}] [{level}] [jmconsole] {message}\n"
+
+
+def test_diagnose_counts_errors_by_header_time_and_level(client, diagnose_logs):
+    log_dir, now = diagnose_logs
+    start = now - timedelta(hours=24)
+    rotated = log_dir / "error.log.2026-11-19"
+    rotated.write_text(_diagnostic_log_line(start, "CRITICAL"), encoding="utf-8")
+    old_mtime = (start - timedelta(days=2)).timestamp()
+    os.utime(rotated, (old_mtime, old_mtime))
+    (log_dir / "error.log").write_text(
+        _diagnostic_log_line(start - timedelta(seconds=1), "ERROR")
+        + _diagnostic_log_line(now, "WARNING", "contains ERROR and CRITICAL")
+        + _diagnostic_log_line(now, "ERROR") * 22
+        + "Traceback continuation mentions ERROR\n"
+        + _diagnostic_log_line(now + timedelta(seconds=1), "ERROR"),
+        encoding="utf-8",
+    )
     data = client.get("/api/system/diagnose").get_json()
     assert data["error_count_24h"] == 23
+    assert data["error_count_24h_truncated"] is False and data["health"] == "degraded"
+
+
+def test_diagnose_reads_tail_of_oversized_log_and_reports_truncation(client, diagnose_logs):
+    log_dir, now = diagnose_logs
+    with (log_dir / "error.log").open("wb") as handle:
+        handle.write(_diagnostic_log_line(now, "ERROR", "outside byte budget").encode())
+        handle.seek(11 * 1024 * 1024)
+        handle.write(("\n" + _diagnostic_log_line(now, "ERROR", "inside byte budget")).encode())
+
+    response = client.get("/api/system/diagnose")
+    assert response.status_code == 200
+    assert response.json["error_count_24h"] == 1
+    assert response.json["error_count_24h_truncated"] is True
+    assert any("未能完整扫描" in warning for warning in response.json["warnings"])
+
+
+def test_diagnose_stops_scanning_once_entries_pass_24h_cutoff(client, diagnose_logs):
+    log_dir, now = diagnose_logs
+    old_line = _diagnostic_log_line(now - timedelta(days=3), "ERROR", "x" * 200)
+    repeats = (11 * 1024 * 1024) // len(old_line) + 10
+    (log_dir / "error.log").write_text(
+        old_line * repeats + _diagnostic_log_line(now - timedelta(minutes=5), "ERROR", "recent"),
+        encoding="utf-8",
+    )
+    (log_dir / "error.log.2026-11-17").write_text(old_line * repeats, encoding="utf-8")
+
+    response = client.get("/api/system/diagnose")
+    assert response.status_code == 200
+    assert response.json["error_count_24h"] == 1
+    assert response.json["error_count_24h_truncated"] is False
+    assert response.json["health"] == "healthy"
+
+
+def test_diagnose_counts_jobs_beyond_history_page_limit(client, diagnose_logs):
+    from core import database
+
+    with database.transaction() as conn:
+        conn.executemany(
+            "INSERT INTO jobs (job_id, album_id, status, created_at) VALUES (?, '123', ?, ?)",
+            [("running", "running", "2026-11-18"), ("queued", "queued", "2026-11-18"),
+             ("paused", "paused", "2026-11-18")],
+        )
+        conn.executemany(
+            "INSERT INTO jobs (job_id, album_id, status, created_at) VALUES (?, '123', 'completed', '2026-11-19')",
+            ((f"finished-{index}",) for index in range(5001)),
+        )
+    diagnostic = client.get("/api/system/diagnose").json["application"]
+    assert diagnostic == {"db_ok": True, "active_jobs": 1, "queued_jobs": 1}
+    activity = client.get("/api/system/health?activity=1").json["jobs"]
+    assert (activity["running"], activity["queued"], activity["paused"]) == (1, 1, 1)
+
+
+def test_health_activity_counts_a_real_shared_client_lease(client):
+    from core import jm_service
+
+    endpoint = "/api/system/health"
+    before = client.get(endpoint + "?activity=1").json["jm_active_clients"]
+    idle = client.get(endpoint).json["jm_active_clients"]
+    lease, _ = jm_service.get_client()
+    try:
+        assert client.get(endpoint + "?activity=1").json["jm_active_clients"] == before + 1
+        assert client.get(endpoint).json["jm_active_clients"] == idle
+    finally:
+        jm_service.close_client(lease)
+    assert client.get(endpoint + "?activity=1").json["jm_active_clients"] == before
 
 
 def test_json_parse_error_and_plain_text_are_rejected(client):
@@ -421,3 +514,111 @@ def test_organize_does_not_nest_or_overwrite_existing_destination(client, album_
     assert (album_dir / "chapter/1.png").is_file()
     assert (destination / "chapter/1.png").read_bytes() == original
     assert not (destination / "chapter/chapter").exists()
+
+
+def test_preview_and_export_wait_for_in_flight_maintenance_move(client, album_dir):
+    from core import album_maintenance, database as db
+
+    make_image(album_dir / "ch1" / "00001.webp")
+    create_job(album_dir)
+    new_dir = album_dir.parent / "Moved_123"
+
+    entered = threading.Event()
+    finish = threading.Event()
+
+    def move_worker():
+        with album_maintenance._move_lock:
+            album_dir.rename(new_dir)
+            entered.set()
+            assert finish.wait(5)
+            with db.transaction() as conn:
+                conn.execute("UPDATE jobs SET output_path=? WHERE job_id='job_audit'", (str(new_dir),))
+                conn.execute("UPDATE resource_catalog SET output_path=? WHERE job_id='job_audit'", (str(new_dir),))
+
+    worker = threading.Thread(target=move_worker)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        threading.Timer(0.05, finish.set).start()
+        preview = client.get("/api/preview/123")
+        assert preview.status_code == 200 and len(preview.json["pages"]) == 1
+    finally:
+        finish.set()
+        worker.join(timeout=5)
+
+    # Also exercise export waiting across a second concurrent move
+    third_dir = album_dir.parent / "MovedAgain_123"
+    entered.clear()
+    finish.clear()
+
+    def move_worker_2():
+        with album_maintenance._move_lock:
+            new_dir.rename(third_dir)
+            entered.set()
+            assert finish.wait(5)
+            with db.transaction() as conn:
+                conn.execute("UPDATE jobs SET output_path=? WHERE job_id='job_audit'", (str(third_dir),))
+                conn.execute("UPDATE resource_catalog SET output_path=? WHERE job_id='job_audit'", (str(third_dir),))
+
+    worker2 = threading.Thread(target=move_worker_2)
+    worker2.start()
+    try:
+        assert entered.wait(5)
+        threading.Timer(0.05, finish.set).start()
+        with client.post("/api/library/123/export/cbz") as exported:
+            assert exported.status_code == 200
+    finally:
+        finish.set()
+        worker2.join(timeout=5)
+
+
+def test_local_export_saves_cbz_zip_pdf_into_unified_export_dir(client, album_dir, tmp_path, monkeypatch):
+    import pikepdf
+    from routes import api_export
+
+    export_dir = tmp_path / "导出"
+    monkeypatch.setattr(api_export, "get_export_dir", lambda: export_dir)
+    make_image(album_dir / "ch1" / "00001.png")
+    make_image(album_dir / "ch1" / "00002.png")
+    create_job(album_dir)
+
+    headers = {"X-Export-Target": "local"}
+    # 1. CBZ saved directly as ZIP_STORED in 导出/
+    cbz_res = client.post("/api/export/job_audit/cbz", headers=headers)
+    assert cbz_res.status_code == 200 and cbz_res.is_json
+    cbz_data = cbz_res.get_json()
+    assert cbz_data["status"] == "ok" and cbz_data["saved"] is True
+    cbz_file = export_dir / cbz_data["filename"]
+    assert cbz_file.is_file() and cbz_file.suffix == ".cbz"
+    with zipfile.ZipFile(cbz_file) as zf:
+        assert len(zf.namelist()) == 2
+        assert all(info.compress_type == zipfile.ZIP_STORED for info in zf.infolist())
+
+    # 2. ZIP saved directly in 导出/
+    zip_res = client.post("/api/library/123/export/zip", headers=headers)
+    assert zip_res.status_code == 200 and zip_res.get_json()["saved"] is True
+    zip_file = export_dir / zip_res.get_json()["filename"]
+    assert zip_file.is_file() and zip_file.suffix == ".zip"
+
+    # 3. PDF saved directly in 导出/
+    pdf_res = client.post("/api/export/job_audit/pdf", headers=headers)
+    assert pdf_res.status_code == 200 and pdf_res.get_json()["saved"] is True
+    pdf_file = export_dir / pdf_res.get_json()["filename"]
+    assert pdf_file.is_file() and pdf_file.suffix == ".pdf"
+    with pikepdf.Pdf.open(pdf_file) as pdf:
+        assert len(pdf.pages) == 2
+
+    # No leftover .tmp files in 导出/
+    assert not any(p.suffix == ".tmp" for p in export_dir.iterdir())
+
+    # 4. Locked existing target falls back cleanly to " (2).cbz"
+    real_replace = os.replace
+    def locked_first(src, dst):
+        if Path(dst) == cbz_file:
+            raise PermissionError("file in use by reader")
+        return real_replace(src, dst)
+    monkeypatch.setattr(api_export.os, "replace", locked_first)
+    cbz_res2 = client.post("/api/export/job_audit/cbz", headers=headers)
+    assert cbz_res2.status_code == 200
+    assert "(2).cbz" in cbz_res2.get_json()["filename"]
+    assert (export_dir / cbz_res2.get_json()["filename"]).is_file()

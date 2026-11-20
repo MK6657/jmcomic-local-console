@@ -18,9 +18,7 @@
             <div class="col-6 col-md-3">
                 <label for="sort-select" class="form-label">排序</label>
                 <select id="sort-select" class="form-select">
-                    <option value="latest" {% if sort == 'latest' %}selected{% endif %}>最新</option>
-                    <option value="views" {% if sort == 'views' %}selected{% endif %}>最多观看</option>
-                    <option value="likes" {% if sort == 'likes' %}selected{% endif %}>最多点赞</option>
+                    {% include 'partials/search-sort-options.html' %}
                 </select>
             </div>
             <div class="col-6 col-md-2">

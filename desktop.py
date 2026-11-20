@@ -74,8 +74,14 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=True))
         return result["exit_code"]
     if options.command == "serve":
-        from app import main as serve
-        return serve()
+        from core.instance_lock import acquire_instance_lock
+        lease = acquire_instance_lock()
+        try:
+            from app import main as serve
+        except BaseException:
+            lease.close()
+            raise
+        return serve(instance_lease=lease)
     if options.home is None:
         return _instance_command(options.command, options.home)
     previous_home = os.environ.get("JMCONSOLE_HOME")

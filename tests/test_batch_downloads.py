@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 T0 = datetime(2026, 9, 1, 12, 0, 0)
 PREVIEW = "/api/batch-downloads/preview"
 CONFIRM = "/api/batch-downloads/confirm"
-PREVIEW_KEYS = {"status", "kind", "token", "limit", "items", "counts", "skipped", "more", "review", "out_of_scope",
+PREVIEW_KEYS = {"status", "kind", "token", "limit", "items", "counts", "skipped", "skipped_total", "more", "review", "out_of_scope",
                 "window", "queue", "settings"}
 WINDOW_KEYS = {"enabled", "open", "start", "end", "never", "invalid", "opens_tomorrow"}
 
@@ -131,6 +131,39 @@ def preview(client, kind, **body):
 
 def confirm(client, kind, token, **body):
     return client.post(CONFIRM, json={"kind": kind, "token": token, **body})
+
+
+def test_confirm_returns_committed_jobs_if_queue_context_fails(client, downloads, monkeypatch):
+    from core import database as db
+    from routes import api_batch_downloads
+
+    favourite("801", "Queued")
+    kind = "undownloaded_favourites"
+    plan = preview(client, kind)
+
+    def unavailable():
+        raise OSError("fixture queue summary unavailable")
+
+    monkeypatch.setattr(api_batch_downloads, "_context", unavailable)
+    response = confirm(client, kind, plan["token"])
+    assert response.status_code == 201
+    created, = response.json["created"]
+    assert response.json["status"] == "ok" and created["album_id"] == "801"
+    assert db.get_job(created["job_id"])["status"] == "queued"
+
+
+def test_batch_preview_bounds_skipped_detail_without_changing_token(client, downloads, monkeypatch):
+    from core import batch_downloads
+
+    favourite("801", "Eligible")
+    kind, ids = "selected_favourites", ["801", "802", "803"]
+    full = preview(client, kind, album_ids=ids)
+    monkeypatch.setattr(batch_downloads, "MAX_SKIPPED_DETAILS", 1)
+    bounded = preview(client, kind, album_ids=ids)
+    assert bounded["skipped"] == full["skipped"][:1]
+    assert bounded["skipped_total"] == full["skipped_total"] == 2
+    assert bounded["token"] == full["token"] and bounded["items"] == full["items"]
+    assert confirm(client, kind, bounded["token"], album_ids=ids).status_code == 201
 
 
 def _ids(data):

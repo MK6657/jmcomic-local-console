@@ -1,5 +1,6 @@
 """Atomic, offline task commands; no worker starts and all databases are temporary."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import json
 import threading
 
@@ -193,9 +194,9 @@ def test_legacy_retry_tuple_contract_is_preserved(client):
 
 def test_create_api_returns_created_then_reused_without_rescheduling(client, monkeypatch):
     from core import database as db
-    from core.job_manager import job_manager
+    from core.job_manager import JobManager
     scheduled = []
-    monkeypatch.setattr(job_manager, "schedule_next", lambda: scheduled.append(True))
+    monkeypatch.setattr(JobManager, "schedule_next", lambda self: scheduled.append(True))
     first = client.post("/api/jobs", json={"album_id": "123", "photo_ids": ["12", "11"]})
     again = client.post("/api/jobs", json={"album_id": "123", "photo_ids": ["11", "12", "11"]})
     assert first.status_code == 201 and again.status_code == 200
@@ -207,10 +208,10 @@ def test_create_api_returns_created_then_reused_without_rescheduling(client, mon
 
 def test_scheduling_failure_does_not_hide_a_committed_job(client, monkeypatch):
     from core import database as db
-    from core.job_manager import job_manager
-    def fail():
+    from core.job_manager import JobManager
+    def fail(self):
         raise RuntimeError("scheduler temporarily unavailable")
-    monkeypatch.setattr(job_manager, "schedule_next", fail)
+    monkeypatch.setattr(JobManager, "schedule_next", fail)
     response = client.post("/api/jobs", json={"album_id": "123", "photo_ids": ["11"]})
     assert response.status_code == 201
     assert db.get_job(response.json["job_id"])["status"] == "queued"
@@ -237,3 +238,25 @@ def test_retry_api_returns_explicit_errors_and_reuses_a_successor(client):
     assert first.status_code == 201 and again.status_code == 200
     assert first.json["job_id"] == again.json["job_id"]
     assert again.json["created"] is False and len(db.get_all_jobs()) == 2
+
+
+def test_normal_and_guarded_enqueue_keep_fifo_when_wall_clock_moves_back(client, monkeypatch):
+    from core import database as db, task_commands
+
+    class RewoundClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2020, 1, 1, tzinfo=tz)
+
+    db.insert_job("waiting", "721", "Waiting", [])
+    with db.transaction() as conn:
+        conn.execute("UPDATE jobs SET queued_at=? WHERE job_id=?", ("2026-11-20T13:00:00", "waiting"))
+    monkeypatch.setattr(task_commands, "datetime", RewoundClock)
+    monkeypatch.setattr(db, "datetime", RewoundClock)
+    direct = task_commands.enqueue_download("722", "Direct", []).job_id
+    with db.transaction() as conn:
+        assert db.insert_job_guarded(conn, "guarded", "723", "Guarded", [])
+    jobs = [db.get_job(job_id) for job_id in ("waiting", direct, "guarded")]
+    assert [job["job_id"] for job in sorted(jobs, key=lambda job: job["queued_at"])] == ["waiting", direct, "guarded"]
+    assert jobs[1]["created_at"] == jobs[2]["created_at"] == "2020-01-01T00:00:00"
+    assert [db.claim_next_queued_job()["job_id"] for _ in jobs] == ["waiting", direct, "guarded"]
