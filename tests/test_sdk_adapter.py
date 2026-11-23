@@ -326,3 +326,25 @@ def test_batch_exit_codes_with_real_sdk_scheduler(monkeypatch, capsys, dispatch,
         assert batch_item.call_count == 2
         acquire.assert_called_once_with(read_only=False)
         close.assert_called_once_with(instance)
+
+
+def test_configure_sdk_wraps_save_image_once_and_preserves_rgba_jpeg_guard(client, tmp_path):
+    from PIL import Image
+    from core import sdk_adapter
+    from jmcomic import JmImageTool
+
+    sdk_adapter.configure_sdk()
+    first_func = JmImageTool.save_image.__func__
+    assert getattr(JmImageTool.save_image, "_atelier_rgb_guard", False) is True
+    for _ in range(1200):
+        sdk_adapter.configure_sdk()
+    assert JmImageTool.save_image.__func__ is first_func
+
+    jpeg_target = tmp_path / "rgba_page.jpg"
+    webp_target = tmp_path / "rgb_page.webp"
+    JmImageTool.save_image(Image.new("RGBA", (4, 4), (255, 0, 0, 128)), str(jpeg_target))
+    JmImageTool.save_image(Image.new("RGB", (4, 4), (0, 255, 0)), str(webp_target))
+    with Image.open(jpeg_target) as saved_jpg, Image.open(webp_target) as saved_webp:
+        assert saved_jpg.format == "JPEG" and saved_jpg.mode == "RGB"
+        assert saved_webp.format == "WEBP"
+

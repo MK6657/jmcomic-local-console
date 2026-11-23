@@ -419,7 +419,7 @@ def _download_image_single_attempt(
     except Exception as e:
         if (stop_event is not None and stop_event.is_set()) or (checkpoint and _should_stop(job_id, None, stop_event)):
             return  # Runtime owns recovery; a stop is neither a failed page nor a retry.
-        if pass_num == 1 and pending_images is not None and not image_download.local_write_error(e):
+        if pass_num == 1 and pending_images is not None and not image_download.non_retryable_error(e):
             # 首趟：只存位置信息，不存 client（线程退出后 client 会关闭）
             with lock:
                 pending_images.append({

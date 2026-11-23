@@ -52,7 +52,6 @@ def configure_sdk() -> None:
         if not getattr(JmImageTool.save_image, "_atelier_rgb_guard", False):
             _orig_save_image = JmImageTool.save_image.__func__
 
-            @classmethod
             def _safe_save_image(cls, image, filepath: str):
                 if (
                     str(filepath).lower().endswith((".jpg", ".jpeg"))
@@ -62,7 +61,9 @@ def configure_sdk() -> None:
                 return _orig_save_image(cls, image, filepath)
 
             _safe_save_image._atelier_rgb_guard = True
-            JmImageTool.save_image = _safe_save_image
+            _wrapped_save_image = classmethod(_safe_save_image)
+            _wrapped_save_image._atelier_rgb_guard = True
+            JmImageTool.save_image = _wrapped_save_image
         claim_library_loggers()
 
 

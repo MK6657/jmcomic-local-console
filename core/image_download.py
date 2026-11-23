@@ -27,6 +27,11 @@ def local_write_error(error):
         or getattr(error, 'winerror', None) in (5, 32, 33, 39, 112, 206))
 
 
+def non_retryable_error(error):
+    """Local write failures and fatal process errors will not recover by switching CDN."""
+    return local_write_error(error) or isinstance(error, (RecursionError, MemoryError))
+
+
 def failure_detail(error):
     from PIL import UnidentifiedImageError
     from .logger import sanitize
@@ -100,8 +105,8 @@ def download_image(client, *, img_url, img_save_path, scramble_id, decode_image,
                 except DownloadInterrupted:
                     raise
                 except Exception as error:
-                    if local_write_error(error):
-                        raise  # Changing CDN cannot free disk space or release a Windows lock.
+                    if non_retryable_error(error):
+                        raise  # Changing CDN cannot fix local disk, config, or recursion failures.
                     last_error = error
                     _result(host, False)
                     continue

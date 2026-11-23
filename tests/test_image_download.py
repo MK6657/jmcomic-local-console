@@ -91,3 +91,44 @@ def test_full_disk_does_not_retry_or_demote_a_working_mirror(network, monkeypatc
     assert calls == ['https://first.invalid/page'] and not image_download._failed_hosts
     assert '[local_file]' in image_download.failure_detail(failed.value)
     assert '[timeout]' in image_download.failure_detail(TimeoutError('fixture timeout'))
+
+
+def test_recursion_error_does_not_retry_mirrors_or_demote_host(network, monkeypatch):
+    from core import image_download
+    client, calls, _, _ = network
+    def recurse(**kwargs):
+        calls.append(kwargs['img_url'])
+        raise RecursionError('maximum recursion depth exceeded while calling a Python object')
+    monkeypatch.setattr(client, 'download_image', recurse)
+    with pytest.raises(RecursionError) as failed:
+        image_download.download_image(client, img_url='https://first.invalid/page', img_save_path='unused',
+                                     scramble_id=None, decode_image=True, timeout=5, attempts=3)
+    assert calls == ['https://first.invalid/page'] and not image_download._failed_hosts
+    assert image_download.non_retryable_error(failed.value) is True
+    assert '[page_error]' in image_download.failure_detail(failed.value)
+
+
+def test_pass_one_does_not_queue_non_retryable_error_for_pass_two(client, tmp_path, monkeypatch):
+    import threading
+    from core import jm_service, path_guard
+    root = tmp_path / "downloads"
+    folder = root / "book_123"
+    folder.mkdir(parents=True)
+    for module in (jm_service, path_guard):
+        monkeypatch.setattr(module, "DOWNLOAD_ROOT", root)
+    monkeypatch.setattr(
+        jm_service.image_download,
+        "download_image",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RecursionError("maximum recursion depth exceeded")),
+    )
+    img = SimpleNamespace(download_url="https://first.invalid/00001.webp", img_file_name="00001.webp", scramble_id=None)
+    done, pending, failed = [0], [], []
+    jm_service._download_image_single_attempt(
+        None, "job_non_retryable", "123", None, "", [img], 0, img, img.download_url,
+        folder / "00001.webp", None, done, 1, failed, pending, None, folder, 1, 5, threading.Lock(),
+    )
+    assert done == [0]
+    assert not pending
+    assert len(failed) == 1 and "[page_error]" in failed[0]
+
+
