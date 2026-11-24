@@ -436,7 +436,7 @@ def test_archive_signature_uses_birthtime_when_python312_fstat_ctime_differs(dow
             st_mtime_ns=st.st_mtime_ns,
             st_dev=st.st_dev,
             st_ino=st.st_ino,
-            st_birthtime_ns=st.st_ctime_ns,
+            st_birthtime_ns=getattr(st, "st_birthtime_ns", st.st_ctime_ns),
             st_ctime_ns=st.st_ctime_ns,
         )
 
@@ -449,7 +449,7 @@ def test_archive_signature_uses_birthtime_when_python312_fstat_ctime_differs(dow
             st_mtime_ns=st.st_mtime_ns,
             st_dev=st.st_dev,
             st_ino=st.st_ino,
-            st_birthtime_ns=st.st_ctime_ns,
+            st_birthtime_ns=getattr(st, "st_birthtime_ns", st.st_ctime_ns),
             # Simulate CPython 3.12 Windows gh-112840: fstat().st_ctime_ns is ChangeTime != CreationTime
             st_ctime_ns=st.st_mtime_ns + 8_038_400,
         )
