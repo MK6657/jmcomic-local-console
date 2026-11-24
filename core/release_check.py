@@ -96,8 +96,12 @@ def _image_checks():
 def _dependency_checks():
     import certifi
     from Crypto.Cipher import AES
+    from . import sdk_adapter
     certificate = Path(certifi.where())
     _require(certificate.is_file() and certificate.stat().st_size > 0)
+    if os.name == "nt":
+        cainfo = sdk_adapter.windows_cainfo(certificate)
+        _require(isinstance(cainfo, bytes) and Path(cainfo.decode("mbcs")).is_file())
     key, block = bytes(range(16)), bytes(reversed(range(16)))
     encrypted = AES.new(key, AES.MODE_ECB).encrypt(block)
     _require(encrypted != block and AES.new(key, AES.MODE_ECB).decrypt(encrypted) == block)

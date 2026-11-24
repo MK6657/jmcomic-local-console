@@ -1,6 +1,8 @@
-# JMComic Local Console · Atelier Edition
+# JMComic Local Console · Atelier Edition v3.5
 
 [English](README.md) | [简体中文](README.zh-CN.md)
+
+> **Current baseline**: `main` tracks **Atelier Edition v3.5** (2026-11-24). The previous `v3.4` `main` baseline (commit `3fedba1`) is archived at branch `archive/main-v3.4` and tag `atelier-v3.4-archive-2026-11-24`.
 
 This is the Windows Atelier source edition. See the [Atelier guide](docs/ATELIER_WINDOWS.md).
 In the extracted portable bundle, `Preview-Atelier.cmd` opens the isolated sample library;

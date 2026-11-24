@@ -294,19 +294,34 @@
         if (!btn) return;
         const action = btn.dataset.fabAction;
         if (action === 'top') {
-          window.scrollTo({ top: 0, behavior: 'instant' });
           setFabOpen(null);
+          const readerTop = document.getElementById('reader-top');
+          if (readerTop && !readerTop.disabled) {
+            readerTop.click();
+          } else {
+            window.scrollTo({ top: 0, behavior: 'instant' });
+          }
         } else if (action === 'bottom') {
-          const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-          window.scrollTo({ top: maxY, behavior: 'instant' });
           setFabOpen(null);
+          const readerBottom = document.getElementById('reader-bottom');
+          if (readerBottom && !readerBottom.disabled) {
+            readerBottom.click();
+          } else {
+            const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+            window.scrollTo({ top: maxY, behavior: 'instant' });
+          }
         } else if (action === 'tools') {
           const trigger = document.getElementById('reader-tools-toggle') || document.getElementById('preview-tools-toggle');
           if (trigger) trigger.click();
           setFabOpen(null);
         } else if (action === 'back') {
-          if (window.quickNav && typeof window.quickNav.goBack === 'function' && window.quickNav.goBack(event)) return;
+          setFabOpen(null);
           const origin = document.getElementById('reader-origin') || document.getElementById('preview-back');
+          if (origin && typeof origin.click === 'function') {
+            origin.click();
+            return;
+          }
+          if (window.quickNav && typeof window.quickNav.goBack === 'function' && window.quickNav.goBack(event)) return;
           window.location.href = (origin && origin.getAttribute('href')) || '/';
         }
       });

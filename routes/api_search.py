@@ -80,7 +80,7 @@ def search_history():
 
 
 @api_search_bp.delete("/search-history")
-@api_search_bp.delete("/search-history/<string:keyword>")
+@api_search_bp.delete("/search-history/<path:keyword>")
 def delete_search_history_route(keyword: str | None = None):
     """删除指定的搜索历史"""
     if keyword is None:

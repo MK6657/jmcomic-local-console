@@ -40,9 +40,9 @@ def index():
 
     # 给 running_jobs 计算百分比
     for job in running_jobs:
-        total = job.get("total_pages") or 1
+        total = job.get("total_pages") or 0
         done = job.get("done_pages") or 0
-        job["percentage"] = round(done / total * 100, 1)
+        job["percentage"] = min(100.0, max(0.0, round(done / total * 100, 1))) if total > 0 else 0.0
         job["current_page"] = done
 
     return render_template(

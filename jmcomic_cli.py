@@ -94,6 +94,14 @@ def get_client(*, read_only=True):
     return client, option
 
 
+def _parse_album_id(raw):
+    try:
+        return JmcomicText.parse_to_jm_id((raw or "").strip())
+    except Exception as error:
+        print(f"无效车号：{error}")
+        return None
+
+
 def cmd_search(args):
     """搜索漫画"""
     client, _ = get_client()
@@ -121,15 +129,19 @@ def cmd_search(args):
 
         if len(albums) > 20:
             print(f"  ... 还有 {len(albums) - 20} 条未显示")
+        return 0
     finally:
         close_client(client)
 
 
 def cmd_info(args):
     """查看漫画详情"""
+    album_id = _parse_album_id(args.album_id)
+    if not album_id:
+        return 1
     client, _ = get_client()
     try:
-        album = client.get_album_detail(args.album_id)
+        album = client.get_album_detail(album_id)
 
         print(f"📖 标题:   {album.name}")
         print(f"✍️ 作者:   {album.author}")
@@ -147,30 +159,40 @@ def cmd_info(args):
                 pages = str(len(photo)) if hasattr(photo, '__len__') and hasattr(photo, 'page_arr') and photo.page_arr else "..."
                 title = str(photo.name) if hasattr(photo, 'name') and photo.name else "-"
                 print(f"  [{i:3d}] {title}  ({pages}页, ID:{photo.photo_id})")
+        return 0
     finally:
         close_client(client)
 
 
 def cmd_download(args):
     """下载漫画"""
+    album_id = _parse_album_id(args.album_id)
+    if not album_id:
+        return 1
     client, option = get_client(read_only=False)
     try:
-        print(f"📥 正在下载 {args.album_id} ...")
+        print(f"📥 正在下载 {album_id} ...")
 
         from jmcomic import download_album as jm_download
 
-        album, dler = jm_download(args.album_id, option=option)
+        album, dler = jm_download(album_id, option=option)
+        failed_images = getattr(dler, "download_failed_image", None) or ()
+        all_ok = bool(getattr(dler, "all_success", True)) and not failed_images
 
-        print(f"\n✅ 下载完成: {album.name}")
+        if all_ok:
+            print(f"\n✅ 下载完成: {album.name}")
+        else:
+            print(f"\n⚠️ 下载未全部完成: {album.name}")
         print(f"   章节: {len(album)}, 全部成功: {dler.all_success}")
 
-        if dler.download_failed_image:
-            print(f"   ⚠️  {len(dler.download_failed_image)} 张图片下载失败")
+        if failed_images:
+            print(f"   ⚠️  {len(failed_images)} 张图片下载失败")
 
         # 显示下载路径
         if hasattr(dler.option.dir_rule, 'decide_album_root_dir'):
             path = dler.option.dir_rule.decide_album_root_dir(album)
             print(f"   路径: {path}")
+        return 0 if all_ok else 1
     finally:
         close_client(client)
 
@@ -225,14 +247,23 @@ def cmd_browse(args):
             print(f"  [{i:3d}] {name}")
             print(f"       作者: {author}  |  ❤️ {likes}  |  车号: {aid}")
             print()
+        return 0
     finally:
         close_client(client)
 
 
 def cmd_batch(args):
     """批量下载多个漫画"""
-    ids = list(dict.fromkeys(JmcomicText.parse_to_jm_id(value.strip())
-                             for value in args.ids.split(",") if value.strip()))
+    ids = []
+    for value in args.ids.split(","):
+        token = value.strip()
+        if not token:
+            continue
+        parsed = _parse_album_id(token)
+        if not parsed:
+            return 1
+        if parsed not in ids:
+            ids.append(parsed)
     if not ids:
         print("批量下载至少需要一个车号。")
         return 1
@@ -313,9 +344,9 @@ def main(argv=None):
             return 1
 
     if args.command == "search":
-        cmd_search(args)
+        return cmd_search(args)
     elif args.command == "info":
-        cmd_info(args)
+        return cmd_info(args)
     elif args.command in {"download", "batch"}:
         # SDK top-level downloads also write resource files, even though they do
         # not create Web queue rows. Exclude them during maintenance/serving too.
@@ -327,9 +358,10 @@ def main(argv=None):
             print(f"操作未完成：{error}")
             return 1
     elif args.command == "browse":
-        cmd_browse(args)
+        return cmd_browse(args)
     else:
         parser.print_help()
+        return 0
 
 
 if __name__ == "__main__":

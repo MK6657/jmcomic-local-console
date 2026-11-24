@@ -240,8 +240,9 @@ def test_enter_and_click_cannot_submit_two_settings_writes():
     assert ui("double-submit")["posts"] == 1
 
 
-def test_save_import_and_reset_are_mutually_exclusive_and_reset_reports_warnings():
-    result = ui("reset-overlap")
+@pytest.mark.parametrize("edition", ["atelier", "classic"])
+def test_save_import_and_reset_are_mutually_exclusive_and_reset_reports_warnings(edition):
+    result = ui("reset-overlap", edition=edition)
     assert all(result[phase] == [True] * 3 for phase in ("duringSave", "duringImport", "duringReset", "duringRefresh"))
     assert result["after"] == [False] * 3
     assert result["resetBodies"] == [{"scope": "all"}]
@@ -250,8 +251,9 @@ def test_save_import_and_reset_are_mutually_exclusive_and_reset_reports_warnings
     assert result["notice"]["type"] == "warning" and "fixture runtime warning" in result["notice"]["message"]
 
 
-def test_failed_reset_releases_write_controls_without_claiming_success():
-    result = ui("reset-failed")
+@pytest.mark.parametrize("edition", ["atelier", "classic"])
+def test_failed_reset_releases_write_controls_without_claiming_success(edition):
+    result = ui("reset-failed", edition=edition)
     assert result["after"] == [False] * 3 and result["gets"] == 1
     assert result["notice"]["type"] == "danger" and "fixture reset failed" in result["notice"]["message"]
 

@@ -258,11 +258,12 @@
       }
       return;
     }
-    if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.defaultPrevented || event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+    if (document.querySelector && document.querySelector('.modal.show, dialog[open]')) return;
     const tag = document.activeElement && document.activeElement.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (document.activeElement && document.activeElement.isContentEditable)) return;
     const searchInput = document.querySelector('#hero-keyword, #search-input, #library-search, #wishlist-search');
-    if (!searchInput) return;
+    if (!searchInput || searchInput.disabled) return;
     event.preventDefault();
     searchInput.focus();
     if (typeof searchInput.select === 'function') searchInput.select();

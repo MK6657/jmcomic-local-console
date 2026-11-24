@@ -145,6 +145,7 @@ def copy_release_docs(root, bundle):
 
 
 def build(output=None):
+    from core import APP_VERSION
     from tools.release_licenses import stage_licenses, verify_bundle_licenses
 
     if sys.platform != "win32" or platform.machine().upper() not in {"AMD64", "X86_64"}:
@@ -155,7 +156,8 @@ def build(output=None):
     work = ROOT / "build" / ("windows-" + uuid.uuid4().hex)
     work.mkdir(parents=True)
     manifest = {
-        "format": 2, "application": "jmcomic-local-console", "platform": "windows-x64",
+        "format": 2, "application": "jmcomic-local-console", "app_version": APP_VERSION,
+        "platform": "windows-x64",
         "source_sha256": source_id, "python": platform.python_version(),
         "built_at": datetime.now(timezone.utc).isoformat(),
         "packages": packages,

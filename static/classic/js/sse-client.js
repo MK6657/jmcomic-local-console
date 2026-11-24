@@ -47,9 +47,10 @@
    */
   function _updateProgressUI(data) {
     var jobId = data.job_id;
-    var pct = data.progress || 0;
-    var done = data.done_pages || 0;
-    var total = data.total_pages || 0;
+    var pct = Math.max(0, Math.min(100, Number(data.progress) || 0));
+    var done = Number(data.done_pages) || 0;
+    var total = Number(data.total_pages) || 0;
+    var infoText = total > 0 ? (done + ' / ' + total + ' 页') : '总页数待确认';
 
     // 通过 data-job-id 属性查找（首页、通用模板）
     var bars = document.querySelectorAll('[data-job-id="' + jobId + '"] .progress-bar');
@@ -65,11 +66,11 @@
     var infoEl = document.getElementById('info-' + jobId);
     if (pctEl) pctEl.textContent = pct + '%';
     if (barEl) {
-      barEl.style.width = Math.min(pct, 100) + '%';
+      barEl.style.width = pct + '%';
       barEl.setAttribute('aria-valuenow', pct);
     }
     if (infoEl) {
-      infoEl.textContent = done + ' / ' + total + ' 页';
+      infoEl.textContent = infoText;
     }
   }
 

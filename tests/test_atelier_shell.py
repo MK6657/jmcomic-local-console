@@ -198,3 +198,128 @@ def test_versioned_static_assets_emit_immutable_cache_control(client):
     assert 'immutable' in cc and 'max-age=31536000' in cc
     vendor = client.get('/static/vendor/bootstrap/css/bootstrap.min.css')
     assert vendor.status_code == 200 and 'immutable' in vendor.headers.get('Cache-Control', '')
+
+
+def test_reader_fab_delegation_and_fx_modal_shortcut_guard():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('requires Node.js')
+    script = r"""
+const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
+const { runInNewContext } = require('node:vm');
+
+// 1. Verify #reader-fab delegates top/bottom/back to reader controls and falls back cleanly
+{
+  const shellSource = readFileSync(process.argv[1], 'utf8');
+  const document = new EventTarget();
+  const window = new EventTarget();
+  const calls = [];
+  const fabToggle = new EventTarget();
+  fabToggle.setAttribute = (k, v) => { fabToggle[k] = v; };
+  const fabPanel = new EventTarget();
+  const readerFab = new EventTarget();
+  readerFab.classList = {
+    open: false,
+    toggle(cls, force) { if (cls === 'is-open') this.open = Boolean(force); },
+  };
+  readerFab.contains = () => false;
+  readerFab.querySelector = sel => (sel === '.reader-fab-toggle' ? fabToggle : (sel === '.reader-fab-panel' ? fabPanel : null));
+
+  const readerTop = { disabled: false, click: () => calls.push('readerTop.click') };
+  const readerBottom = { disabled: false, click: () => calls.push('readerBottom.click') };
+  const readerOrigin = { getAttribute: () => '/search', click: () => calls.push('readerOrigin.click') };
+
+  document.documentElement = { dataset: { theme: 'sage', bsTheme: 'light', fxEnabled: 'true', fxPreset: 'auto', fx: 'calm' }, scrollHeight: 2400 };
+  window.innerHeight = 800;
+  window.scrollTo = opts => calls.push(`scrollTo:${opts.top}`);
+  document.querySelector = () => ({ content: 'light' });
+  document.querySelectorAll = () => [];
+  document.getElementById = id => ({
+    'reader-fab': readerFab,
+    'reader-top': readerTop,
+    'reader-bottom': readerBottom,
+    'reader-origin': readerOrigin,
+  }[id] || null);
+
+  runInNewContext(shellSource, {
+    window, document, AbortSignal, CustomEvent: Event, setTimeout, clearTimeout,
+    fetch: async () => ({ ok: true, json: async () => ({ status: 'ok', settings: {} }) }),
+    localStorage: { getItem: () => null, setItem: () => {} },
+  });
+
+  let currentFabAction = null;
+  fabPanel.closest = sel => (sel === 'button[data-fab-action]' && currentFabAction ? { dataset: { fabAction: currentFabAction } } : null);
+  const fireFab = action => {
+    currentFabAction = action;
+    fabPanel.dispatchEvent(new Event('click'));
+  };
+
+  fireFab('top');
+  fireFab('bottom');
+  fireFab('back');
+  assert.deepEqual(calls, ['readerTop.click', 'readerBottom.click', 'readerOrigin.click']);
+
+  calls.length = 0;
+  readerTop.disabled = true;
+  readerBottom.disabled = true;
+  fireFab('top');
+  fireFab('bottom');
+  assert.deepEqual(calls, ['scrollTo:0', 'scrollTo:1600']);
+}
+
+// 2. Verify atelier-fx.js '/' shortcut skips focus when a modal or <dialog open> is open
+{
+  const fxSource = readFileSync(process.argv[2], 'utf8');
+  const document = new EventTarget();
+  const window = new EventTarget();
+  let modalOpen = false;
+  let focused = 0;
+  let blurred = 0;
+  const searchInput = {
+    tagName: 'INPUT',
+    disabled: false,
+    matches: () => true,
+    focus: () => { focused++; document.activeElement = searchInput; },
+    select: () => {},
+    blur: () => { blurred++; document.activeElement = { tagName: 'BODY' }; },
+  };
+  document.activeElement = { tagName: 'BODY' };
+  document.documentElement = { dataset: { fx: 'none' } };
+  document.body = { appendChild: () => {} };
+  document.querySelector = sel => {
+    if (sel === '.modal.show, dialog[open]') return modalOpen ? {} : null;
+    if (sel.includes('#search-input')) return searchInput;
+    return null;
+  };
+  window.matchMedia = () => ({ matches: false });
+
+  runInNewContext(fxSource, {
+    window, document, navigator: {}, performance,
+    requestAnimationFrame: () => 1, cancelAnimationFrame: () => {},
+  });
+
+  const press = key => {
+    const ev = new Event('keydown', { cancelable: true });
+    ev.key = key;
+    document.dispatchEvent(ev);
+    return ev;
+  };
+
+  modalOpen = true;
+  assert.equal(press('/').defaultPrevented, false);
+  assert.equal(focused, 0);
+
+  modalOpen = false;
+  assert.equal(press('/').defaultPrevented, true);
+  assert.equal(focused, 1);
+
+  press('Escape');
+  assert.equal(blurred, 1);
+}
+"""
+    subprocess.run(
+        [node, '-e', script, str(ROOT / 'static/js/atelier-shell.js'), str(ROOT / 'static/js/atelier-fx.js')],
+        check=True,
+        timeout=10,
+    )

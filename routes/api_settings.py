@@ -91,7 +91,13 @@ def reset_settings():
         return jsonify({"status": "ok", "saved": True, "scope": scope, "settings": updated, "warnings": []})
     if scope != "all":
         return jsonify({"status": "error", "message": "未知的还原范围"}), 400
-    preserve_proxy = bool(body.get("preserve_proxy", False))
+    raw_preserve = body.get("preserve_proxy", False)
+    if isinstance(raw_preserve, bool):
+        preserve_proxy = raw_preserve
+    elif isinstance(raw_preserve, str) and raw_preserve.strip().lower() in ("true", "false"):
+        preserve_proxy = raw_preserve.strip().lower() == "true"
+    else:
+        return jsonify({"status": "error", "message": "preserve_proxy 必须为布尔值"}), 400
     patch = {
         k: v for k, v in DEFAULT_SETTINGS.items()
         if k != "download_root" and not (preserve_proxy and k == "proxy")
@@ -149,7 +155,7 @@ def import_settings():
         raw_bytes = file.read(MAX_SIZE + 1)
         if len(raw_bytes) > MAX_SIZE:
             return jsonify({"status": "error", "message": "上传文件过大，最大允许 1MB"}), 400
-        data = json.loads(raw_bytes.decode("utf-8"))
+        data = json.loads(raw_bytes.decode("utf-8-sig"))
     except Exception as e:
         log.warning(f"设置导入JSON解析失败: {e}")
         return jsonify({"status": "error", "message": "JSON 解析失败，请检查文件格式"}), 400

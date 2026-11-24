@@ -607,6 +607,8 @@ def _seed_owned(demo_home: Path, keep_existing: bool) -> dict:
                     f"UPDATE album_detail_cache SET cached_at = ? WHERE album_id IN ({slots})",
                     (datetime.now().isoformat(), *ids),
                 )
+                refresh_conn.execute("UPDATE OR IGNORE album_tags SET source = 'user' WHERE source = 'custom'")
+                refresh_conn.execute("DELETE FROM album_tags WHERE source = 'custom'")
         finally:
             refresh_conn.close()
         update_settings({"auto_update_check": "false"})
@@ -691,7 +693,7 @@ def _seed_owned(demo_home: Path, keep_existing: bool) -> dict:
                     )
                 for tag in book["custom_tags"]:
                     conn.execute(
-                        "INSERT OR IGNORE INTO album_tags (album_id, tag, source, created_at) VALUES (?, ?, 'custom', ?)",
+                        "INSERT OR IGNORE INTO album_tags (album_id, tag, source, created_at) VALUES (?, ?, 'user', ?)",
                         (aid, tag.lower(), ts),
                     )
                 if book["wishlist"] is not None:

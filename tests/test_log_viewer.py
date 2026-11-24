@@ -506,21 +506,23 @@ def test_open_folder_rejects_cross_site_requests(client, logdir, monkeypatch):
     assert response.status_code == 403 and calls == []
 
 
-def test_logs_js_renders_log_text_without_html_injection():
+@pytest.mark.parametrize("relpath", ["static/js/logs.js", "static/classic/js/logs.js"])
+def test_logs_js_renders_log_text_without_html_injection(relpath):
     import re
-    source = (ROOT / "static" / "js" / "logs.js").read_text(encoding="utf-8")
+    source = (ROOT / relpath).read_text(encoding="utf-8")
     code = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
     code = re.sub(r"(?m)^\s*//.*$", "", code)
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment",
                  "DOMParser", "jQuery", "$("):
-        assert sink not in source, f"logs.js must not use {sink}"
+        assert sink not in source, f"{relpath} must not use {sink}"
     assert "textContent" in code
     assert "AbortError" in code and "window.apiFetch" in code
 
 
-def test_logs_js_follows_the_truncation_and_bfcache_contract():
+@pytest.mark.parametrize("relpath", ["static/js/logs.js", "static/classic/js/logs.js"])
+def test_logs_js_follows_the_truncation_and_bfcache_contract(relpath):
     import re
-    source = (ROOT / "static" / "js" / "logs.js").read_text(encoding="utf-8")
+    source = (ROOT / relpath).read_text(encoding="utf-8")
     code = re.sub(r"(?m)^\s*//.*$", "", re.sub(r"/\*.*?\*/", "", source, flags=re.S))
     # an empty result from a truncated read is not "nothing found": the empty state checks truncated
     # and states the server's actual read limit instead of a hard-coded size
@@ -532,9 +534,10 @@ def test_logs_js_follows_the_truncation_and_bfcache_contract():
     assert "addEventListener('pageshow'" in code and "event.persisted && state.interrupted" in code
 
 
-def test_logs_js_lets_the_server_cancel_superseded_searches_and_waits_for_ime():
+@pytest.mark.parametrize("relpath", ["static/js/logs.js", "static/classic/js/logs.js"])
+def test_logs_js_lets_the_server_cancel_superseded_searches_and_waits_for_ime(relpath):
     import re
-    source = (ROOT / "static" / "js" / "logs.js").read_text(encoding="utf-8")
+    source = (ROOT / relpath).read_text(encoding="utf-8")
     code = re.sub(r"(?m)^\s*//.*$", "", re.sub(r"/\*.*?\*/", "", source, flags=re.S))
     # every read names its page instance and sequence number, so the server can stop the older scans
     assert "params.set('viewer', VIEWER_ID)" in code and "params.set('seq', String(seq))" in code
@@ -558,7 +561,8 @@ def test_settings_page_contains_log_section_outside_form(client):
     assert 'data-log-source="error"' in html and 'data-log-source="app"' in html
 
 
-def test_legacy_log_credentials_are_masked_in_entries_and_search_requests():
+@pytest.mark.parametrize("relpath", ["static/js/logs.js", "static/classic/js/logs.js"])
+def test_legacy_log_credentials_are_masked_in_entries_and_search_requests(relpath):
     node = shutil.which('node')
     if not node:
         pytest.skip('requires Node.js')
@@ -590,4 +594,4 @@ setImmediate(()=>{
   assert.equal(new URL(calls.at(-1),'http://localhost').searchParams.get('q'), 'socks5h://****@localhost:7890');
 });
 """
-    subprocess.run([node, '-e', script, str(ROOT / 'static/js/logs.js')], check=True, timeout=10)
+    subprocess.run([node, '-e', script, str(ROOT / relpath)], check=True, timeout=10)

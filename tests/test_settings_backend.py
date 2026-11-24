@@ -104,3 +104,23 @@ def test_build_jmcomic_option_accepts_snapshot_without_reading_database(monkeypa
     assert client["postman"]["meta_data"]["proxies"]["https"] == "http://localhost:8080"
     assert option["download"]["threading"] == {"image": 8, "photo": 3}
     read.assert_not_called()
+
+
+def test_import_settings_accepts_utf8_bom_and_reset_parses_preserve_proxy_strings(client):
+    bom_payload = b"\xef\xbb\xbf" + json.dumps({"timeout": 42, "proxy": "http://127.0.0.1:7890"}).encode("utf-8")
+    imported = client.post("/api/settings/import", data={"file": (io.BytesIO(bom_payload), "设置备份.json")})
+    assert imported.status_code == 200 and imported.json["imported"] == 2
+    assert database.get_setting("timeout") == "42"
+    assert database.get_setting("proxy") == "http://127.0.0.1:7890"
+
+    kept = client.post("/api/settings/reset", json={"scope": "all", "preserve_proxy": "true"})
+    assert kept.status_code == 200
+    assert kept.json["settings"]["timeout"] == "30"
+    assert kept.json["settings"]["proxy"] == "http://127.0.0.1:7890"
+
+    cleared = client.post("/api/settings/reset", json={"scope": "all", "preserve_proxy": "false"})
+    assert cleared.status_code == 200
+    assert cleared.json["settings"]["proxy"] == ""
+
+    invalid = client.post("/api/settings/reset", json={"scope": "all", "preserve_proxy": "maybe"})
+    assert invalid.status_code == 400

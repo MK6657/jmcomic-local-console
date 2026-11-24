@@ -348,3 +348,135 @@ def test_configure_sdk_wraps_save_image_once_and_preserves_rgba_jpeg_guard(clien
         assert saved_jpg.format == "JPEG" and saved_jpg.mode == "RGB"
         assert saved_webp.format == "WEBP"
 
+
+def test_windows_cainfo_encodes_acp_bytes_and_stages_unmappable_unicode_paths(client, tmp_path, monkeypatch):
+    import os
+    from curl_cffi import CurlOpt
+    from curl_cffi.requests import Session
+    from jmcomic import JmModuleConfig
+    from core import metadata_budget, sdk_adapter
+
+    monkeypatch.setattr(sdk_adapter, "os", SimpleNamespace(
+        name="nt",
+        environ={"TEMP": str(tmp_path / "stage_env")},
+        path=os.path,
+        getpid=os.getpid,
+        replace=os.replace,
+    ))
+    sdk_adapter._cainfo_cache.clear()
+
+    pem_bytes = b"-----BEGIN CERTIFICATE-----\nRklYVFVSRQ==\n-----END CERTIFICATE-----\n"
+    ascii_cert = tmp_path / "cacert.pem"
+    ascii_cert.write_bytes(pem_bytes)
+    if hasattr(str(ascii_cert), "encode"):
+        # Simulate Windows mbcs round-trip for normal ACP-compatible paths vs unmappable paths (e.g. '♡' on CP936)
+        unmappable_dir = tmp_path / "漫画_unmappable_♡"
+        unmappable_dir.mkdir()
+        unicode_cert = unmappable_dir / "cacert.pem"
+        unicode_cert.write_bytes(pem_bytes)
+
+        orig_encode = sdk_adapter._encode_windows_acp_path
+        monkeypatch.setattr(
+            sdk_adapter,
+            "_encode_windows_acp_path",
+            lambda p: None if "♡" in str(p) else (orig_encode(p) if os.name == "nt" else str(p).encode("utf-8")),
+        )
+        monkeypatch.setattr(sdk_adapter.tempfile, "gettempdir", lambda: str(tmp_path / "stage_tmp"))
+
+        staged = sdk_adapter.windows_cainfo(unicode_cert)
+        assert isinstance(staged, bytes)
+        staged_path = Path(staged.decode("mbcs" if os.name == "nt" else "utf-8"))
+        assert staged_path.is_file() and staged_path.read_bytes() == pem_bytes
+        assert "♡" not in str(staged_path)
+
+    if os.name == "nt":
+        option = sdk_adapter.build_option()
+        instance = sdk_adapter.new_client(option)
+        try:
+            opts = instance.get_root_postman().session.curl_options
+            assert isinstance(opts[CurlOpt.CAINFO], bytes)
+            assert opts[CurlOpt.CAINFO] == opts[CurlOpt.PROXY_CAINFO]
+            assert Path(opts[CurlOpt.CAINFO].decode("mbcs")).is_file()
+        finally:
+            _close(instance)
+
+        disabled = sdk_adapter.new_client(option, verify=False)
+        try:
+            opts_disabled = disabled.get_root_postman().session.curl_options
+            assert CurlOpt.CAINFO not in opts_disabled
+        finally:
+            _close(disabled)
+
+        seen_probe_opts = []
+        monkeypatch.setattr(JmModuleConfig, "JM_REDIRECT_URL", "https://redirect.invalid/")
+
+        def fake_probe_get(session, url, **kwargs):
+            seen_probe_opts.append(dict(session.curl_options))
+            return SimpleNamespace(status_code=302, headers={"Location": "https://html-discovered.invalid/"})
+
+        monkeypatch.setattr(Session, "get", fake_probe_get)
+        discovered = sdk_adapter._discover_html(
+            option.client.postman.src_dict,
+            metadata_budget.deadline_after(5),
+            SimpleNamespace(is_set=lambda: False),
+        )
+        assert discovered == "html-discovered.invalid"
+        assert len(seen_probe_opts) == 1
+        assert isinstance(seen_probe_opts[0][CurlOpt.CAINFO], bytes)
+        assert seen_probe_opts[0][CurlOpt.CAINFO] == seen_probe_opts[0][CurlOpt.PROXY_CAINFO]
+
+
+@pytest.mark.parametrize("all_success,failed_images,expected", [
+    (True, [], 0),
+    (False, [], 1),
+    (True, ["img1"], 1),
+])
+def test_cli_download_exit_code_reflects_failed_images_and_parses_jm_prefix(
+    monkeypatch, capsys, all_success, failed_images, expected
+):
+    import jmcomic
+    import jmcomic_cli as cli
+    from core import instance_lock
+
+    instance, option = object(), SimpleNamespace(dir_rule=SimpleNamespace())
+    acquire = Mock(return_value=(instance, option))
+    close = Mock()
+    monkeypatch.setattr(cli, "get_client", acquire)
+    monkeypatch.setattr(cli, "close_client", close)
+    monkeypatch.setattr(instance_lock, "maintenance_lock", nullcontext)
+
+    class Album:
+        name = "Fixture"
+
+        def __len__(self):
+            return 1
+
+    album = Album()
+    dler = SimpleNamespace(all_success=all_success, download_failed_image=failed_images, option=option)
+    download = Mock(return_value=(album, dler))
+    monkeypatch.setattr(jmcomic, "download_album", download)
+
+    assert cli.main(["download", "JM12345"]) == expected
+    download.assert_called_once_with("12345", option=option)
+    acquire.assert_called_once_with(read_only=False)
+    close.assert_called_once_with(instance)
+
+
+@pytest.mark.parametrize("argv", [
+    ["info", "not-an-id"],
+    ["download", "not-an-id"],
+    ["batch", "123,not-an-id"],
+])
+def test_cli_invalid_album_id_exits_cleanly_without_opening_client(monkeypatch, capsys, argv):
+    import jmcomic_cli as cli
+    from core import instance_lock
+
+    acquire = Mock()
+    monkeypatch.setattr(cli, "get_client", acquire)
+    monkeypatch.setattr(instance_lock, "maintenance_lock", nullcontext)
+
+    assert cli.main(argv) == 1
+    assert "无效车号" in capsys.readouterr().out
+    acquire.assert_not_called()
+
+

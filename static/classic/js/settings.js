@@ -281,7 +281,7 @@
     }
   }
 
-  // ── 恢复默认（暂未开放 UI 按钮，保留函数留待后续） ──
+  // ── 恢复全部默认配置 ──
 
   async function handleReset() {
     if (writeOperation || !confirm('确定要恢复所有设置为默认值吗？')) return;
@@ -289,13 +289,19 @@
     setWriteOperation('reset');
     var resetVersion = editVersion;
     try {
-      await window.apiFetch('/api/settings', {
+      var result = await window.apiFetch('/api/settings/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ _reset: true }),
+        body: JSON.stringify({ scope: 'all' }),
         timeoutMs: 15000,
       });
-      showToast('已恢复默认设置', 'info');
+      if (!result || result.status !== 'ok' || !result.settings ||
+          typeof result.settings !== 'object' || Array.isArray(result.settings)) {
+        throw new Error((result && result.message) || '服务器没有确认设置已还原');
+      }
+      var warnings = Array.isArray(result.warnings) ? result.warnings : [];
+      if (warnings.length) showToast('已还原全部默认配置；' + warnings.join('；'), 'warning');
+      else showToast('已还原全部默认配置', 'success');
       await refreshSettings(resetVersion);
     } catch (err) {
       if (err && err.name === 'AbortError') return; // pagehide 中止，静默

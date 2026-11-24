@@ -393,3 +393,34 @@ def test_shutdown_after_author_move_does_not_nest_the_resumed_directory(pipeline
     assert Path(db.get_job("restart")["output_path"]) == folder and not (folder.parent / "Writer").exists()
     assert len(stored_pages(folder, "cbz")) == 4 and not list(folder.rglob("*.webp"))
     assert list(pipeline.calls.values()) == [1] * 4
+
+
+def test_failed_download_reports_exact_failed_page_count_without_off_by_one(pipeline, monkeypatch):
+    from core import jm_service, publication
+
+    pipeline.books["600"] = Book([Photo("601", "六页章", 6)])
+    pipeline.on_fetch = lambda url: (_ for _ in ()).throw(OSError("upstream page broken"))
+    all_failed = pipeline.run("all-6-failed", "600")
+    assert all_failed["status"] == "failed"
+    assert all_failed["done_pages"] == 0
+    assert "（共 6 页失败）" in all_failed["error_message"]
+    assert "（共 7 页失败）" not in all_failed["error_message"]
+    assert "下载不完整" not in all_failed["error_message"]
+    assert publication.private_path(Path(all_failed["output_path"]), pipeline.root)
+    assert not (pipeline.root / "Book_600").exists()
+
+    bad_url = pipeline.books["100"][1][-1].download_url
+    pipeline.on_fetch = lambda url: (_ for _ in ()).throw(OSError("last page broken")) if url == bad_url else None
+    one_failed = pipeline.run("one-of-4-failed", "100")
+    assert one_failed["status"] == "failed"
+    assert one_failed["done_pages"] == 3
+    assert "下载不完整" not in one_failed["error_message"]
+    assert publication.private_path(Path(one_failed["output_path"]), pipeline.root)
+    assert not (pipeline.root / "Book_100").exists()
+
+    monkeypatch.setattr(jm_service, "_download_chapter", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("chapter crashed")))
+    chapter_crashed = pipeline.run("chapter-crashed", "100")
+    assert chapter_crashed["status"] == "failed"
+    assert chapter_crashed["done_pages"] == 0
+    assert "下载不完整：0/4 页" in chapter_crashed["error_message"]
+    assert not (pipeline.root / "Book_100").exists()

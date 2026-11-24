@@ -48,6 +48,8 @@ def test_demo_creates_keeps_and_rebuilds_its_own_offline_samples(tmp_path):
         assert connection.execute("SELECT value FROM settings WHERE key='auto_update_check'").fetchone() == ('false',)
         assert {row[0] for row in connection.execute('SELECT DISTINCT status FROM jobs')} >= {
             'paused', 'completed', 'failed', 'canceled'}
+        assert {row[0] for row in connection.execute('SELECT DISTINCT source FROM album_tags')} == {'auto', 'user'}
+        connection.execute("UPDATE album_tags SET source='custom' WHERE source='user'")
         connection.execute("UPDATE settings SET value='night' WHERE key='ui_theme'")
         connection.execute("UPDATE settings SET value='true' WHERE key='auto_update_check'")
         connection.commit()
@@ -59,6 +61,7 @@ def test_demo_creates_keeps_and_rebuilds_its_own_offline_samples(tmp_path):
     try:
         assert dict(connection.execute("SELECT key,value FROM settings WHERE key IN ('ui_theme','auto_update_check')")) == {
             'ui_theme': 'night', 'auto_update_check': 'false'}
+        assert {row[0] for row in connection.execute('SELECT DISTINCT source FROM album_tags')} == {'auto', 'user'}
     finally:
         connection.close()
     personal = home / 'note.txt'
@@ -166,3 +169,47 @@ def test_preview_batch_delegates_without_inherited_instance_overrides(tmp_path):
                             capture_output=True, encoding='utf-8', timeout=15)
     assert result.returncode == 17, result.stderr
     assert json.loads(result.stdout.strip()) == [['demo'], []]
+
+
+def test_install_catalog_serves_offline_detail_cover_and_blocks_live_syncs(app):
+    from app import create_app
+    from core.atelier_demo import install_catalog
+
+    demo_app = create_app()
+    demo_app.config['TESTING'] = True
+    install_catalog(demo_app, demo.DEMO_BOOKS)
+    demo_client = demo_app.test_client()
+
+    sample = demo.DEMO_BOOKS[0]
+    aid = sample['album_id']
+
+    # Detail endpoint works purely from synthetic catalog without cache or network
+    detail_resp = demo_client.get(f'/api/album/{aid}')
+    assert detail_resp.status_code == 200
+    payload = detail_resp.get_json()
+    assert payload['status'] == 'ok' and payload['data']['album_id'] == aid
+    assert payload['data']['title'] == sample['title']
+    assert payload['data']['chapter_count'] == len(sample['chapters'])
+
+    assert demo_client.get('/api/album/99999999').status_code == 404
+    assert demo_client.get('/api/album/not-a-number').status_code == 400
+    assert demo_client.get('/api/online/not-a-number').status_code == 400
+    assert demo_client.get(f'/api/online/{aid}').status_code == 200
+
+    # Cover endpoint renders synthetic cover locally instead of 302 redirecting to live CDN
+    cover_resp = demo_client.get(f'/api/cover/{aid}')
+    assert cover_resp.status_code == 200 and cover_resp.mimetype == 'image/webp'
+    assert demo_client.get('/api/cover/99999999').status_code == 404
+
+    # All upstream-mutating or network endpoints are rejected with 409 in demo mode
+    for blocked_path in (
+        '/api/jobs',
+        f'/api/updates/{aid}/check',
+        f'/api/library/{aid}/tags/sync',
+        '/api/library/tags/sync-all',
+        '/api/wishlist/download',
+    ):
+        resp = demo_client.post(blocked_path, json={})
+        assert resp.status_code == 409, f'{blocked_path} returned {resp.status_code}'
+    assert demo_client.get('/api/system/diagnose').status_code == 409
+

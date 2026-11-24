@@ -320,6 +320,26 @@ def _imported_added_at(value, fallback):
     return fallback.isoformat()
 
 
+_WINDOWS_RESERVED_STEMS = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
+
+def _is_safe_upload_filename(filename: str) -> bool:
+    """Reject path traversal, separators, control chars, and reserved device names while allowing Unicode."""
+    if not isinstance(filename, str):
+        return False
+    cleaned = filename.strip()
+    if not cleaned or len(cleaned) > 255 or cleaned in {".", ".."} or cleaned.endswith("."):
+        return False
+    if any(ch in "/\\:" or ord(ch) < 32 or ord(ch) == 127 for ch in filename):
+        return False
+    stem = cleaned.split(".", 1)[0].strip().upper()
+    return stem not in _WINDOWS_RESERVED_STEMS
+
+
 @api_wishlist_bp.post("/api/wishlist/import-file")
 def import_wishlist_file():
     """通过上传 JSON 文件导入收藏"""
@@ -327,12 +347,11 @@ def import_wishlist_file():
         return jsonify({"status": "error", "message": "缺少上传文件"}), 400
 
     file = request.files["file"]
-    if file.filename == "":
+    if not file.filename:
         return jsonify({"status": "error", "message": "文件名为空"}), 400
-    # 文件名安全校验（防路径穿越）
-    from werkzeug.utils import secure_filename
-    if secure_filename(file.filename) != file.filename:
-        log.warning(f"上传文件名不合法 filename={file.filename}")
+    # 文件名安全校验（防路径穿越与控制字符，兼容中文文件名与浏览器重命名后缀）
+    if not _is_safe_upload_filename(file.filename):
+        log.warning(f"上传文件名不合法 filename={file.filename[:120]}")
         return jsonify({"status": "error", "message": "文件名不合法"}), 400
 
     # 限制上传文件大小为 5MB
@@ -345,7 +364,7 @@ def import_wishlist_file():
         raw = file.read(MAX_SIZE + 1)
         if len(raw) > MAX_SIZE:
             return jsonify({"status": "error", "message": "上传文件过大，最大允许 5MB"}), 400
-        data = json.loads(raw.decode("utf-8"))
+        data = json.loads(raw.decode("utf-8-sig"))
     except Exception as e:
         log.warning(f"收藏文件导入JSON解析失败: {e}")
         return jsonify({"status": "error", "message": "JSON 解析失败，请检查文件格式"}), 400

@@ -1113,8 +1113,13 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
         # Futures can fail before recording a page error. Do not pack partial data.
         if _should_stop(job_id, tracker, stop_event):
             return
-        if done_pages[0] != total_pages:
+        missing_pages = max(0, total_pages - done_pages[0])
+        failed_count = max(len(failed_pages), missing_pages)
+        if done_pages[0] != total_pages and len(failed_pages) < missing_pages:
             failed_pages.append(f"下载不完整：{done_pages[0]}/{total_pages} 页")
+        elif done_pages[0] != total_pages and not failed_pages:
+            failed_pages.append(f"下载不完整：{done_pages[0]}/{total_pages} 页")
+            failed_count = max(failed_count, 1)
         if not failed_pages:
             # 每一页都已按当前格式写好（旧目录里的 GIF 页已重新取回）：升级章节标记，以后不再重取
             for photo in photos_to_download:
@@ -1176,8 +1181,8 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
         if failed_pages:
             err_all = "; ".join(failed_pages[:5])
             if len(failed_pages) > 5:
-                err_all += f" ...（共 {len(failed_pages)} 页失败）"
-            log.warning(f"下载任务部分失败 job_id={job_id} failed_pages={len(failed_pages)} total_pages={total_pages}")
+                err_all += f" ...（共 {failed_count} 页失败）"
+            log.warning(f"下载任务部分失败 job_id={job_id} failed_pages={failed_count} total_pages={total_pages}")
             ok = finish_download(job_id, "failed", done_pages=done_val,
                                  error_message=err_all, completed_at=now)
             if not ok:

@@ -51,10 +51,23 @@ window.downloadExport = async function (url, label, basename) {
     }
     var blob = await response.blob();
     if (!blob.size) throw new Error('导出的文件是空的');
+    var disposition = response.headers && response.headers.get ? response.headers.get('Content-Disposition') : '';
+    var filename = '';
+    if (disposition) {
+      var starMatch = disposition.match(/filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;]+)/);
+      if (starMatch) {
+        try { filename = decodeURIComponent(starMatch[1].trim().replace(/^["']|["']$/g, '')); } catch (_) {}
+      }
+      if (!filename) {
+        var plainMatch = disposition.match(/filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/);
+        if (plainMatch) filename = (plainMatch[1] || plainMatch[2] || '').trim();
+      }
+      filename = filename.replace(/[\\/\r\n]+/g, '_').trim();
+    }
     var link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     try {
-      link.download = (basename || 'download') + '.' + label.toLowerCase();
+      link.download = filename || ((basename || 'download') + '.' + label.toLowerCase());
       document.body.appendChild(link);
       link.click();
     } finally {

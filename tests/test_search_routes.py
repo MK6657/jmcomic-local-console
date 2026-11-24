@@ -20,7 +20,9 @@ def test_delete_single_search_history_by_keyword(client, keyword):
 
 def test_delete_search_history_keeps_legacy_route(client):
     database.add_search_history("A B")
+    database.add_search_history("Fate/Grand Order")
     assert client.delete("/api/search-history/A%20B").json["deleted"] is True
+    assert client.delete("/api/search-history/Fate/Grand%20Order").json["deleted"] is True
     assert client.delete("/api/search-history").status_code == 400
 
 

@@ -6,12 +6,143 @@ connections. Callers own their clients, retry order, budgets and shutdown.
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, wait
 from functools import lru_cache
+import hashlib
 import math
+import os
+from pathlib import Path
+import tempfile
 import threading
 from urllib.parse import urljoin, urlsplit
 
 _configure_lock = threading.RLock()
 _diagnostic_domain = None
+_cainfo_cache: dict[tuple[str, int, int], bytes] = {}
+
+
+def _encode_windows_acp_path(path: Path) -> bytes | None:
+    text = str(path)
+    try:
+        encoded = text.encode("mbcs")
+        if encoded.decode("mbcs") == text and b"\x00" not in encoded:
+            return encoded
+    except (UnicodeError, LookupError):
+        pass
+    return None
+
+
+def _is_reparse_or_link(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def windows_cainfo(cert_path: str | Path | None = None) -> bytes | None:
+    """Resolve a CRT-openable (CP_ACP) CA bundle path as bytes on Windows.
+
+    Under PYTHONUTF8=1 / -X utf8, curl_cffi encodes str CAINFO paths as UTF-8,
+    whereas non-manifested python.exe passes narrow char* paths to CRT fopen()
+    under CP_ACP (e.g. CP936 GBK), triggering curl: (77) inside non-ASCII paths.
+    When the source path contains characters outside CP_ACP, stage a verified
+    copy into an ACP-roundtrippable temporary directory.
+    """
+    if os.name != "nt":
+        return None
+    if cert_path is None:
+        import certifi
+        cert_path = certifi.where()
+    source = Path(cert_path)
+    try:
+        stat = source.stat()
+    except OSError:
+        return None
+    if stat.st_size <= 0:
+        return None
+    cache_key = (str(source), stat.st_mtime_ns, stat.st_size)
+    with _configure_lock:
+        cached = _cainfo_cache.get(cache_key)
+        if cached is not None:
+            try:
+                if os.path.isfile(cached.decode("mbcs")):
+                    return cached
+            except (OSError, UnicodeError, LookupError):
+                pass
+
+    direct = _encode_windows_acp_path(source)
+    if direct is not None:
+        with _configure_lock:
+            _cainfo_cache[cache_key] = direct
+        return direct
+
+    try:
+        raw = source.read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    digest = hashlib.sha256(raw).hexdigest()[:24]
+    candidates = [Path(tempfile.gettempdir()) / "jmconsole-ca"]
+    for env_name, suffix in (("LOCALAPPDATA", "Temp/jmconsole-ca"),
+                             ("PROGRAMDATA", "jmconsole-ca"),
+                             ("SystemRoot", "Temp/jmconsole-ca")):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(Path(base) / suffix)
+
+    for stage_dir in candidates:
+        target = stage_dir / f"cacert-{digest}.pem"
+        encoded = _encode_windows_acp_path(target)
+        if encoded is None:
+            continue
+        try:
+            if stage_dir.exists() and _is_reparse_or_link(stage_dir):
+                continue
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            if _is_reparse_or_link(stage_dir) or (target.exists() and _is_reparse_or_link(target)):
+                continue
+            if target.is_file():
+                try:
+                    existing = target.read_bytes()
+                except OSError:
+                    existing = b""
+                if existing == raw:
+                    with _configure_lock:
+                        _cainfo_cache[cache_key] = encoded
+                    return encoded
+            tmp = stage_dir / f".cacert-{digest}-{os.getpid()}-{threading.get_ident()}.tmp"
+            try:
+                tmp.write_bytes(raw)
+                os.replace(tmp, target)
+            finally:
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+            with _configure_lock:
+                _cainfo_cache[cache_key] = encoded
+            return encoded
+        except OSError:
+            continue
+    return None
+
+
+def _apply_windows_cainfo(metadata: dict, curl_options: dict) -> None:
+    if os.name != "nt":
+        return
+    verify = metadata.get("verify")
+    if verify is False:
+        return
+    from curl_cffi import CurlOpt
+    custom_cert = verify if isinstance(verify, (str, Path)) else None
+    if CurlOpt.CAINFO not in curl_options or CurlOpt.PROXY_CAINFO not in curl_options:
+        cainfo = windows_cainfo(custom_cert)
+        if cainfo is not None:
+            curl_options.setdefault(CurlOpt.CAINFO, cainfo)
+            curl_options.setdefault(CurlOpt.PROXY_CAINFO, cainfo)
+            if custom_cert is not None:
+                metadata["verify"] = True
 
 
 @lru_cache(maxsize=None)
@@ -125,14 +256,18 @@ def _discover_html(config, deadline, stop):
     from jmcomic import JmModuleConfig, ResponseUnexpectedException
     from .metadata_budget import remaining
     from .upstream import UpstreamFailure
-    metadata = config["meta_data"]
+    metadata = deepcopy(config["meta_data"])
     proxy_options = {key: value for key, value in (metadata.get("curl_options") or {}).items()
-                     if key in (CurlOpt.NOPROXY, CurlOpt.PROXY)}
-    probe = Postmans.create(data={"type": "curl_cffi_session", "meta_data": {
+                     if key in (CurlOpt.NOPROXY, CurlOpt.PROXY, CurlOpt.CAINFO, CurlOpt.PROXY_CAINFO)}
+    _apply_windows_cainfo(metadata, proxy_options)
+    probe_meta = {
         "impersonate": metadata.get("impersonate"), "proxies": metadata.get("proxies"),
         "headers": JmModuleConfig.new_html_headers(), "curl_options": proxy_options,
         "timeout": remaining(deadline, stop),
-    }})
+    }
+    if "verify" in metadata:
+        probe_meta["verify"] = metadata["verify"]
+    probe = Postmans.create(data={"type": "curl_cffi_session", "meta_data": probe_meta})
     try:
         url = JmModuleConfig.JM_REDIRECT_URL
         for _ in range(8):
@@ -193,6 +328,11 @@ def new_client(option, domain_list=None, impl=None, cache=None, domain_retry_str
     client_type = impl if isinstance(impl, type) else JmModuleConfig.client_impl_class(impl)
     config = deepcopy(option.client.postman.src_dict)
     config["meta_data"].update(overrides)
+    if config.get("type") == "curl_cffi_session":
+        curl_options = dict(config["meta_data"].get("curl_options") or {})
+        _apply_windows_cainfo(config["meta_data"], curl_options)
+        if curl_options:
+            config["meta_data"]["curl_options"] = curl_options
     domains = option.client.get("domain", []) if domain_list is None else domain_list
     if not isinstance(domains, (list, tuple, str)):
         domains = domains.get(client_type.client_key, [])

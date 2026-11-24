@@ -136,3 +136,22 @@ def test_navigating_away_does_not_start_the_next_batch_without_retry():
         assert paused["requests"] == 1 and paused["retry"] and "从第 201 条重试" in paused["text"]
     assert [batch["rows"] for batch in out["batches"]] == [rows[:200], rows[200:]]
     assert "已确认 201/201 条：新增 201，已存在 0，失败 0" in out["steps"][-1]["text"]
+
+
+def test_import_wishlist_file_accepts_unicode_names_and_bom_while_blocking_unsafe_names(client):
+    from routes.api_wishlist import _is_safe_upload_filename
+
+    bom_rows = b"\xef\xbb\xbf" + json.dumps([{"album_id": "88001", "title": "中文书签"}], ensure_ascii=False).encode("utf-8")
+    for safe_name in ("我的收藏清单.json", "wishlist (1).json"):
+        assert _is_safe_upload_filename(safe_name) is True
+        resp = client.post(IMPORT, data={"file": (io.BytesIO(bom_rows), safe_name)})
+        assert resp.status_code == 200, safe_name
+        assert resp.json["status"] == "ok"
+
+    for raw_unsafe in ("../wishlist.json", "..\\wishlist.json", "C:wishlist.json", "CON.json", "bad\x00.json", "..", "trailing."):
+        assert _is_safe_upload_filename(raw_unsafe) is False, raw_unsafe
+
+    for http_unsafe in ("../wishlist.json", "CON.json", "bad\x00.json", "..", "trailing."):
+        resp = client.post(IMPORT, data={"file": (io.BytesIO(b"[]"), http_unsafe)})
+        assert resp.status_code == 400, http_unsafe
+        assert resp.json["message"] == "文件名不合法"

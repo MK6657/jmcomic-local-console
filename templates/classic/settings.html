@@ -62,7 +62,7 @@
             <div class="col-6 col-md-3" data-setting-key="retry_times">
                 <label for="retry_times" class="form-label">重试次数</label>
                 <input type="number" id="retry_times" name="retry_times" class="form-control"
-                       min="0" max="20" value="{{ settings.retry_times or 3 }}">
+                       min="0" max="20" value="{{ settings.retry_times|default(2) }}">
                 <div class="form-text">建议范围：<strong>1-5</strong> 次。设为 0 表示不重试</div>
                 <div class="invalid-feedback"></div>
             </div>

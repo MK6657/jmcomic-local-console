@@ -8,10 +8,12 @@ import socket
 def install_catalog(app, books):
     from flask import jsonify, request, send_file
     from core.database import add_search_history
-    from tools.seed_atelier_demo import render_story_page_bytes
+    from core.validation import validate_numeric
+    from tools.seed_atelier_demo import render_cover_bytes, render_story_page_bytes
 
     by_id = {book['album_id']: book for book in books}
     by_chapter = {chapter['photo_id']: (book, chapter) for book in books for chapter in book['chapters']}
+    original_cover = app.view_functions['api_album.cover_redirect']
 
     def search():
         keyword = request.args.get('q', '').strip()
@@ -29,7 +31,50 @@ def install_catalog(app, books):
         return jsonify(status='ok', items=rows[(page-1)*size:page*size], total=len(rows), page=page,
                        page_size=size, has_more=page*size < len(rows))
 
+    def demo_album_detail(album_id):
+        if not validate_numeric(album_id):
+            return jsonify(status='error', message='album_id 必须是纯数字'), 400
+        book = by_id.get(album_id)
+        if not book:
+            return jsonify(status='error', message='这本书不在离线样书目录中。'), 404
+        return jsonify(status='ok', data={
+            'album_id': album_id,
+            'title': book['title'],
+            'author': book['author'],
+            'tags': list(book['auto_tags']),
+            'actors': [],
+            'works': ['藏书阁典藏画集'],
+            'views': book['views'],
+            'likes': book['likes'],
+            'description': book['description'],
+            'cover': '/api/cover/' + album_id,
+            'photos': [
+                {
+                    'photo_id': ch['photo_id'],
+                    'title': ch['title'],
+                    'page_count': ch['page_count'],
+                    'page_count_known': True,
+                }
+                for ch in book['chapters']
+            ],
+            'chapter_count': len(book['chapters']),
+            'details_complete': True,
+        })
+
+    def demo_cover(album_id):
+        if not validate_numeric(album_id):
+            return jsonify(status='error', message='album_id 必须是纯数字'), 400
+        book = by_id.get(album_id)
+        if not book:
+            return jsonify(status='error', message='这本书不在离线样书目录中。'), 404
+        response = original_cover(album_id)
+        if getattr(response, 'status_code', None) == 302:
+            return send_file(io.BytesIO(render_cover_bytes(book)), mimetype='image/webp', max_age=86400)
+        return response
+
     def demo_pages(album_id):
+        if not validate_numeric(album_id):
+            return jsonify(status='error', message='album_id 必须是纯数字'), 400
         book = by_id.get(album_id)
         if not book:
             return jsonify(status='error', message='这本书不在离线样书目录中。'), 404
@@ -51,6 +96,8 @@ def install_catalog(app, books):
 
     # Only this dedicated Flask application serves the synthetic catalog. Real service uses the SDK.
     app.view_functions['api_search.search'] = search
+    app.view_functions['api_album.album_detail'] = demo_album_detail
+    app.view_functions['api_album.cover_redirect'] = demo_cover
     app.view_functions['api_online.online_album'] = demo_pages
     app.view_functions['api_online.online_image'] = demo_image
     app.context_processor(lambda: {'atelier_demo': True})
@@ -58,8 +105,14 @@ def install_catalog(app, books):
 
     @app.before_request
     def keep_demo_offline():
-        if ((request.method == 'POST' and (request.path.startswith(('/api/jobs', '/api/batch', '/api/wishlist/download'))
-             and not request.path.endswith('/open-folder'))) or request.path == '/api/system/diagnose'):
+        path = request.path
+        blocked_post = request.method == 'POST' and (
+            (path.startswith(('/api/jobs', '/api/batch', '/api/wishlist/download')) and not path.endswith('/open-folder'))
+            or (path.startswith('/api/updates/') and path.endswith('/check'))
+            or path == '/api/library/tags/sync-all'
+            or (path.startswith('/api/library/') and path.endswith('/tags/sync'))
+        )
+        if blocked_post or path == '/api/system/diagnose':
             return jsonify(status='error', message='此处是离线样书实例。实际下载或联网诊断请在正式实例使用。'), 409
 
 def run_demo(*, open_browser):
