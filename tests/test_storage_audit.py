@@ -413,3 +413,54 @@ def test_restore_rechecks_completed_sibling_directories_before_publish(client, d
         restore.restore_backup(pack, target)
     assert rejected.value.reason == "unsafe_target" and not target.exists()
     assert replacements[0].read_text(encoding="utf-8") == "separate directory"
+
+
+def test_archive_signature_uses_birthtime_when_python312_fstat_ctime_differs(downloads, monkeypatch):
+    from types import SimpleNamespace
+    from core.packer import CbzPacker
+
+    album = downloads / "Py312Book"
+    album.mkdir()
+    page_bytes = png("green")
+    (album / "001.png").write_bytes(page_bytes)
+
+    orig_lstat = archive_pages.os.lstat
+    orig_fstat = archive_pages.os.fstat
+
+    def py312_lstat(path):
+        st = orig_lstat(path)
+        return SimpleNamespace(
+            st_mode=st.st_mode,
+            st_file_attributes=getattr(st, "st_file_attributes", 0),
+            st_size=st.st_size,
+            st_mtime_ns=st.st_mtime_ns,
+            st_dev=st.st_dev,
+            st_ino=st.st_ino,
+            st_birthtime_ns=st.st_ctime_ns,
+            st_ctime_ns=st.st_ctime_ns,
+        )
+
+    def py312_fstat(fd):
+        st = orig_fstat(fd)
+        return SimpleNamespace(
+            st_mode=st.st_mode,
+            st_file_attributes=getattr(st, "st_file_attributes", 0),
+            st_size=st.st_size,
+            st_mtime_ns=st.st_mtime_ns,
+            st_dev=st.st_dev,
+            st_ino=st.st_ino,
+            st_birthtime_ns=st.st_ctime_ns,
+            # Simulate CPython 3.12 Windows gh-112840: fstat().st_ctime_ns is ChangeTime != CreationTime
+            st_ctime_ns=st.st_mtime_ns + 8_038_400,
+        )
+
+    monkeypatch.setattr(archive_pages.os, "lstat", py312_lstat)
+    monkeypatch.setattr(archive_pages.os, "fstat", py312_fstat)
+    archive_pages.clear_cache()
+
+    packed = CbzPacker().pack(album, album / "Py312Book.cbz")
+    index = archive_pages.read_index(packed)
+    assert index.status == "ok" and not index.transient
+    assert len(index.reader_pages) == 1
+    assert archive_pages.read_page(index, index.reader_pages[0]) == page_bytes
+

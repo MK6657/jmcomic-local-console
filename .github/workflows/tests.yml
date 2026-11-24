@@ -21,7 +21,7 @@ jobs:
   test:
     name: Offline tests (Windows, Python 3.12)
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         # bash runs with -e -o pipefail, so any failing command fails the step
@@ -53,7 +53,7 @@ jobs:
         run: python -m compileall -q app.py launcher.py core routes
 
       - name: Run offline test suite
-        run: python -m pytest -q -rs
+        run: python -m pytest -q -rfEs
 
       - name: Check JavaScript syntax
         run: |

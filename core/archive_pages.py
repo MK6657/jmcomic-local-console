@@ -310,7 +310,11 @@ def _build_index(path: Path, signature, *, verify_first=True) -> tuple[ArchiveIn
 def _file_signature(info):
     if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & _REPARSE_POINT:
         return None
-    return info.st_size, info.st_mtime_ns, info.st_dev, info.st_ino, info.st_ctime_ns
+    # Python 3.12 on Windows sets os.fstat().st_ctime_ns to ChangeTime while
+    # os.lstat().st_ctime_ns stays CreationTime (CPython gh-112840); st_birthtime_ns
+    # is CreationTime on both handles and path lstat.
+    created_ns = getattr(info, "st_birthtime_ns", info.st_ctime_ns)
+    return info.st_size, info.st_mtime_ns, info.st_dev, info.st_ino, created_ns
 
 
 def _signature(path: Path):

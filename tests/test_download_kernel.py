@@ -387,9 +387,12 @@ def test_shutdown_after_author_move_does_not_nest_the_resumed_directory(pipeline
     assert len(stored_pages(folder, None)) == 4
     resumed = JobManager()
     resumed.start()
-    with resumed._changed:
-        assert resumed._changed.wait_for(lambda: album_maintenance.statuses(['100'])['100']['state'] == 'completed', 6)
-    assert resumed.stop(timeout=3) and db.get_job("restart")["status"] == "completed"
+    try:
+        with resumed._changed:
+            assert resumed._changed.wait_for(lambda: album_maintenance.statuses(['100'])['100']['state'] == 'completed', 6)
+    finally:
+        assert resumed.stop(timeout=3)
+    assert db.get_job("restart")["status"] == "completed"
     assert Path(db.get_job("restart")["output_path"]) == folder and not (folder.parent / "Writer").exists()
     assert len(stored_pages(folder, "cbz")) == 4 and not list(folder.rglob("*.webp"))
     assert list(pipeline.calls.values()) == [1] * 4
