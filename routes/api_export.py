@@ -53,7 +53,7 @@ _COPY_CHUNK = 1024 * 1024
 def _export_capacity(view):
     @wraps(view)
     def guarded(**source):
-        if not _EXPORT_SLOT.acquire(blocking=False):
+        if not _EXPORT_SLOT.acquire(timeout=0.1):
             return (jsonify(status="error", reason="export_busy", message="已有导出正在生成或下载，请稍后重试"),
                     503, {"Retry-After": _RETRY_AFTER})
         response = None
