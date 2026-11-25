@@ -387,7 +387,7 @@ def test_retired_client_survives_timed_out_background_call(client, monkeypatch):
     monkeypatch.setattr(shared.get_root_postman().session, "close", close)
     try:
         with pytest.raises(TimeoutError):
-            service._call_with_timeout("test", 0.01, "timeout", MethodType(slow, shared))
+            service._call_with_timeout("test", 0.08, "timeout", MethodType(slow, shared))
         service.invalidate_option_cache()
         service.close_client(shared)
         close.assert_not_called()
