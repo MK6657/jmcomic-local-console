@@ -126,14 +126,39 @@ def transfer_page(page, page_size, album_id=None):
             books = conn.execute("SELECT album_id, COUNT(*) AS n FROM jobs GROUP BY album_id ORDER BY "
                                  "MAX(status IN ('running','paused')) DESC, MAX(status='queued') DESC, MAX(created_at) DESC, "
                                  'MAX(id) DESC LIMIT ? OFFSET ?', (size, offset)).fetchall()
-            for book in books:
-                key = book['album_id']
-                album_totals[key] = book['n']
-                for state in STATES:
-                    rows = conn.execute('SELECT * FROM jobs WHERE album_id=? AND status=? '
-                                        'ORDER BY created_at DESC,id DESC LIMIT ?',
-                                        (key, state, 2 if state in STATES[:3] else 1))
-                    jobs.extend(dict(row) for row in rows)
+            if books:
+                ordered_ids = []
+                for book in books:
+                    key = book['album_id']
+                    ordered_ids.append(key)
+                    album_totals[key] = book['n']
+                state_rank = {state: idx for idx, state in enumerate(STATES)}
+                album_rank = {aid: idx for idx, aid in enumerate(ordered_ids)}
+                rows = conn.execute(
+                    """WITH ranked AS (
+                           SELECT *,
+                                  ROW_NUMBER() OVER (
+                                      PARTITION BY album_id, status
+                                      ORDER BY created_at DESC, id DESC
+                                  ) AS _rn
+                           FROM jobs
+                           WHERE album_id IN (SELECT value FROM json_each(?))
+                       )
+                       SELECT * FROM ranked
+                       WHERE (status IN ('running', 'paused', 'queued') AND _rn <= 2)
+                          OR (status NOT IN ('running', 'paused', 'queued') AND _rn <= 1)""",
+                    (json.dumps(ordered_ids),),
+                ).fetchall()
+                fetched = []
+                for row in rows:
+                    item = dict(row)
+                    item.pop('_rn', None)
+                    fetched.append(item)
+                fetched.sort(key=lambda item: (
+                    album_rank.get(item['album_id'], len(ordered_ids)),
+                    state_rank.get(item['status'], len(STATES)),
+                ))
+                jobs.extend(fetched)
         return dict(jobs=jobs, album_totals=album_totals, counts=counts, page=page, pages=pages, page_size=size,
                     total=total, filter='all', view='album' if album_id else 'folios', album_id=album_id)
 

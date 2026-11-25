@@ -68,6 +68,16 @@
 
   // ── 表单填充 ──
 
+  function syncScheduleHint() {
+    var hint = document.getElementById('schedule-same-hour-hint');
+    var enabled = document.getElementById('schedule_enabled');
+    var start = document.getElementById('schedule_start');
+    var end = document.getElementById('schedule_end');
+    if (!hint || !enabled || !start || !end) return;
+    var same = Boolean(enabled.checked) && String(start.value) === String(end.value);
+    hint.classList.toggle('d-none', !same);
+  }
+
   function syncDeleteOriginals() {
     var autoPack = document.getElementById('auto_pack');
     var deleteOriginals = document.getElementById('delete_originals');
@@ -109,6 +119,7 @@
       }
     }
     syncDeleteOriginals();
+    syncScheduleHint();
   }
 
   function collectFormValues() {
@@ -547,6 +558,7 @@
       }
       els.form.addEventListener('input', markEdited);
       els.form.addEventListener('change', markEdited);
+      els.form.addEventListener('change', syncScheduleHint);
       els.form.addEventListener('input', function (e) {
         var target = e.target;
         if (target.name && target.classList.contains('is-invalid')) {
@@ -558,6 +570,14 @@
             feedback = target.parentElement.querySelector('.invalid-feedback');
           }
           if (feedback) feedback.textContent = '';
+        }
+      });
+    }
+    if (typeof document.addEventListener === 'function') {
+      document.addEventListener('keydown', function (e) {
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 's' || e.key === 'S')) {
+          e.preventDefault();
+          handleSave();
         }
       });
     }

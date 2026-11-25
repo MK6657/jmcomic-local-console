@@ -11,11 +11,10 @@ from flask import Blueprint, jsonify, request
 
 import core.database as db
 from core import local_availability, update_checker, update_store
-from core.local_availability import MAX_IDS
+from core.local_availability import MAX_IDS, readable_among
 from core.logger import log
 from core.settings import get_settings
 from core.validation import validate_numeric
-from routes.api_library import readable_among
 
 api_updates_bp = Blueprint("api_updates", __name__, url_prefix="/api/updates")
 

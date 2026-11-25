@@ -14,11 +14,26 @@ from core.validation import validate_numeric, validate_job_id
 page_bp = Blueprint("page", __name__)
 
 
+def _safe_local_next(raw_next: str) -> str:
+    candidate = (raw_next or '').strip()
+    if (
+        candidate.startswith('/')
+        and not candidate.startswith('//')
+        and '\\' not in candidate
+        and '\r' not in candidate
+        and '\n' not in candidate
+        and not candidate.startswith('/ui/')
+    ):
+        return candidate
+    return '/downloads'
+
+
 @page_bp.get('/ui/<edition>')
 def select_edition(edition):
     if edition not in ('classic', 'atelier'):
         abort(404)
-    response = redirect('/downloads', code=303)
+    target = _safe_local_next(request.args.get('next', ''))
+    response = redirect(target, code=303)
     response.set_cookie('jmconsole_edition', edition, max_age=365 * 86400, httponly=True, samesite='Strict')
     response.headers['Cache-Control'] = 'no-store'
     return response
@@ -37,6 +52,13 @@ def index():
         ).fetchall()] if show_recent else []
 
     download_folios.resolve_job_titles(running_jobs + recent_jobs)
+
+    from core import path_guard
+    from core.publication import private_path
+    for job in recent_jobs:
+        raw_out = job.get("output_path") or ""
+        if job.get("status") != "completed" or (raw_out and private_path(raw_out, path_guard.DOWNLOAD_ROOT)):
+            job["output_path"] = ""
 
     # 给 running_jobs 计算百分比
     for job in running_jobs:

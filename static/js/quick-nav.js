@@ -22,8 +22,8 @@
   var PAGES_KEY = 'jm-quick-nav-pages-v1'; // { 浏览历史记录的标识: {url, title, y, listTop, savedAt} }
   var MAX_PAGES = 50;
   var HOVER_CLOSE_MS = 300;               // 鼠标移开后稍等再收起，斜着移到面板上不会闪
-  // “资源库 - JMComic 下载控制台”；阅读页、单页预览由脚本改成“标题 - JMComic”“标题 - JMComic 图片预览”
-  var SITE_SUFFIX = /\s*-\s*JMComic(?:\s*(?:下载控制台|图片预览))?\s*$/;
+  // “资源库 - JMComic 下载控制台” / “私人书阁 · 藏书阁”；阅读页、单页预览由脚本改成“标题 - JMComic”“标题 - JMComic 图片预览”
+  var SITE_SUFFIX = /\s*(?:-\s*JMComic(?:\s*(?:下载控制台|图片预览))?|·\s*藏书阁(?:\s*·\s*JMComic\s*下载控制台)?)\s*$/;
   var SITE_PREFIX = /^\s*JMComic 下载控制台\s*-\s*/;  // “JMComic 下载控制台 - 设置”
   var TITLE_MAX = 40;
 

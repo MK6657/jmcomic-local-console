@@ -195,3 +195,52 @@ def test_archive_cache_eviction_is_thread_safe(client, monkeypatch):
     with ThreadPoolExecutor(max_workers=12) as pool:
         assert all(pool.map(lambda n: api_jobs._check_cbz_path(str(n)), range(100)))
     assert len(api_jobs._cbz_cache) <= 5
+
+
+def test_sanitize_preserves_host_port_before_fullwidth_punctuation_while_redacting_credentials():
+    from core.logger import sanitize
+    startup = sanitize("服务已启动 → http://127.0.0.1:5000（waitress）")
+    assert startup == "服务已启动 → http://127.0.0.1:5000（waitress）"
+    proxied = sanitize("代理连接 http://alice:s3cr3t@127.0.0.1:7890（本地）")
+    assert "s3cr3t" not in proxied and "127.0.0.1:7890（本地）" in proxied
+
+
+def test_extract_album_id_supports_prefixed_ids_and_urls_in_search_and_wishlist_import(client):
+    from core.validation import extract_album_id
+    assert extract_album_id("123456") == "123456"
+    assert extract_album_id("JM123456") == "123456"
+    assert extract_album_id("jm / 654321") == "654321"
+    assert extract_album_id("https://18comic.vip/album/987654/sample-title") == "987654"
+    assert extract_album_id("https://example.com/album/987654") is None
+    assert extract_album_id("not-an-id") is None
+
+    resp = client.post("/api/wishlist/import", json={
+        "raw": "JM100001, https://18comic.vip/album/100002/book-slug",
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["added"] == 2 and body["failed_validation"] == []
+
+    found = client.get("/api/wishlist?q=JM100001").get_json()
+    assert found["status"] == "ok" and [it["album_id"] for it in found["items"]] == ["100001"]
+
+
+def test_cbz_cache_invalidates_immediately_when_directory_mtime_changes(tmp_path, monkeypatch):
+    import os
+    from routes import api_jobs
+    album_dir = tmp_path / "book_100"
+    album_dir.mkdir()
+    scans = []
+    state = {"fmt": None}
+    monkeypatch.setattr(api_jobs, "_cbz_cache", {})
+    monkeypatch.setattr(api_jobs, "_scan_cbz_path", lambda path: scans.append(path) or state["fmt"])
+
+    assert api_jobs._check_cbz_path(str(album_dir)) is None
+    assert api_jobs._check_cbz_path(str(album_dir)) is None
+    assert len(scans) == 1
+
+    state["fmt"] = "cbz"
+    st = album_dir.stat()
+    os.utime(album_dir, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    assert api_jobs._check_cbz_path(str(album_dir)) == "cbz"
+    assert len(scans) == 2

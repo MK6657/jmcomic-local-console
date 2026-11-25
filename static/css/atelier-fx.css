@@ -55,7 +55,20 @@
 [data-theme="pixel"] .preview-image-wrapper,
 [data-theme="pixel"] .thumbnail-bar {
   border-width: 2px !important;
-  border-color: var(--line-strong) !important;
+}
+[data-theme="pixel"] :is(
+  .export-picker, .mineral-dock, .sidebar-pulse, .shelf-filter-sheet,
+  .desk-search, .desk-tile, .desk-ledger, .album-card, .library-card,
+  .folio-card, .folio-tools, .monograph-front, .monograph-contents,
+  .monograph-workshop, .pref-index, .pref-pages .settings-section,
+  .bound-book, .preview-image-wrapper, .thumbnail-bar
+),
+[data-theme="pixel"] :is(.form-control, .form-select):not(:focus):not(.is-invalid),
+[data-theme="pixel"] :is(.pref-palette, .pref-fx-card):not([aria-pressed="true"]) {
+  border-color: var(--line-strong);
+}
+[data-theme="pixel"] :is(.pref-palette, .pref-fx-card)[aria-pressed="true"] {
+  border-color: var(--accent);
 }
 [data-theme="pixel"] .sidebar-nav .nav-link.active {
   border: 2px solid var(--accent);

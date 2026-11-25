@@ -174,9 +174,9 @@
     if (mode === 'anime') {
       const pts = [
         ['fx-anime-petal', -26, -22, -55, 'var(--accent)'],
-        ['fx-anime-star',   24, -24,  70, '#F5B841'],
-        ['fx-anime-petal', -20,  22,  50, '#F28CB1'],
-        ['fx-anime-star',   26,  18, -65, '#7EB8F0'],
+        ['fx-anime-star',   24, -24,  70, 'var(--warn)'],
+        ['fx-anime-petal', -20,  22,  50, 'rgba(var(--accent-rgb), 0.78)'],
+        ['fx-anime-star',   26,  18, -65, 'var(--info)'],
       ];
       return pts.map(([cls, dx, dy, rot, color]) => ({
         cls,

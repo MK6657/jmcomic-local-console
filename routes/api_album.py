@@ -1,25 +1,69 @@
 """
 专辑详情 API & 封面重定向
 """
+from collections import OrderedDict
+import hashlib
 import io
-import re
+import os
+import threading
 from pathlib import Path
 
 from flask import Blueprint, jsonify, make_response, redirect, request, send_file
 
 from core import archive_pages, thumb_cache
-from core.database import get_db, get_all_jobs, get_job, get_completed_job_by_album_id
+from core.database import get_completed_job_by_album_id
 from core.file_tree import is_link
 from core.logger import log
 from core.path_guard import is_safe_path
 from core.path_utils import get_cache_dir
-from core.validation import validate_numeric, require_numeric, ALLOWED_EXTENSIONS, is_allowed_image, get_image_mime
+from core.validation import validate_numeric, get_image_mime
 from core.jm_service import get_album_detail_cached
 from core.upstream import known_failure
 from core.local_availability import scan_page_images
 from jmcomic import JmcomicText
 
 api_album_bp = Blueprint("api_album", __name__)
+
+_COVER_KEY_CACHE_MAX = 512
+_cover_key_lock = threading.Lock()
+# album_id -> (album_dir_str, dir_mtime_ns, verify_path_str, verify_mtime_ns, verify_size, cache_key)
+_cover_key_cache: OrderedDict[str, tuple[str, int, str, int, int, str]] = OrderedDict()
+
+
+def _remember_cover_key(album_id: str, entry: tuple[str, int, str, int, int, str]) -> None:
+    with _cover_key_lock:
+        _cover_key_cache[album_id] = entry
+        _cover_key_cache.move_to_end(album_id)
+        while len(_cover_key_cache) > _COVER_KEY_CACHE_MAX:
+            _cover_key_cache.popitem(last=False)
+
+
+def _lookup_fast_cover_thumb(album_id: str, album_dir: Path, width: int) -> Path | None:
+    try:
+        dir_mtime_ns = album_dir.stat().st_mtime_ns
+    except OSError:
+        return None
+    with _cover_key_lock:
+        entry = _cover_key_cache.get(album_id)
+        if entry is not None:
+            _cover_key_cache.move_to_end(album_id)
+    if entry is None:
+        return None
+    dir_str, cached_dir_mtime, verify_str, verify_mtime, verify_size, cache_key = entry
+    if dir_str != str(album_dir) or cached_dir_mtime != dir_mtime_ns:
+        return None
+    try:
+        st = os.stat(verify_str)
+    except OSError:
+        return None
+    if st.st_mtime_ns != verify_mtime or st.st_size != verify_size:
+        return None
+    return thumb_cache.get_cached_thumbnail(cache_key=cache_key, width=width)
+
+
+def _send_bytes_thumb(data: bytes):
+    etag = hashlib.sha1(data).hexdigest()[:20]
+    return send_file(io.BytesIO(data), mimetype="image/webp", max_age=0, etag=etag)
 
 
 @api_album_bp.get("/api/album/<album_id>")
@@ -47,7 +91,7 @@ def cover_redirect(album_id: str):
     if not validate_numeric(album_id):
         log.warning(f"API封面重定向 album_id 格式非法 album_id={album_id}")
         return jsonify({"status": "error", "message": "album_id 必须是纯数字"}), 400
-    log.info(f"API封面重定向 album_id={album_id}")
+    log.debug(f"API封面重定向 album_id={album_id}")
     try:
         width = thumb_cache.parse_width(request.args.get("w"))
         if width is None and request.path.endswith("/portrait") and request.args.get("original") != "1":
@@ -70,51 +114,73 @@ def cover_redirect(album_id: str):
             break
 
         if album_dir is not None:
-            if True:
-                loose = scan_page_images(album_dir, check_paths=False)
-                index = archive_pages.select(album_dir)
-                pages = archive_pages.merge_pages(loose, index)
-                if pages and isinstance(pages[0][1], archive_pages.ArchivePage):
-                    try:
-                        first_page = pages[0][1]
-                        version = archive_pages.version(index)
-                        arc_key = f"arc:{album_id}:{version}:{first_page.name}"
-                        if width is not None:
-                            cached_thumb = thumb_cache.get_cached_thumbnail(cache_key=arc_key, width=width)
-                            if cached_thumb is not None:
-                                return send_file(str(cached_thumb), mimetype="image/webp", max_age=0)
-                        raw = archive_pages.read_page(index, first_page)
-                        if width is not None:
-                            resized = thumb_cache.get_or_build_thumbnail(
-                                cache_key=arc_key,
-                                width=width,
-                                source_bytes=raw,
-                            )
-                            if isinstance(resized, Path):
-                                return send_file(str(resized), mimetype="image/webp", max_age=0)
-                            if isinstance(resized, bytes):
-                                return send_file(io.BytesIO(resized), mimetype="image/webp", max_age=0)
-                        mime = get_image_mime(first_page.suffix)
-                        log.info(f"API封面返回本地归档首页 album_id={album_id}")
-                        return send_file(io.BytesIO(raw), mimetype=mime, max_age=0, etag=f"{version}-cover")
-                    except archive_pages.ArchiveError:
-                        pass
-                if loose and is_safe_path(loose[0][1]):
-                    first_img = loose[0][1]
+            if width is not None:
+                fast_thumb = _lookup_fast_cover_thumb(album_id, album_dir, width)
+                if fast_thumb is not None:
+                    return send_file(str(fast_thumb), mimetype="image/webp", max_age=0)
+            dir_mtime_ns = album_dir.stat().st_mtime_ns
+            loose = scan_page_images(album_dir, check_paths=False)
+            index = archive_pages.select(album_dir)
+            pages = archive_pages.merge_pages(loose, index)
+            if pages and isinstance(pages[0][1], archive_pages.ArchivePage):
+                try:
+                    first_page = pages[0][1]
+                    version = archive_pages.version(index)
+                    arc_key = f"arc:{album_id}:{version}:{first_page.name}"
+                    arc_path = getattr(index, "path", None)
                     if width is not None:
-                        st = first_img.stat()
+                        cached_thumb = thumb_cache.get_cached_thumbnail(cache_key=arc_key, width=width)
+                        if cached_thumb is not None:
+                            if arc_path is not None:
+                                arc_st = os.stat(arc_path)
+                                _remember_cover_key(
+                                    album_id,
+                                    (str(album_dir), dir_mtime_ns, str(arc_path), arc_st.st_mtime_ns, arc_st.st_size, arc_key),
+                                )
+                            return send_file(str(cached_thumb), mimetype="image/webp", max_age=0)
+                    raw = archive_pages.read_page(index, first_page)
+                    if width is not None:
                         resized = thumb_cache.get_or_build_thumbnail(
-                            cache_key=f"file:{first_img}:{st.st_mtime_ns}:{st.st_size}",
+                            cache_key=arc_key,
                             width=width,
-                            source_path=first_img,
+                            source_bytes=raw,
                         )
                         if isinstance(resized, Path):
+                            if arc_path is not None:
+                                arc_st = os.stat(arc_path)
+                                _remember_cover_key(
+                                    album_id,
+                                    (str(album_dir), dir_mtime_ns, str(arc_path), arc_st.st_mtime_ns, arc_st.st_size, arc_key),
+                                )
                             return send_file(str(resized), mimetype="image/webp", max_age=0)
                         if isinstance(resized, bytes):
-                            return send_file(io.BytesIO(resized), mimetype="image/webp", max_age=0)
-                    mime = get_image_mime(first_img.suffix.lower())
-                    log.info(f"API封面返回本地文件 album_id={album_id}")
-                    return send_file(str(first_img), mimetype=mime, max_age=0)
+                            return _send_bytes_thumb(resized)
+                    mime = get_image_mime(first_page.suffix)
+                    log.debug(f"API封面返回本地归档首页 album_id={album_id}")
+                    return send_file(io.BytesIO(raw), mimetype=mime, max_age=0, etag=f"{version}-cover")
+                except archive_pages.ArchiveError:
+                    pass
+            if loose and is_safe_path(loose[0][1]):
+                first_img = loose[0][1]
+                if width is not None:
+                    st = first_img.stat()
+                    file_key = f"file:{first_img}:{st.st_mtime_ns}:{st.st_size}"
+                    resized = thumb_cache.get_or_build_thumbnail(
+                        cache_key=file_key,
+                        width=width,
+                        source_path=first_img,
+                    )
+                    if isinstance(resized, Path):
+                        _remember_cover_key(
+                            album_id,
+                            (str(album_dir), dir_mtime_ns, str(first_img), st.st_mtime_ns, st.st_size, file_key),
+                        )
+                        return send_file(str(resized), mimetype="image/webp", max_age=0)
+                    if isinstance(resized, bytes):
+                        return _send_bytes_thumb(resized)
+                mime = get_image_mime(first_img.suffix.lower())
+                log.debug(f"API封面返回本地文件 album_id={album_id}")
+                return send_file(str(first_img), mimetype=mime, max_age=0)
 
         covers_dir = get_cache_dir() / "covers"
         if covers_dir.is_dir() and not is_link(covers_dir):
@@ -131,9 +197,9 @@ def cover_redirect(album_id: str):
                         if isinstance(resized, Path):
                             return send_file(str(resized), mimetype="image/webp", max_age=0)
                         if isinstance(resized, bytes):
-                            return send_file(io.BytesIO(resized), mimetype="image/webp", max_age=0)
+                            return _send_bytes_thumb(resized)
                     mime = get_image_mime(ext)
-                    log.info(f"API封面返回本地缓存封面 album_id={album_id}")
+                    log.debug(f"API封面返回本地缓存封面 album_id={album_id}")
                     return send_file(str(cached_cover), mimetype=mime, max_age=0)
 
         # -- CDN 回退（本地没有封面）--

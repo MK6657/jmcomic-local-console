@@ -38,7 +38,7 @@
   display: block;
   margin: 0 0 4px;
   color: var(--accent);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: .12em;
 }
@@ -87,6 +87,10 @@
 .reader-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 
 #reader-pages { position: relative; width: 100%; max-width: 720px; margin: auto; overflow-anchor: none; }
+.continuous-reader[data-width="wide"] { max-width: 76rem; }
+.continuous-reader[data-width="wide"] #reader-pages { max-width: 980px; }
+.continuous-reader[data-width="full"] { max-width: 100%; }
+.continuous-reader[data-width="full"] #reader-pages { max-width: min(1280px, 100%); }
 html:has(.continuous-reader) { overflow-anchor: none; }
 .reader-page {
   position: absolute;

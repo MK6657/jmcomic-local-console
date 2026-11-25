@@ -80,3 +80,27 @@ def test_regular_thumbnail_is_reused_from_disk_and_memory_in_its_cache_root(tmp_
     root = tmp_path / "first"
     thumbnail.unlink()
     assert thumb_cache.get_cached_thumbnail(**options) is None
+
+
+def test_prune_evicts_oldest_files_and_clears_memory_hits_without_error(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setattr(thumb_cache, "get_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(thumb_cache, "MAX_CACHED_THUMBS", 3)
+    monkeypatch.setattr(thumb_cache, "PRUNE_TARGET", 2)
+    payload = _source(480, 840)
+
+    built = []
+    for idx in range(5):
+        path = thumb_cache.get_or_build_thumbnail(cache_key=f"cover-{idx}", width=180, source_bytes=payload)
+        assert isinstance(path, Path) and path.is_file()
+        stamp = 1_700_000_000 + idx * 10
+        os.utime(path, (stamp, stamp))
+        built.append(path)
+
+    thumb_cache._prune_if_needed(tmp_path / "thumbs")
+    remaining = list((tmp_path / "thumbs").glob("*.webp"))
+    assert len(remaining) <= 3 and len(remaining) < len(built)
+    with thumb_cache._mem_lock:
+        for hit_path in thumb_cache._mem_hits.values():
+            if hit_path is not None:
+                assert hit_path.exists()

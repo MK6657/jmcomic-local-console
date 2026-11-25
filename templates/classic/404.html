@@ -12,9 +12,18 @@
         <a href="/" class="btn btn-primary">
             <i class="bi bi-house-door"></i> 返回首页
         </a>
-        <a href="javascript:history.back()" class="btn btn-outline-secondary">
+        <button type="button" id="error-back-btn" class="btn btn-outline-secondary">
             <i class="bi bi-arrow-left"></i> 返回上一页
-        </a>
+        </button>
     </div>
 </div>
+<script>
+(function () {
+  var btn = document.getElementById('error-back-btn');
+  if (btn) btn.addEventListener('click', function () {
+    if (window.history.length > 1) window.history.back();
+    else window.location.href = '/';
+  });
+})();
+</script>
 {% endblock %}

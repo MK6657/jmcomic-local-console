@@ -78,7 +78,11 @@ SENSITIVE_KEYS = {
 _UPPERCASE_PLACEHOLDER_KEYS = {
     "cookie", "token", "authorization", "apikey", "api_key", "refresh_token",
 }
-_AUTHORITY = re.compile(r"\b((?:https?|socks(?:4a?|5h?))://)((?:\[[^\]]*\]|[^/\s?#\"',;<>()\[\]{}\\|])+)", re.I)
+_AUTHORITY = re.compile(
+    r"\b((?:https?|socks(?:4a?|5h?))://)"
+    r"((?:\[[^\]]*\]|[^/\s?#\"',;<>()\[\]{}\\|`\u3000-\u303f\uff08\uff09\uff0c\uff1a\uff1b\uff1f\uff01\uff3b\uff3d\uff5b\uff5d])+)",
+    re.I,
+)
 _CREDENTIAL = re.compile(r"\b(Bearer|Basic)[ \t]+[^\s,'\";}]+", re.I)
 _PRIVATE_HEADER = re.compile(r"(\b(?:(?:(?:set-)?cookie|(?:proxy-)?authorization)[ \t]*:"
                              r"|(?:set-)?cookie[ \t]*=(?=[ \t]*[\w.-]+=))[ \t]*)"

@@ -179,9 +179,9 @@ def _tick():
     job_manager.schedule_next()
     # 定时 WAL checkpoint 防 WAL 膨胀
     try:
+        from contextlib import closing
         from .database import get_db
-        conn = get_db()
-        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-        conn.close()
+        with closing(get_db()) as conn:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
     except Exception:
         pass

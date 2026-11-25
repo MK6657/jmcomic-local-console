@@ -26,6 +26,16 @@
     var totalItems = 0;
     var allTags = [];
     var itemsById = {}; // 当前页的条目：收藏时取标题/作者/封面
+    var lastRenderedSignature = '';
+
+    function computeListSignature(items, total, page) {
+        return page + '|' + total + '|' + items.map(function (it) {
+            var u = it.update ? (it.update.state + ':' + it.update.new_count + ':' + (it.update.removed_count || 0)) : '';
+            var tags = (it.tags || []).map(function (t) { return t.tag + ':' + t.source; }).join(',');
+            return [it.album_id, it.title, it.author, it.readable ? 1 : 0, it.status_group, it.activity,
+                it.archive, it.local_problem, it.archive_problem, it.is_wishlisted ? 1 : 0, u, tags].join('~');
+        }).join('\n');
+    }
 
     // ── 定时器 ──
     var _searchTimer = null;
@@ -175,10 +185,16 @@
                 }
                 if (items.length === 0) {
                     itemsById = {};
+                    lastRenderedSignature = '';
                     renderEmpty();
                     pagination.textContent = '';
                     return;
                 }
+                var sig = computeListSignature(items, totalItems, page);
+                if (options.onlyIfChanged && sig === lastRenderedSignature) {
+                    return;
+                }
+                lastRenderedSignature = sig;
                 renderCards(items);
                 renderPagination(totalItems, page);
                 // 从导航回到资源库：地址与离开时相同就回到原来的滚动位置（只在第一次画出列表时）
@@ -200,6 +216,7 @@
     }
 
     function showGridMessage(iconName, text) {
+        lastRenderedSignature = '';
         var box = el('div', 'empty-library');
         box.appendChild(icon(iconName));
         box.appendChild(el('p', null, text));
@@ -761,6 +778,8 @@
     // ══════════════════════════════════════════════════════════════
 
     function toggleLibraryWishlist(albumId, btn) {
+        if (btn.disabled) return;
+        btn.disabled = true;
         var isStarred = btn.getAttribute('aria-pressed') === 'true';
 
         if (isStarred) {
@@ -768,9 +787,10 @@
                 .then(function (data) {
                     if (data.status === 'ok') {
                         setStarState(btn, false);
+                        if (itemsById[albumId]) itemsById[albumId].is_wishlisted = false;
+                        lastRenderedSignature = '';
                         toast('已取消收藏', 'info');
                         loadStats();
-                        loadLibrary(currentPage, { showSpinner: false });
                     } else {
                         toast(data.message || '取消收藏失败', 'danger');
                     }
@@ -778,7 +798,8 @@
                 .catch(function (err) {
                     if (err && err.name === 'AbortError') return; // pagehide 中止，静默
                     toast(toastErr(err, '取消收藏失败'), 'danger');
-                });
+                })
+                .finally(function () { btn.disabled = false; });
         } else {
             var item = itemsById[albumId] || {};
             window.apiFetch('/api/wishlist', {
@@ -794,9 +815,10 @@
             .then(function (data) {
                 if (data.status === 'ok') {
                     setStarState(btn, true);
+                    if (itemsById[albumId]) itemsById[albumId].is_wishlisted = true;
+                    lastRenderedSignature = '';
                     toast('已添加收藏', 'success');
                     loadStats();
-                    loadLibrary(currentPage, { showSpinner: false });
                 } else {
                     toast(data.message || '收藏失败', 'danger');
                 }
@@ -804,7 +826,8 @@
             .catch(function (err) {
                 if (err && err.name === 'AbortError') return; // pagehide 中止，静默
                 toast(toastErr(err, '收藏失败'), 'danger');
-            });
+            })
+            .finally(function () { btn.disabled = false; });
         }
     }
 
@@ -852,7 +875,7 @@
     function startAutoRefresh() {
         if (_refreshTimer) clearInterval(_refreshTimer);
         _refreshTimer = setInterval(function () {
-            if (canRefreshNow()) loadLibrary(currentPage, { showSpinner: false });
+            if (canRefreshNow()) loadLibrary(currentPage, { showSpinner: false, onlyIfChanged: true });
         }, 30000);
     }
 
@@ -864,6 +887,7 @@
     }
 
     function refreshLibrary() {
+        lastRenderedSignature = '';
         loadLibrary(currentPage, { showSpinner: true });
         loadStats();
     }
@@ -1035,7 +1059,7 @@
         if (document.visibilityState !== 'visible') return;
         refreshCardClickSetting();
         if (_refreshTimer && canRefreshNow()) {
-            loadLibrary(currentPage, { showSpinner: false });
+            loadLibrary(currentPage, { showSpinner: false, onlyIfChanged: true });
         }
     });
     // 设置页开在旁边的另一个窗口里：点回本窗口时（标签页一直可见，不会触发 visibilitychange）

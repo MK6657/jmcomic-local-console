@@ -284,6 +284,8 @@
     tabsContent.addEventListener('click', function (event) {
       var el = event.target.closest('button[data-action]');
       if (!el || !tabsContent.contains(el) || el.disabled) return;
+      var cleanup = el.closest('details.record-cleanup');
+      if (cleanup) cleanup.open = false;
       var action = el.getAttribute('data-action');
       if (Object.prototype.hasOwnProperty.call(ACTIONS, action)) ACTIONS[action](el);
     });
@@ -921,6 +923,19 @@
       + '</div></div>';
   }
 
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('click', function (event) {
+      if (!tabsContent || typeof tabsContent.querySelectorAll !== 'function') return;
+      tabsContent.querySelectorAll('details.record-cleanup[open]').forEach(function (d) {
+        if (!d.contains(event.target)) d.open = false;
+      });
+    });
+    document.addEventListener('keydown', function (event) {
+      if (event.key !== 'Escape' || !tabsContent || typeof tabsContent.querySelectorAll !== 'function') return;
+      tabsContent.querySelectorAll('details.record-cleanup[open]').forEach(function (d) { d.open = false; });
+    });
+  }
+
   // ── SSE 事件回调（实时进度写入单调缓存，终态刷新列表） ──
   window.setSSECallbacks({
     onProgress: function (data) {
@@ -931,6 +946,12 @@
       if (!prev || total > prev.total || done >= prev.done) {
         liveProgress[data.job_id] = { done: done, total: total };
       }
+    },
+    onArchiving: function (data, jobId) {
+      var id = (data && data.job_id) || jobId;
+      if (!id) return;
+      var infoEl = document.getElementById('info-' + id);
+      if (infoEl) infoEl.textContent = '正在打包归档…';
     },
     onCompleted: function (e, jobId) { if (jobId) delete liveProgress[jobId]; refreshJobs(); },
     onFailed: function (e, jobId) { if (jobId) delete liveProgress[jobId]; refreshJobs(); },

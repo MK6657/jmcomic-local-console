@@ -175,11 +175,21 @@ class JobManager:
 
     def _scheduler_loop(self):
         """执行器排空时调度下一项；空闲时也定期检查入队和时间窗口。"""
+        from contextlib import closing
+        last_checkpoint = time.monotonic()
         while not self._stop_event.is_set():
             self._schedule_wakeup.clear()
             try:
                 self._schedule_next()
                 self._schedule_maintenance()
+                now = time.monotonic()
+                if now - last_checkpoint >= 300 and self.get_executor_count() == 0:
+                    last_checkpoint = now
+                    try:
+                        with closing(db.get_db()) as conn:
+                            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    except Exception:
+                        pass
             except Exception as e:
                 log.error(f"调度器异常: {e}")
             if not self._stop_event.is_set():
@@ -497,6 +507,8 @@ class JobManager:
 
     def retry_job_result(self, job_id: str) -> EnqueueResult:
         result = retry_download(job_id)
+        if result.created:
+            self._schedule_wakeup.set()
         log.info(f"重试任务 old_job_id={job_id} new_job_id={result.job_id} created={result.created}")
         return result
 

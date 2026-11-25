@@ -58,21 +58,8 @@ def _daily(now: datetime) -> datetime:
 @contextmanager
 def _tx(conn=None):
     """借用调用方事务，或创建并管理一个 BEGIN IMMEDIATE 事务。"""
-    if conn is not None:
-        yield conn
-        return
-    conn = db.get_db()
-    conn.isolation_level = None
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield conn
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
-        conn.execute("COMMIT")
-    finally:
-        conn.close()
+    with db.transaction(conn) as tx:
+        yield tx
 
 
 def _read(sql: str, params=()):

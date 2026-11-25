@@ -1185,6 +1185,23 @@ code {
   .detail-cover { max-width: 200px; box-shadow: none; }
 }
 
+.toast.bg-warning .btn-close-white {
+  filter: none;
+}
+
+.progress-bar-animated {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* ════════════════════════════════════════════════════════════════
    设置页 · 日志与诊断（templates/settings.html #logs + js/logs.js，2026-09-25 新增）
    只追加、不改动上方规则。颜色全部取 eye-care token；间距 4/8/16/24；

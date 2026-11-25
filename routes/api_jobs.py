@@ -3,6 +3,7 @@ from collections import OrderedDict
 import json
 import os
 import re
+import stat
 import time
 import threading
 from pathlib import Path
@@ -49,20 +50,35 @@ def _scan_cbz_path(output_path: str) -> str | None:
     return None
 
 
+def _dir_mtime_ns(output_path: str) -> int | None:
+    if not output_path:
+        return None
+    try:
+        st = os.stat(output_path)
+        return st.st_mtime_ns if stat.S_ISDIR(st.st_mode) else None
+    except OSError:
+        return None
+
+
 def _check_cbz_path(output_path: str) -> str | None:
-    """检查单个路径的压缩包格式（带 TTL 缓存）"""
+    """检查单个路径的压缩包格式（带 TTL + 目录 mtime 失效缓存）"""
     now = time.time()
+    mtime_ns = _dir_mtime_ns(output_path)
     with _cbz_cache_lock:
         cached = _cbz_cache.get(output_path)
-        if cached is not None and now - cached[1] < _CBZ_CACHE_TTL:
+        if (
+            cached is not None
+            and now - cached[1] < _CBZ_CACHE_TTL
+            and (len(cached) < 3 or cached[2] == mtime_ns)
+        ):
             return cached[0]
     exists = _scan_cbz_path(output_path)
     with _cbz_cache_lock:
-        _cbz_cache[output_path] = (exists, now)
-        # Eviction is atomic with insertion, even across concurrent API requests.
+        _cbz_cache.pop(output_path, None)
+        _cbz_cache[output_path] = (exists, now, mtime_ns)
+        # Eviction is atomic with insertion and O(1) on both dict and OrderedDict.
         while len(_cbz_cache) > _CBZ_CACHE_MAX:
-            oldest = min(_cbz_cache, key=lambda key: _cbz_cache[key][1])
-            del _cbz_cache[oldest]
+            del _cbz_cache[next(iter(_cbz_cache))]
     return exists
 
 

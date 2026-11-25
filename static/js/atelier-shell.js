@@ -15,6 +15,23 @@
 
   const stones = document.querySelectorAll('.mineral-dock [data-set-theme]');
   const fxToggle = document.getElementById('shell-fx-toggle');
+  stones.forEach(stone => {
+    const key = stone.dataset.setTheme;
+    if (!key) return;
+    if (stone.dataset.scheme === 'dark') darkThemes.add(key);
+    else if (stone.dataset.scheme === 'light') darkThemes.delete(key);
+    if (stone.dataset.defaultFx) themeDefaultFx[key] = stone.dataset.defaultFx;
+  });
+  const classicSwitch = document.querySelector('a.atelier-classic[href="/ui/classic"]');
+  if (classicSwitch && typeof classicSwitch.addEventListener === 'function') {
+    classicSwitch.addEventListener('click', () => {
+      if (!window.location) return;
+      const cur = (window.location.pathname || '') + (window.location.search || '');
+      if (cur && cur !== '/downloads' && !cur.startsWith('/ui/')) {
+        classicSwitch.href = '/ui/classic?next=' + encodeURIComponent(cur);
+      }
+    });
+  }
   const themes = new Set(
     stones.length
       ? Array.from(stones, stone => stone.dataset.setTheme).filter(Boolean)
@@ -283,6 +300,12 @@
     document.addEventListener('pointerdown', event => {
       if (fabMode && !readerFab.contains(event.target) && !toasts?.contains(event.target)) setFabOpen(null);
     }, true);
+    readerFab.addEventListener('focusout', event => {
+      if (!fabMode) return;
+      const next = event.relatedTarget;
+      if (next && (readerFab.contains(next) || toasts?.contains(next))) return;
+      if (next) setFabOpen(null);
+    });
     window.addEventListener('pagehide', () => setFabOpen(null));
 
     if (fabPanel) {
@@ -368,4 +391,11 @@
   window.addEventListener('pageshow', refresh);
   document.addEventListener('visibilitychange', refresh);
   window.matchMedia('(max-width: 640px)').addEventListener('change', refresh);
+  if (!request && !timer) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', () => { if (!request && !timer) refresh(); }, { once: true });
+    } else {
+      refresh();
+    }
+  }
 })();

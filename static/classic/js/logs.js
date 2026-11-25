@@ -12,6 +12,8 @@
 
   var ENDPOINT = '/api/system/logs';
   var OPEN_FOLDER_ENDPOINT = '/api/system/logs/open-folder';
+  var DIAGNOSE_ENDPOINT = '/api/system/diagnose';
+  var CLEAR_CACHE_ENDPOINT = '/api/system/clear-cache';
   var DEFAULT_LIMIT = 200;
   var MAX_LIMIT = 500;
   var SEARCH_DELAY_MS = 300;
@@ -62,6 +64,9 @@
     els.search = document.getElementById('log-search');
     els.refreshBtn = document.getElementById('log-refresh-btn');
     els.openFolderBtn = document.getElementById('log-open-folder-btn');
+    els.diagnoseBtn = document.getElementById('log-diagnose-btn');
+    els.clearCacheBtn = document.getElementById('log-clear-cache-btn');
+    els.diagnosePanel = document.getElementById('log-diagnose-panel');
     els.status = document.getElementById('log-status');
     els.list = document.getElementById('log-list');
     els.more = document.getElementById('log-more');
@@ -335,6 +340,75 @@
       });
   }
 
+  function runDiagnose() {
+    var btn = els.diagnoseBtn;
+    var panel = els.diagnosePanel;
+    if (!panel) return;
+    if (btn) btn.disabled = true;
+    clear(panel);
+    panel.className = 'log-diagnose-panel alert alert-info py-2 px-3 mb-2';
+    panel.appendChild(el('span', null, '正在执行系统自检…'));
+    panel.hidden = false;
+
+    window.apiFetch(DIAGNOSE_ENDPOINT, { timeoutMs: 15000, abortKey: 'log-diagnose' })
+      .then(function (data) {
+        clear(panel);
+        var health = data && data.health;
+        var alertKind = health === 'healthy' ? 'success' : (health === 'degraded' ? 'warning' : 'danger');
+        var healthLabel = health === 'healthy' ? '正常' : (health === 'degraded' ? '存在提醒' : '异常');
+        panel.className = 'log-diagnose-panel alert alert-' + alertKind + ' py-2 px-3 mb-2';
+
+        var appInfo = (data && data.application) || {};
+        var jm = (data && data.jmcomic) || {};
+        var tcpDesc = jm.tcp_target === 'proxy'
+          ? ('代理端口 ' + (jm.proxy_reachable ? 'TCP 可连' : '不可连'))
+          : ((jm.domain ? ('节点 ' + jm.domain + ' ') : '') + (jm.reachable ? 'TCP 443 可连（仅代表端口连通）' : 'TCP 未连通'));
+        var summaryParts = [
+          '自检状态：' + healthLabel,
+          '版本 v' + ((data && data.version) || '—'),
+          '数据库：' + (appInfo.db_ok ? '正常' : '异常'),
+          '任务：运行 ' + (Number(appInfo.active_jobs) || 0) + ' / 排队 ' + (Number(appInfo.queued_jobs) || 0),
+          '网络：' + tcpDesc,
+          '近 24h 错误：' + (Number(data && data.error_count_24h) || 0) + ' 条',
+        ];
+        panel.appendChild(el('div', 'fw-semibold', summaryParts.join(' · ')));
+
+        var warnings = Array.isArray(data && data.warnings) ? data.warnings : [];
+        warnings.forEach(function (w) {
+          panel.appendChild(el('div', 'small mt-1', '• ' + w));
+        });
+      })
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') return;
+        clear(panel);
+        panel.className = 'log-diagnose-panel alert alert-danger py-2 px-3 mb-2';
+        panel.appendChild(el('span', null, '系统自检失败：' + ((err && err.message) || '未知错误')));
+      })
+      .then(function () {
+        if (btn) btn.disabled = false;
+      });
+  }
+
+  function clearRuntimeCache() {
+    var btn = els.clearCacheBtn;
+    if (btn) btn.disabled = true;
+    window.apiFetch(CLEAR_CACHE_ENDPOINT, { method: 'POST', timeoutMs: 15000 })
+      .then(function (data) {
+        if (typeof showToast === 'function') {
+          showToast(safeText((data && data.message) || '缓存已清理'), 'success');
+        }
+      })
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') return;
+        if (typeof showToast === 'function') {
+          showToast(safeText((err && err.message) || '清理缓存失败'), 'danger');
+        }
+      })
+      .then(function () {
+        if (btn) btn.disabled = false;
+      });
+  }
+
   // ── 交互 ──
 
   function setSource(source) {
@@ -400,6 +474,8 @@
 
     if (els.refreshBtn) els.refreshBtn.addEventListener('click', load);
     if (els.openFolderBtn) els.openFolderBtn.addEventListener('click', openFolder);
+    if (els.diagnoseBtn) els.diagnoseBtn.addEventListener('click', runDiagnose);
+    if (els.clearCacheBtn) els.clearCacheBtn.addEventListener('click', clearRuntimeCache);
     if (els.moreBtn) {
       els.moreBtn.addEventListener('click', function () {
         state.limit = MAX_LIMIT;
@@ -407,9 +483,27 @@
       });
     }
 
-    // “只看此请求”：切到全部日志并按请求 ID 搜索，串起同一请求的完整经过
+    // 点击请求 ID 复制，点击“只看此请求”切到全部日志筛选同一请求
     if (els.list) {
       els.list.addEventListener('click', function (e) {
+        var ridNode = e.target && e.target.closest ? e.target.closest('.log-entry-rid') : null;
+        if (ridNode) {
+          var ridText = (ridNode.textContent || '').trim();
+          if (ridText) {
+            try {
+              if (window.getSelection) {
+                var sel = window.getSelection();
+                if (sel && sel.selectAllChildren) sel.selectAllChildren(ridNode);
+              }
+            } catch (_) {}
+            if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(ridText).then(function () {
+                if (typeof showToast === 'function') showToast('已复制请求 ID：' + safeText(ridText), 'info');
+              }).catch(function () {});
+            }
+          }
+          return;
+        }
         var btn = e.target && e.target.closest ? e.target.closest('.log-entry-trace') : null;
         if (!btn) return;
         var rid = btn.dataset.requestId || '';

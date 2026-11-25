@@ -23,11 +23,13 @@
 
   /** @type {number|null} */
   var pollTimer = null;
+  var pollIntervalMs = 5000;
   var pageHidden = false;
   var activeGroup = 'running';
-  var groupPages = { running: 1, queued: 1, completed: 1, failed: 1 };
+  var groupPages = { running: 1, queued: 1, completed: 1, failed: 1, canceled: 1 };
   var refreshSerial = 0;
   var pageSize = 50;
+  var liveProgress = Object.create(null);
 
   // ── 操作函数 ──
 
@@ -122,7 +124,11 @@
 
   // openFolder 由 utils.js 提供（window.openFolder，首页也在用）
 
-  // ── 导出 ZIP / PDF ──
+  // ── 导出 CBZ / ZIP / PDF ──
+
+  function exportCbz(jobId) {
+    window.downloadExport('/api/export/' + encodeJobId(jobId) + '/cbz', 'CBZ');
+  }
 
   function exportZip(jobId) {
     window.downloadExport('/api/export/' + encodeJobId(jobId) + '/zip', 'ZIP');
@@ -222,6 +228,7 @@
     'retry-maintenance': retryMaintenance,
     'delete': function (el) { deleteJob(el.getAttribute('data-job-id')); },
     'open-folder': function (el) { window.openFolder(el.getAttribute('data-job-id')); },
+    'export-cbz': function (el) { exportCbz(el.getAttribute('data-job-id')); },
     'export-zip': function (el) { exportZip(el.getAttribute('data-job-id')); },
     'export-pdf': function (el) { exportPdf(el.getAttribute('data-job-id')); },
     'batch-retry': batchRetryFailed,
@@ -387,13 +394,14 @@
         renderJobs(jobs, paged ? group : null, data.counts);
         if (paged) renderJobPagination(group, data);
         reconnectSSE(jobs);
+        syncPollInterval(data);
       })
       .catch(function (err) {
         if (serial !== refreshSerial || (err && err.name === 'AbortError')) return;
         showToast('加载任务列表失败: ' + err.message, 'danger');
       })
       .finally(function () {
-        if (serial === refreshSerial && !document.hidden) pollTimer = setTimeout(refreshJobs, 5000);
+        if (serial === refreshSerial && !document.hidden) pollTimer = setTimeout(refreshJobs, pollIntervalMs);
       });
   }
 
@@ -414,11 +422,24 @@
   function renderJobs(jobs, scope, counts) {
     window._jobTitleMap = {};
     // 按状态分组，同时缓存 job_id → title 映射供 SSE toast 使用
-    var groups = { running: [], paused: [], queued: [], completed: [], failed: [] };
+    var groups = { running: [], paused: [], queued: [], completed: [], failed: [], canceled: [] };
     jobs.forEach(function (job) {
       window._jobTitleMap[job.job_id] = job.title || job.album_id || job.job_id;
       var total = Number(job.total_pages) || 0;
       var done = Math.max(0, Number(job.done_pages) || 0);
+      if (job.status === 'running') {
+        var live = liveProgress[job.job_id];
+        if (live && live.total >= total && live.done >= done) {
+          done = live.done;
+          total = live.total;
+          job.done_pages = done;
+          job.total_pages = total;
+        } else if (live) {
+          liveProgress[job.job_id] = { done: done, total: total };
+        }
+      } else {
+        delete liveProgress[job.job_id];
+      }
       job._pct = total > 0 ? Math.max(0, Math.min(100, Math.round(done / total * 100))) : 0;
       job._path = job.output_path || '';
       job._error = job.error_message || '';
@@ -445,15 +466,16 @@
     if (!scope || scope === 'queued') renderSection('queued', groups.queued, renderQueuedCard);
     if (!scope || scope === 'completed') renderSection('completed', groups.completed, renderCompletedCard);
     if (!scope || scope === 'failed') renderSection('failed', groups.failed, renderFailedCard);
+    if (!scope || scope === 'canceled') renderSection('canceled', groups.canceled, renderCanceledCard);
     refreshReadable(lastCompleted.concat(lastFailed));
 
     // 更新计数徽章 — running 计数包含 paused
     var runningCount = groups.running.length + groups.paused.length;
     var runningEl = document.getElementById('running-count');
     if (runningEl) runningEl.textContent = counts ? counts.active : runningCount;
-    ['queued', 'completed', 'failed'].forEach(function (s) {
+    ['queued', 'completed', 'failed', 'canceled'].forEach(function (s) {
       var el = document.getElementById(s + '-count');
-      if (el) el.textContent = counts ? counts[s] : groups[s].length;
+      if (el) el.textContent = counts && counts[s] != null ? counts[s] : groups[s].length;
     });
   }
 
@@ -535,7 +557,7 @@
   }
 
   function statusLabel(s) {
-    return { running: '进行中的任务', paused: '暂停中的任务', queued: '排队中的任务', completed: '已完成的任务', failed: '失败的任务' }[s] || s;
+    return { running: '进行中的任务', paused: '暂停中的任务', queued: '排队中的任务', completed: '已完成的任务', failed: '失败的任务', canceled: '已取消的任务' }[s] || s;
   }
 
   function renderRunningCard(job) {
@@ -627,6 +649,7 @@
       + readBtn
       + (readable && job._path ? '<a class="btn btn-sm btn-outline-info" href="/preview/' + albumPath + '" title="单页翻页预览本地文件"><i class="bi bi-images" aria-hidden="true"></i> 预览</a>' : '')
       + (job._path ? jobButton('open-folder', job, 'btn-outline-secondary', '打开文件夹', '<i class="bi bi-folder2-open"></i>', true) : '')
+      + (job._path ? jobButton('export-cbz', job, 'btn-outline-secondary', '导出 CBZ', '<i class="bi bi-file-earmark-zip"></i> CBZ') : '')
       + (job._path ? jobButton('export-zip', job, 'btn-outline-success', '导出 ZIP', '<i class="bi bi-file-zip"></i> 📦', true) : '')
       + (job._path ? jobButton('export-pdf', job, 'btn-outline-danger', '导出 PDF', '<i class="bi bi-file-pdf"></i> 📄', true) : '')
       + jobButton('retry', job, 'btn-outline-primary', '重新下载', '<i class="bi bi-arrow-counterclockwise"></i>', true)
@@ -657,11 +680,48 @@
       + '</div></div></div>';
   }
 
-  // ── SSE 事件回调（连接建立后刷新列表） ──
+  function renderCanceledCard(job) {
+    return '<div class="card job-card shadow-sm mb-3" data-job-id="' + escapeHtmlAttr(job.job_id) + '" data-status="canceled">'
+      + '<div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-2">'
+      + '<div><h6 class="mb-1">' + escapeHtml(job.title || job.album_id || job.job_id) + '</h6>'
+      + '<span class="badge bg-secondary">已取消</span></div>'
+      + '<div class="d-flex gap-2">'
+      + window.readLink.html(job.album_id, readableState(job.album_id), 'btn-sm')
+      + jobButton('retry', job, 'btn-outline-primary', '重新下载', '<i class="bi bi-arrow-counterclockwise"></i> 重新下载')
+      + jobButton('delete', job, 'btn-outline-danger', '删除记录', '<i class="bi bi-trash"></i>', true)
+      + '</div></div></div>';
+  }
+
+  // ── SSE 事件回调（实时进度写入单调缓存，终态刷新列表） ──
   window.setSSECallbacks({
-    onCompleted: function () { refreshJobs(); },
-    onFailed: function () { refreshJobs(); },
+    onProgress: function (data) {
+      if (!data || !data.job_id) return;
+      var done = Number(data.done_pages) || 0;
+      var total = Number(data.total_pages) || 0;
+      var prev = liveProgress[data.job_id];
+      if (!prev || total > prev.total || done >= prev.done) {
+        liveProgress[data.job_id] = { done: done, total: total };
+      }
+    },
+    onArchiving: function (data, jobId) {
+      var id = (data && data.job_id) || jobId;
+      if (!id) return;
+      var pctEl = document.getElementById('pct-' + id);
+      if (pctEl) pctEl.textContent = '打包中…';
+    },
+    onCompleted: function (e, jobId) { if (jobId) delete liveProgress[jobId]; refreshJobs(); },
+    onFailed: function (e, jobId) { if (jobId) delete liveProgress[jobId]; refreshJobs(); },
+    onCanceled: function (e, jobId) { if (jobId) delete liveProgress[jobId]; refreshJobs(); },
   });
+
+  function syncPollInterval(data) {
+    var counts = (data && data.counts) || {};
+    var active = (Number(counts.active) || 0) + (Number(counts.running) || 0) + (Number(counts.paused) || 0) + (Number(counts.queued) || 0);
+    var hasPendingMaint = Array.isArray(data && data.jobs) && data.jobs.some(function (job) {
+      return job && job.maintenance && (job.maintenance.state === 'pending' || job.maintenance.state === 'running');
+    });
+    pollIntervalMs = (active > 0 || hasPendingMaint) ? 5000 : 20000;
+  }
 
   // ── 轮询：离开页面（含进入 bfcache）时停止，返回时立即刷新并恢复 ──
   function stopPolling() {

@@ -1887,6 +1887,10 @@ a.badge.status-badge-warning:hover { text-decoration: underline; }
   color: var(--text-secondary);
 }
 
+.toast.bg-warning .btn-close-white {
+  filter: none;
+}
+
 .progress-bar-animated {
   animation: none !important;
 }

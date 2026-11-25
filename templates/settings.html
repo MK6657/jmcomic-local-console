@@ -277,6 +277,12 @@
                 <div class="form-text">下载窗口的结束小时（24小时制）</div>
                 <div class="invalid-feedback"></div>
             </div>
+            <div class="col-12 d-none" id="schedule-same-hour-hint">
+                <div class="alert alert-warning mb-0 py-2" role="status">
+                    <i class="bi bi-exclamation-triangle" aria-hidden="true"></i>
+                    当前开始时间与结束时间相同，排队的任务将不会自动开始下载；请设置不同的起止小时。
+                </div>
+            </div>
             <div class="col-12">
                 <div class="alert alert-info mb-0 py-2" role="alert">
                     <i class="bi bi-info-circle"></i>
@@ -380,7 +386,14 @@
         <button type="button" id="log-open-folder-btn" class="btn btn-outline-secondary">
             <i class="bi bi-folder2-open" aria-hidden="true"></i> 打开日志文件夹
         </button>
+        <button type="button" id="log-diagnose-btn" class="btn btn-outline-secondary" title="检查数据库、目录、客户端域名与缓存状态（不触发无界域名发现）">
+            <i class="bi bi-shield-check" aria-hidden="true"></i> 系统自检
+        </button>
+        <button type="button" id="log-clear-cache-btn" class="btn btn-outline-secondary" title="清理详情缓存与内存缩略图索引，不影响已下载漫画">
+            <i class="bi bi-broom" aria-hidden="true"></i> 清理缓存
+        </button>
     </div>
+    <div class="log-diagnose-panel alert alert-info py-2 px-3 mb-2" id="log-diagnose-panel" role="region" aria-label="系统自检结果" hidden></div>
     <div class="log-viewer-status" id="log-status" role="status" aria-live="polite">滚动到这里时自动读取日志。</div>
     <ol class="log-list" id="log-list" aria-label="日志条目，最新在前" hidden></ol>
     <div class="log-viewer-more" id="log-more" hidden>

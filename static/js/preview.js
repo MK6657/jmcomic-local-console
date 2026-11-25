@@ -19,6 +19,9 @@
     var activeThumb = null;
     var spinnerTimer = 0;
     var manifest, cancelImage, imageScope, active;
+    var previousRevoke = null;
+    var imageInterrupted = false;
+    var preloaded = null; // { src, blob, controller }
     var prefixes = ['/api/preview-img/', '/api/preview-archive/'];
 
     // ── DOM 引用 ──
@@ -88,7 +91,22 @@
                 var later = Array.from(cells.keys()).filter(function (key) { return key > number; });
                 if (later.length) thumbContainer.insertBefore(button, cells.get(Math.min.apply(null, later)).button);
                 else thumbContainer.appendChild(button);
-                cell = { button: button, cancel: nav.loadImage(image, nav.imageUrl(pages[number - 1].url, prefixes), function () {}) };
+                var thumbUrl = nav.imageUrl(pages[number - 1].url, prefixes);
+                var thumbCancel = nav.loadImage(image, thumbUrl, function () {});
+                cell = {
+                    button: button,
+                    interrupted: false,
+                    pausePending: function () {
+                        if (thumbCancel && thumbCancel.abortPending && thumbCancel.abortPending()) cell.interrupted = true;
+                    },
+                    resumePending: function () {
+                        if (cell.interrupted) {
+                            cell.interrupted = false;
+                            thumbCancel = nav.loadImage(image, thumbUrl, function () {});
+                        }
+                    },
+                    cancel: function () { if (thumbCancel) thumbCancel(); }
+                };
                 cells.set(number, cell);
             }
             cell.button.classList.toggle('active', number === currentPage);
@@ -126,11 +144,45 @@
         renderThumbnails(page - 4);
     }
 
+    function clearPreload() {
+        if (!preloaded) return;
+        if (preloaded.controller) preloaded.controller.abort();
+        preloaded = null;
+    }
+
+    function preloadNextPage() {
+        if (!active || document.hidden || currentPage < 1 || currentPage >= pages.length) return;
+        var nextData = pages[currentPage];
+        var nextSrc = nextData ? nav.imageUrl(nextData.url, prefixes) : null;
+        if (!nextSrc || (preloaded && preloaded.src === nextSrc)) return;
+        clearPreload();
+        var controller = new AbortController();
+        var entry = { src: nextSrc, blob: null, controller: controller };
+        preloaded = entry;
+        fetch(nextSrc, { signal: controller.signal }).then(function (r) {
+            if (controller.signal.aborted || !r.ok) return;
+            return r.blob();
+        }).then(function (blob) {
+            if (!blob || controller.signal.aborted || preloaded !== entry) return;
+            entry.blob = blob;
+            entry.controller = null;
+        }).catch(function () {});
+    }
+
     // 旧图保留到新图加载完成（浏览器会继续显示当前图片），超过 200ms 才显示加载指示，避免翻页闪烁
     function showImage(retry) {
         var pageData = pages[currentPage - 1];
         if (imageScope) imageScope.abort();
-        if (cancelImage) cancelImage();
+        if (cancelImage) {
+            if (cancelImage.isLoaded && cancelImage.isLoaded()) {
+                if (previousRevoke) previousRevoke();
+                previousRevoke = cancelImage.revoke;
+            } else {
+                cancelImage(true);
+            }
+            cancelImage = null;
+        }
+        imageInterrupted = false;
         imageScope = new AbortController();
         var src = nav.imageUrl(pageData.url, prefixes);
         if (retry && src) {
@@ -139,18 +191,41 @@
             src = url.pathname + url.search;
         }
         imageHint.classList.add('d-none');
-        previewImage.classList.add('d-none');
+        if (!previewImage.getAttribute('src')) previewImage.classList.add('d-none');
         clearTimeout(spinnerTimer);
         spinnerTimer = setTimeout(function () { imgSpinner.classList.remove('d-none'); }, 200);
         previewImage.alt = '第 ' + currentPage + ' 页';
-        cancelImage = nav.loadImage(previewImage, src, imageFailed);
+
+        if (!retry && preloaded && preloaded.src === src && preloaded.blob) {
+            var readyBlob = preloaded.blob;
+            preloaded = null;
+            var objUrl = URL.createObjectURL(readyBlob);
+            cancelImage = function (preserveDisplayed) {
+                if (!preserveDisplayed) previewImage.removeAttribute('src');
+                if (objUrl && !preserveDisplayed) {
+                    URL.revokeObjectURL(objUrl);
+                    objUrl = null;
+                }
+            };
+            cancelImage.abortPending = function () { return false; };
+            cancelImage.revoke = function () { if (objUrl) { URL.revokeObjectURL(objUrl); objUrl = null; } };
+            cancelImage.isLoaded = function () { return true; };
+            previewImage.src = objUrl;
+            return;
+        }
+        cancelImage = nav.loadImage(previewImage, src, imageFailed, { keepPrevious: true });
     }
 
     previewImage.addEventListener('load', function () {
+        if (previousRevoke) {
+            previousRevoke();
+            previousRevoke = null;
+        }
         clearTimeout(spinnerTimer);
         imgSpinner.classList.add('d-none');
         imageHint.classList.add('d-none');
         previewImage.classList.remove('d-none');
+        preloadNextPage();
     });
     previewImage.addEventListener('error', function () { if (previewImage.getAttribute('src')) imageFailed(); });
     function imageFailed(response) {
@@ -251,7 +326,11 @@
     });
     $('thumb-prev').addEventListener('click', function () { renderThumbnails(railStart - 9); });
     $('thumb-next').addEventListener('click', function () { renderThumbnails(railStart + 9); });
+    $('preview-range').addEventListener('input', function (event) { $('page-current').textContent = event.target.value; });
     $('preview-range').addEventListener('change', function (event) { goPage(event.target.value); });
+    var cycleWidth = nav.bindWidthToggle
+        ? nav.bindWidthToggle(container, $('preview-width-btn'), function () { centerActiveThumb(); })
+        : null;
     var tools = $('reader-tools');
     function showTools(open) {
         tools.hidden = !open;
@@ -273,6 +352,7 @@
     document.addEventListener('keydown', function (e) {
         if (e.key === 'Escape') { showTools(false); return; }
         if (!nav.plainKey(e) || !pages.length) return;
+        if (e.key.toLowerCase() === 'w' && !e.repeat && cycleWidth) { e.preventDefault(); cycleWidth(); return; }
         if (e.key.toLowerCase() === 'm' && !e.repeat) { e.preventDefault(); showTools(tools.hidden); return; }
         var target = { ArrowLeft: currentPage - 1, ArrowRight: currentPage + 1, Home: 1, End: pages.length }[e.key];
         if (target === undefined) return;
@@ -290,16 +370,40 @@
     nav.bindBack($('preview-back'));
 
     // ── 启动 ──
-    if (albumId) nav.bindLifecycle(function () {
+    if (albumId) nav.bindLifecycle(function (unloading) {
         active = false;
         clearTimeout(spinnerTimer);
+        imgSpinner.classList.add('d-none');
+        clearPreload();
         if (manifest) { manifest.cancel(); manifest = null; }
         if (imageScope) imageScope.abort();
-        if (cancelImage) { cancelImage(); cancelImage = null; }
-        cells.forEach(function (cell) { cell.cancel(); cell.button.remove(); }); cells.clear(); activeThumb = null;
+        if (unloading) {
+            imageInterrupted = false;
+            if (previousRevoke) { previousRevoke(); previousRevoke = null; }
+            if (cancelImage) { cancelImage(); cancelImage = null; }
+            cells.forEach(function (cell) { cell.cancel(); cell.button.remove(); });
+            cells.clear();
+            activeThumb = null;
+        } else {
+            if (cancelImage && cancelImage.abortPending && cancelImage.abortPending()) {
+                imageInterrupted = true;
+                cancelImage = null;
+            }
+            cells.forEach(function (cell) { cell.pausePending(); });
+        }
     }, function () {
         active = true;
-        if (currentPage) goPage(currentPage, true); else loadPreview();
+        if (currentPage) {
+            cells.forEach(function (cell) { cell.resumePending(); });
+            if (imageInterrupted || (!cancelImage && !previewImage.getAttribute('src'))) {
+                showImage(false);
+            } else {
+                preloadNextPage();
+            }
+            if (!cells.size) renderThumbnails(currentPage - 4);
+        } else {
+            loadPreview();
+        }
     });
     else showError('缺少 album_id 参数');
 

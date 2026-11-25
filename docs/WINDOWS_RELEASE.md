@@ -1,6 +1,6 @@
 # Windows 便携版
 
-本包是藏书阁 Windows x64 便携版。双击 `Preview-Atelier.cmd` 先看离线样书，或直接打开 `JMComic.exe` 使用普通实例。四套纸墨主题、经典界面回退及数据目录见同目录的 `ATELIER_WINDOWS.md`。程序自带 Python 运行时，使用本机浏览器，无需安装 Node。
+本包是藏书阁 Windows x64 便携版。双击 `Preview-Atelier.cmd` 先看离线样书，或直接打开 `JMComic.exe` 使用普通实例。九套主题（6 套护眼 + 3 套个性风格）、经典界面回退及数据目录见同目录的 `ATELIER_WINDOWS.md`。程序自带 Python 运行时，使用本机浏览器，无需安装 Node。
 
 拿到 `JMComic-windows-x64.zip` 后，可以用 PowerShell 的 `Get-FileHash .\JMComic-windows-x64.zip -Algorithm SHA256` 与该发行目录的 `SHA256SUMS.txt` 核对。双击运行时无需另外安装 Python、Node 或 Docker。
 

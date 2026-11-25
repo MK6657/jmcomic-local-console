@@ -82,9 +82,21 @@
 <!-- ===== 页脚 ===== -->
 <footer class="footer">
     <div class="container text-center">
-        <a href="/ui/atelier" class="me-3">返回藏书阁界面</a><small>&copy; 2024 JMComic 下载控制台 · 仅供学习交流使用</small>
+        <a href="/ui/atelier" id="classic-switch-atelier" class="me-3">返回藏书阁界面</a><small>&copy; 2024 JMComic 下载控制台 · 仅供学习交流使用</small>
     </div>
 </footer>
+<script>
+(function () {
+  var link = document.getElementById('classic-switch-atelier');
+  if (!link) return;
+  link.addEventListener('click', function () {
+    var cur = window.location.pathname + window.location.search;
+    if (cur && cur !== '/downloads' && cur.indexOf('/ui/') !== 0) {
+      link.href = '/ui/atelier?next=' + encodeURIComponent(cur);
+    }
+  });
+})();
+</script>
 
 <!-- ===== 快捷导航（右下角，static/js/quick-nav.js）：阅读页、单页预览有自己的底部工具，覆盖这个块不显示 ===== -->
 {% block quick_nav %}

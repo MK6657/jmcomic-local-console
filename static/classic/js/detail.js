@@ -51,8 +51,8 @@
                 })
                 .then(function (syncData) {
                     if (syncData.status === 'ok' && syncData.synced > 0) {
-                        // 有新的标签同步成功，刷新显示
-                        loadAlbumTags(albumId);
+                        if (Array.isArray(syncData.tags)) renderTagManager(syncData.tags);
+                        else loadAlbumTags(albumId);
                     }
                 })
                 .catch(function () { /* 静默失败 */ });
@@ -102,7 +102,7 @@
         html += '<div id="album-update-status" class="update-status" role="status" aria-live="polite" hidden></div>';
         html += '<div class="row mt-3">';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-person"></i> 作者：</strong> ' + window.escapeHtml(album.author || '-') + '</div>';
-        html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-hash"></i> 车号：</strong> <code>' + window.escapeHtml(album.album_id) + '</code></div>';
+        html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-hash"></i> 车号：</strong> <code class="album-id-copy" role="button" tabindex="0" title="点击复制车号">' + window.escapeHtml(album.album_id) + '</code></div>';
         if (album.views != null && album.views !== '') {
             html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-eye"></i> 观看：</strong> ' + window.escapeHtml(String(album.views)) + '</div>';
         }
@@ -150,7 +150,7 @@
         html += '<div class="card-header d-flex justify-content-between align-items-center">';
         // 章节数与刷新说明：“立即检查”发现章节表里还没有的新章节时，refreshChapterTable 只重建表格行并更新这两处
         html += '<span><i class="bi bi-list-ol"></i> 章节列表 <span class="badge bg-secondary" id="chapter-count">' + (album.photos ? album.photos.length : 0) + '</span><span id="chapter-refresh-status" class="chapter-refresh-status" role="status" aria-live="polite"></span></span>';
-        html += '<div class="form-check"><input type="checkbox" id="select-all-chapters" class="form-check-input"><label class="form-check-label" for="select-all-chapters">全选</label></div>';
+        html += '<div class="d-flex align-items-center gap-2"><div class="form-check mb-0"><input type="checkbox" id="select-all-chapters" class="form-check-input"><label class="form-check-label" for="select-all-chapters">全选</label></div><button type="button" id="invert-chapters-btn" class="btn btn-sm btn-outline-secondary">反选</button></div>';
         html += '</div>';
 
         html += '<div class="card-body p-0">';
@@ -281,12 +281,45 @@
     function bindEvents(album) {
         var selectAllMain = document.getElementById('select-all-chapters');
         var selectAllInline = document.getElementById('select-all-inline');
+        var invertBtn = document.getElementById('invert-chapters-btn');
+        var lastCheckedIdx = -1;
+
+        var copyNode = document.querySelector ? document.querySelector('.album-id-copy') : null;
+        if (copyNode && typeof copyNode.addEventListener === 'function') {
+            var copyId = function () {
+                var text = String(album.album_id || '');
+                if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(function () {
+                        if (typeof showToast === 'function') showToast('已复制车号 JM' + text, 'info');
+                    }).catch(function () {});
+                }
+            };
+            copyNode.addEventListener('click', copyId);
+            copyNode.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); copyId(); }
+            });
+        }
+
+        function updateSelectedLabel() {
+            var dlBtn = document.getElementById('download-selected-btn');
+            if (!dlBtn || typeof dlBtn.appendChild !== 'function') return;
+            var count = 0;
+            document.querySelectorAll('.chapter-checkbox-item').forEach(function (cb) { if (cb.checked) count++; });
+            var label = count > 0 ? (' 下载选中章节 (' + count + ')') : ' 下载选中章节';
+            var iconEl = dlBtn.querySelector ? dlBtn.querySelector('i') : null;
+            dlBtn.textContent = '';
+            if (iconEl) dlBtn.appendChild(iconEl);
+            if (typeof document.createTextNode === 'function') dlBtn.appendChild(document.createTextNode(label));
+            else dlBtn.textContent = label.trim();
+        }
 
         // 章节行可能被刷新（refreshChapterTable）：每次都重新取复选框
         function toggleAll(checked) {
             document.querySelectorAll('.chapter-checkbox-item').forEach(function (cb) { cb.checked = checked; });
             if (selectAllMain) selectAllMain.checked = checked;
             if (selectAllInline) selectAllInline.checked = checked;
+            if (typeof syncSelectAll === 'function') syncSelectAll();
+            updateSelectedLabel();
         }
 
         if (selectAllMain) {
@@ -295,9 +328,49 @@
         if (selectAllInline) {
             selectAllInline.addEventListener('change', function () { toggleAll(this.checked); });
         }
-        // 一个委托监听器：刷新后新建的行同样生效
+        if (invertBtn) {
+            invertBtn.addEventListener('click', function () {
+                document.querySelectorAll('.chapter-checkbox-item').forEach(function (cb) { cb.checked = !cb.checked; });
+                if (typeof syncSelectAll === 'function') syncSelectAll();
+                updateSelectedLabel();
+            });
+        }
+        // 一个委托监听器：刷新后新建的行同样生效，支持点击整行切换与 Shift 连选
         var chapterRows = document.getElementById('chapter-rows');
-        if (chapterRows) chapterRows.addEventListener('change', syncSelectAll);
+        if (chapterRows) {
+            chapterRows.addEventListener('change', syncSelectAll);
+            chapterRows.addEventListener('change', updateSelectedLabel);
+            chapterRows.addEventListener('click', function (e) {
+                var boxes = Array.prototype.slice.call(chapterRows.querySelectorAll('.chapter-checkbox-item'));
+                if (!boxes.length) return;
+                var directCb = e.target.closest('input.chapter-checkbox-item');
+                if (directCb) {
+                    var idx = boxes.indexOf(directCb);
+                    if (e.shiftKey && lastCheckedIdx >= 0 && idx >= 0 && idx !== lastCheckedIdx) {
+                        var s = Math.min(lastCheckedIdx, idx), end = Math.max(lastCheckedIdx, idx);
+                        for (var i = s; i <= end; i++) boxes[i].checked = directCb.checked;
+                        if (typeof syncSelectAll === 'function') syncSelectAll();
+                        updateSelectedLabel();
+                    }
+                    lastCheckedIdx = idx;
+                    return;
+                }
+                if (e.target.closest('a, button, input, label')) return;
+                var tr = e.target.closest('tr');
+                var cb = tr ? tr.querySelector('.chapter-checkbox-item') : null;
+                if (!cb) return;
+                var rowIdx = boxes.indexOf(cb);
+                var nextChecked = !cb.checked;
+                cb.checked = nextChecked;
+                if (e.shiftKey && lastCheckedIdx >= 0 && rowIdx >= 0 && rowIdx !== lastCheckedIdx) {
+                    var rs = Math.min(lastCheckedIdx, rowIdx), rend = Math.max(lastCheckedIdx, rowIdx);
+                    for (var j = rs; j <= rend; j++) boxes[j].checked = nextChecked;
+                }
+                lastCheckedIdx = rowIdx;
+                if (typeof syncSelectAll === 'function') syncSelectAll();
+                updateSelectedLabel();
+            });
+        }
 
         // 下载选中章节
         document.getElementById('download-selected-btn').addEventListener('click', function () {
@@ -315,6 +388,12 @@
     }
 
     function createDownloadJob(albumId, photoIds) {
+        if (createDownloadJob._busy) return;
+        createDownloadJob._busy = true;
+        var selBtn = document.getElementById('download-selected-btn');
+        var allBtn = document.getElementById('download-all-btn');
+        if (selBtn) selBtn.disabled = true;
+        if (allBtn) allBtn.disabled = true;
         window.apiFetch('/api/jobs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -328,6 +407,11 @@
         .catch(function (err) {
             if (err && err.name === 'AbortError') return; // pagehide 中止，静默
             if (typeof showToast === 'function') showToast(toastErr(err, '创建任务失败'), 'danger');
+        })
+        .finally(function () {
+            createDownloadJob._busy = false;
+            if (selBtn) selBtn.disabled = false;
+            if (allBtn) allBtn.disabled = false;
         });
     }
 
@@ -407,15 +491,19 @@
         return true;
     }
 
-    // 两个“全选”跟着章节表：全部勾选时勾上
+    // 两个“全选”跟着章节表：全部勾选时勾上，部分勾选时半选
     function syncSelectAll() {
         var boxes = document.querySelectorAll('.chapter-checkbox-item');
         var checked = 0;
         Array.prototype.forEach.call(boxes, function (cb) { if (cb.checked) checked++; });
         var all = boxes.length > 0 && checked === boxes.length;
+        var some = checked > 0 && checked < boxes.length;
         ['select-all-chapters', 'select-all-inline'].forEach(function (id) {
             var b = document.getElementById(id);
-            if (b) b.checked = all;
+            if (b) {
+                b.checked = all;
+                b.indeterminate = some;
+            }
         });
     }
 
@@ -829,6 +917,8 @@
         var btn = document.getElementById('wishlist-toggle-btn');
         if (!btn) return;
         btn.addEventListener('click', function () {
+            if (btn.disabled) return;
+            btn.disabled = true;
             var isStarred = btn.classList.contains('btn-warning');
             if (isStarred) {
                 window.apiFetch('/api/wishlist/' + albumId, { method: 'DELETE', timeoutMs: 15000 })
@@ -843,7 +933,8 @@
                     .catch(function (err) {
                         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
                         if (typeof showToast === 'function') showToast(toastErr(err, '取消收藏失败'), 'danger');
-                    });
+                    })
+                    .finally(function () { btn.disabled = false; });
             } else {
                 var titleEl = document.querySelector('.card-title');
                 var title = (album && album.title) || (titleEl ? titleEl.textContent.trim() : albumId);
@@ -871,7 +962,8 @@
                 .catch(function (err) {
                     if (err && err.name === 'AbortError') return; // pagehide 中止，静默
                     if (typeof showToast === 'function') showToast(toastErr(err, '收藏失败'), 'danger');
-                });
+                })
+                .finally(function () { btn.disabled = false; });
             }
         });
     }
@@ -893,11 +985,37 @@
             syncAlbumTags(albumId);
         }
     });
+    var tagSuggestTimer = null;
     container.addEventListener('keydown', function (event) {
         // 输入法组字中的回车只是确认候选词，不提交
         if (event.key !== 'Enter' || event.isComposing || event.target.id !== 'tag-add-input') return;
         event.preventDefault();
         addCustomTag(albumId);
+    });
+    container.addEventListener('input', function (event) {
+        if (event.isComposing || !event.target || event.target.id !== 'tag-add-input') return;
+        clearTimeout(tagSuggestTimer);
+        var q = event.target.value.trim();
+        if (!q) return;
+        tagSuggestTimer = setTimeout(function () {
+            window.apiFetch('/api/library/search-tags?q=' + encodeURIComponent(q), {
+                timeoutMs: 8000,
+                abortKey: 'detail-tag-suggest'
+            })
+            .then(function (data) {
+                var dl = document.getElementById('tag-suggestions-list');
+                if (!dl || !data || data.status !== 'ok') return;
+                dl.textContent = '';
+                (data.tags || []).slice(0, 12).forEach(function (item) {
+                    var name = typeof item === 'string' ? item : (item && item.tag);
+                    if (!name) return;
+                    var opt = createEl('option');
+                    opt.value = String(name);
+                    dl.appendChild(opt);
+                });
+            })
+            .catch(function () {});
+        }, 250);
     });
 
     // 加载专辑标签（含来源信息，15s 超时）
@@ -983,7 +1101,11 @@
         input.placeholder = '输入标签名称...';
         input.maxLength = 50;
         input.setAttribute('aria-label', '新标签名称');
+        input.setAttribute('list', 'tag-suggestions-list');
+        var datalist = createEl('datalist');
+        datalist.id = 'tag-suggestions-list';
         row.appendChild(input);
+        row.appendChild(datalist);
         row.appendChild(actionButton('btn btn-outline-success btn-sm', 'add-tag', 'bi-plus-lg', '添加'));
         row.appendChild(actionButton('btn btn-outline-info btn-sm', 'sync-tags', 'bi-arrow-repeat', '同步', '从 18comic 同步最新标签'));
         area.appendChild(row);
@@ -1068,7 +1190,8 @@
         .then(function (data) {
             if (data.status === 'ok') {
                 if (typeof showToast === 'function') showToast('同步完成，同步了 ' + (data.synced || 0) + ' 个标签', 'success');
-                loadAlbumTags(albumId);
+                if (Array.isArray(data.tags)) renderTagManager(data.tags);
+                else loadAlbumTags(albumId);
             } else {
                 if (typeof showToast === 'function') showToast(data.message || '同步失败', 'danger');
             }

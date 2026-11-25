@@ -204,6 +204,13 @@
       searchInput.focus();
       return;
     }
+    if (window.extractAlbumId && (/^https?:\/\//i.test(q) || /18comic|jmcomic/i.test(q))) {
+      var parsedId = window.extractAlbumId(q);
+      if (parsedId) {
+        q = parsedId;
+        searchInput.value = q;
+      }
+    }
 
     currentQuery = q;
     currentPage = 1;
@@ -259,9 +266,10 @@
             + '<i class="bi bi-wifi-off me-2"></i>网络连接失败，请检查网络状态后重试'
             + '</div>';
         } else {
-          // 保持原有按 HTTP 状态码分类的提示文案
-          var msg = err.message;
-          if (err && err.status) {
+          // 优先保留后端返回的具体诊断消息；仅在无具体消息或通用状态文案时回退到状态码分类提示
+          var msg = (err && err.message) ? String(err.message) : '';
+          var isGeneric = !msg || /^请求失败\s*\(HTTP\s*\d+\)$/.test(msg);
+          if (isGeneric && err && err.status) {
             if (err.status >= 500) {
               msg = '服务器错误 (' + err.status + ')，请稍后重试';
             } else if (err.status === 404) {
@@ -273,7 +281,7 @@
             }
           }
           resultsDiv.innerHTML = '<div class="alert alert-danger" role="alert">'
-            + '<i class="bi bi-exclamation-circle me-2"></i>' + escapeHtml(msg)
+            + '<i class="bi bi-exclamation-circle me-2"></i>' + escapeHtml(msg || '搜索失败')
             + '</div>';
         }
       });
@@ -525,6 +533,8 @@
   }
 
   function toggleWishlist(btn) {
+    if (btn.disabled) return;
+    btn.disabled = true;
     var albumId = btn.getAttribute('data-album-id');
     var isStarred = btn.querySelector('i').classList.contains('bi-star-fill');
 
@@ -543,7 +553,8 @@
         .catch(function (err) {
           if (err && err.name === 'AbortError') return; // pagehide 中止，静默
           if (typeof showToast === 'function') showToast(toastErr(err, '取消收藏失败'), 'danger');
-        });
+        })
+        .finally(function () { btn.disabled = false; });
     } else {
       // 添加收藏
       window.apiFetch('/api/wishlist', {
@@ -569,7 +580,8 @@
       .catch(function (err) {
         if (err && err.name === 'AbortError') return; // pagehide 中止，静默
         if (typeof showToast === 'function') showToast(toastErr(err, '收藏失败'), 'danger');
-      });
+      })
+      .finally(function () { btn.disabled = false; });
     }
   }
 

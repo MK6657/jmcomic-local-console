@@ -58,6 +58,35 @@ DEFAULT_SETTINGS = {
 }
 
 
+_ENUM_SETTINGS: dict[str, set[str]] = {
+    "client_type": {"api", "html"},
+    "pack_format": {"cbz", "zip"},
+    "image_format": {"webp", "png", "jpg"},
+    "organize_mode": {"none", "by_author", "flat"},
+    "ui_theme": UI_THEMES,
+    "ui_fx_preset": UI_FX_PRESETS,
+}
+_INT_BOUNDS: dict[str, tuple[int, int]] = {
+    "timeout": (5, 120),
+    "retry_times": (0, 20),
+    "max_running_jobs": (1, 5),
+    "image_threads": (1, 50),
+    "photo_threads": (1, 10),
+    "schedule_start": (0, 23),
+    "schedule_end": (0, 23),
+}
+_BOOL_KEYS: frozenset[str] = frozenset({
+    "schedule_enabled",
+    "auto_pack",
+    "delete_originals",
+    "skip_existing",
+    "library_card_click",
+    "auto_update_check",
+    "home_show_recent_downloads",
+    "ui_fx_enabled",
+})
+
+
 def merge_stored_settings(stored) -> dict:
     """将数据库读取到的原始键值与默认值合并并归一化（不访问数据库）。"""
     merged = dict(DEFAULT_SETTINGS)
@@ -66,26 +95,14 @@ def merge_stored_settings(stored) -> dict:
     merged["download_root"] = str(DOWNLOAD_ROOT)
     merged["ui_theme"] = normalize_theme(merged.get("ui_theme"))
     merged["ui_fx_preset"] = normalize_fx_preset(merged.get("ui_fx_preset"))
-    client_type = str(merged.get("client_type", "")).strip().lower()
-    merged["client_type"] = client_type if client_type in {"api", "html"} else DEFAULT_SETTINGS["client_type"]
+    for key in ("client_type", "image_format", "pack_format"):
+        val = str(merged.get(key, "")).strip().lower()
+        merged[key] = val if val in _ENUM_SETTINGS[key] else DEFAULT_SETTINGS[key]
     organize_mode = str(merged.get("organize_mode", "")).strip()
-    merged["organize_mode"] = organize_mode if organize_mode in {"none", "by_author", "flat"} else "none"
-    image_format = str(merged.get("image_format", "")).strip().lower()
-    merged["image_format"] = image_format if image_format in {"webp", "png", "jpg"} else "webp"
-    pack_format = str(merged.get("pack_format", "")).strip().lower()
-    merged["pack_format"] = pack_format if pack_format in {"cbz", "zip"} else "cbz"
-    for key, (lo, hi) in (
-        ("timeout", (5, 120)),
-        ("retry_times", (0, 20)),
-        ("max_running_jobs", (1, 5)),
-        ("image_threads", (1, 50)),
-        ("photo_threads", (1, 10)),
-    ):
+    merged["organize_mode"] = organize_mode if organize_mode in _ENUM_SETTINGS["organize_mode"] else "none"
+    for key, (lo, hi) in _INT_BOUNDS.items():
         merged[key] = str(_bounded_int(merged, key, lo, hi))
-    for key in (
-        "auto_pack", "delete_originals", "skip_existing", "library_card_click",
-        "auto_update_check", "home_show_recent_downloads", "ui_fx_enabled",
-    ):
+    for key in _BOOL_KEYS:
         val = str(merged.get(key, "")).strip().lower()
         merged[key] = val if val in {"true", "false"} else DEFAULT_SETTINGS[key]
     if merged["auto_pack"] != "true":
@@ -122,20 +139,6 @@ def get_setting(key: str) -> str:
 
 def normalize_settings_patch(settings: dict) -> dict:
     """Validate a settings patch and normalize its values without touching the database."""
-    enums = {
-        "client_type": {"api", "html"}, "pack_format": {"cbz", "zip"},
-        "image_format": {"webp", "png", "jpg"},
-        "organize_mode": {"none", "by_author", "flat"},
-        "ui_theme": UI_THEMES,
-        "ui_fx_preset": UI_FX_PRESETS,
-    }
-    bounds = {
-        "timeout": (5, 120), "retry_times": (0, 20), "max_running_jobs": (1, 5),
-        "image_threads": (1, 50), "photo_threads": (1, 10),
-        "schedule_start": (0, 23), "schedule_end": (0, 23),
-    }
-    bool_keys = {"schedule_enabled", "auto_pack", "delete_originals", "skip_existing", "library_card_click",
-                 "auto_update_check", "home_show_recent_downloads", "ui_fx_enabled"}
     normalized = {}
     for key, value in settings.items():
         if key not in DEFAULT_SETTINGS:
@@ -143,14 +146,14 @@ def normalize_settings_patch(settings: dict) -> dict:
         if key == "download_root":
             normalized[key] = str(DOWNLOAD_ROOT)
             continue
-        if key in bool_keys:
+        if key in _BOOL_KEYS:
             if isinstance(value, bool):
                 value = "true" if value else "false"
             if not isinstance(value, str) or value.strip().lower() not in {"true", "false"}:
                 raise ValueError(f"{key} 必须为 true 或 false")
             normalized[key] = value.strip().lower()
-        elif key in bounds:
-            lo, hi = bounds[key]
+        elif key in _INT_BOUNDS:
+            lo, hi = _INT_BOUNDS[key]
             if isinstance(value, bool) or not isinstance(value, (str, int)):
                 raise ValueError(f"{key} 必须是 {lo}–{hi} 的整数")
             try:
@@ -160,8 +163,8 @@ def normalize_settings_patch(settings: dict) -> dict:
             if not lo <= number <= hi:
                 raise ValueError(f"{key} 必须是 {lo}–{hi} 的整数")
             normalized[key] = str(number)
-        elif key in enums:
-            if not isinstance(value, str) or value.strip() not in enums[key]:
+        elif key in _ENUM_SETTINGS:
+            if not isinstance(value, str) or value.strip() not in _ENUM_SETTINGS[key]:
                 raise ValueError(f"{key} 的选项无效")
             normalized[key] = value.strip()
         elif key == "proxy":
@@ -258,8 +261,7 @@ def build_jmcomic_option(settings: dict | None = None) -> dict:
         },
     }
 
-    client_type = str(s.get("client_type") or "html").strip().lower()
-    if client_type == "api":
-        option["client"]["impl"] = "api"
+    client_type = str(s.get("client_type") or DEFAULT_SETTINGS["client_type"]).strip().lower()
+    option["client"]["impl"] = "html" if client_type == "html" else "api"
 
     return option

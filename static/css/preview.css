@@ -5,19 +5,25 @@
 .preview-container { padding-bottom: 24px; }
 .preview-mode-switch [aria-current] { pointer-events: none; }
 
+.preview-container[data-width="wide"] { max-width: 82rem; }
+.preview-container[data-width="full"] { max-width: 100%; }
+
 .preview-image-wrapper {
   display: grid;
   place-items: center;
   position: relative;
   width: 100%;
   min-width: 0;
-  height: clamp(260px, 52vh, 46rem);
+  height: clamp(320px, 72vh, 62rem);
   padding: 10px;
   background: var(--bg-card);
   border: 1px solid var(--line);
   border-radius: var(--r-xl);
   box-shadow: var(--shadow-card), inset 0 1px 0 var(--top-gleam);
   touch-action: manipulation;
+}
+.preview-container[data-width="full"] .preview-image-wrapper {
+  height: clamp(360px, 84vh, 76rem);
 }
 .preview-image-wrapper img {
   display: block;
@@ -88,7 +94,7 @@
   border: 2px solid transparent;
   background: var(--bg-subtle);
   color: var(--ink-2);
-  font: 500 11px/1.2 var(--font-mono);
+  font: 500 12px/1.2 var(--font-mono);
   font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;

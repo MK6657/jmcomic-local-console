@@ -69,6 +69,12 @@ def save_settings():
         return jsonify(status="error", message=str(exc)), 400
     warnings = _apply_saved_settings(changed)
     updated = get_settings()
+    if (
+        (set(body) & _SCHEDULE_KEYS)
+        and updated.get("schedule_enabled") == "true"
+        and updated.get("schedule_start") == updated.get("schedule_end")
+    ):
+        warnings.append("定时下载开始与结束整点相同，自动调度窗口将不会开启")
     log.info(f"API保存设置 keys_updated={list(body.keys())}")
     return jsonify({"status": "ok", "saved": True, "settings": updated, "warnings": warnings})
 

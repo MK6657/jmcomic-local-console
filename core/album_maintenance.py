@@ -117,9 +117,21 @@ def retry(album_id):
 
 def claim(excluded_albums=()):
     """Called under JobManager's admission gate; a draining executor also excludes its album."""
+    now = time.time()
     excluded = tuple(str(a) for a in excluded_albums)
     exclusion = ' AND m.album_id NOT IN (SELECT value FROM json_each(?))' if excluded else ''
-    params = (time.time(), json.dumps(excluded)) if excluded else (time.time(),)
+    params = (now, json.dumps(excluded)) if excluded else (now,)
+    probe_sql = (
+        "SELECT 1 FROM album_maintenance m WHERE m.state='pending' "
+        "AND CASE WHEN json_valid(m.payload) THEN COALESCE(json_extract(m.payload,'$._retry_at'),0) "
+        "ELSE 0 END <= ? AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.album_id=m.album_id "
+        "AND j.status IN ('queued','running','paused'))" + exclusion + ' LIMIT 1'
+    )
+    with closing(db.get_db()) as reader:
+        if reader.execute(probe_sql, params).fetchone() is None:
+            return None
+    now = time.time()
+    params = (now, json.dumps(excluded)) if excluded else (now,)
     with db.transaction() as conn:
         row = conn.execute("SELECT m.* FROM album_maintenance m WHERE m.state='pending' "
                            "AND CASE WHEN json_valid(m.payload) THEN COALESCE(json_extract(m.payload,'$._retry_at'),0) "

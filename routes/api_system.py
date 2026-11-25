@@ -11,6 +11,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from flask import Blueprint, jsonify, request
+from core import APP_VERSION
 from core.database import get_db
 from core.job_manager import job_manager
 from core.path_utils import get_path_config
@@ -158,6 +159,7 @@ def diagnose():
 
         return jsonify({
             "status": "ok",
+            "version": APP_VERSION,
             "health": level,
             "uptime": {
                 "seconds": uptime_seconds,
@@ -214,6 +216,7 @@ def health_ping():
         active_clients = get_active_client_count()
     return jsonify({
         "status": "ok",
+        "version": APP_VERSION,
         "ts": datetime.now().isoformat(),
         "application": "jmcomic-local-console",
         "pid": os.getpid(),

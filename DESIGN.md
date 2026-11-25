@@ -1,6 +1,6 @@
 ---
-name: 藏书阁 · JMComic 本地控制台（Fresh Eye-Care Atelier v3.6）— 项目设计系统
-version: 3.6
+name: 藏书阁 · JMComic 本地控制台（Fresh Eye-Care Atelier v3.7）— 项目设计系统
+version: 3.7
 description: 清新护眼与个性风格兼备的现代本地漫画控制台规范，内置 9 套经 WCAG AAA/AA 全表面与按钮悬停对比度校验的主题（6 套清新护眼 + 像素/科技/二次元 3 套个性风格），采用四节点复用池与独立交互动效、均衡比例设置页表单栅格，以及单行整合的 CBZ/ZIP/PDF 导出组件。
 
 project_theme:
@@ -990,6 +990,10 @@ Primary(蓝色) / Secondary(暖灰+边框) / Ghost(全透明) / Danger(红色)
 
 - **全仓深度审计修复与双端细节收口**。升级 `core.APP_VERSION` 至 `3.6`：修复 CLI 图片扩展名映射与批处理部分失败退出码、紧凑多 URL 凭据脱敏、Windows 资源管理器含空格/逗号文件精准高亮、SSE 停机即时唤醒、全量备份纳秒级时间戳还原、扁平整理全角空白归一与私有工作区目录隔离；补齐经典版设置页「恢复默认」按钮、Toast 白色关闭图标对比度、设置页 `pageshow` 与详情页 `pagehide` 生命周期，并移除经典版常驻循环进度条动画、补齐 `prefers-reduced-motion`，严格保持九套主题 Token 与 `project_theme.locked = true` 不变。
 
+### 藏书阁 · Atelier Edition v3.7（2026-11-26）
+
+- **性能加速、双端交互打磨与公共脚本单源收敛**。将上一版 `v3.6` 主分支基线（`9fc1420`）归档于 `archive/main-v3.6` 与标签 `atelier-v3.6-archive-2026-11-26`，推进 `core.APP_VERSION` 至 `3.7`：修复缩略图淘汰 `Path` 下标异常、全角括号 URL 误脱敏与调度器连接泄漏；用单条窗口查询消除传输中心 N+1 查询，引入本地封面有界缓存与单任务 HTTP 连接复用池；连续阅读工具栏新增三档画幅切换（标准宽 `64rem` / 宽屏 `84rem` / 铺满 `100%`，快捷键 `W`），单页预览采用 Blob 预读消除翻页白闪，切后台标签页保留已挂载画页；打通全站车号与漫画链接解析、详情页整行勾选与 `Shift` 连选、设置页 `Ctrl+S` 保存与一键系统自检，并将双端无差异公共脚本统一经 `asset_url()` 回退至 `static/js/` 单源维护；最小字号严格保持 `>= 12px`，未新增颜色、字体、圆角或常驻循环动画。
+
 本项目已锁定 `project_theme.locked = true`，后续所有 UI 修改必须遵守：
 
 1. **颜色**必须使用文首 `themes` 中当前 Atelier 主题定义的 Token，严禁硬编码 `#FFF`／`#000`
@@ -1002,4 +1006,4 @@ Primary(蓝色) / Secondary(暖灰+边框) / Ghost(全透明) / Danger(红色)
 
 ---
 
-*初版生成于 2026-07-02；Atelier Edition v2.0 装帧美学规范升级于 2026-11-18。*
+*初版生成于 2026-07-02；Atelier Edition v2.0 装帧美学规范升级于 2026-11-18；v3.7 性能与双端体验升级于 2026-11-26。*

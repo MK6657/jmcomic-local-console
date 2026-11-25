@@ -4,6 +4,7 @@ import os
 import secrets
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -175,29 +176,37 @@ def create_app() -> Flask:
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000
 
     _static_root = Path(app.static_folder)
-    _asset_mtime_cache: dict[str, tuple[float, int]] = {}
+    _asset_mtime_cache: dict[tuple[bool, str], tuple[float, str, int]] = {}
+    _asset_mtime_lock = threading.Lock()
 
     @app.template_global()
     def asset_url(filename: str) -> str:
         """带版本参数的静态资源 URL：/static/<file>?v=<mtime>。
 
         2 秒短 TTL 内存缓存避免每次页面渲染对同一静态资源重复 stat()，
-        开发热替换仍能在 2 秒内自动失效，同时享受一年 immutable 强缓存。
+        经典版优先使用 static/classic/ 下的定制副本，未覆盖的公共脚本自动回退到 static/。
         """
-        if classic_ui() and filename.startswith(('js/', 'css/')):
-            filename = 'classic/' + filename
+        is_classic = bool(classic_ui())
+        cache_key = (is_classic, filename)
         now = time.monotonic()
-        cached = _asset_mtime_cache.get(filename)
+        with _asset_mtime_lock:
+            cached = _asset_mtime_cache.get(cache_key)
         if cached is not None and (now - cached[0]) < 2.0:
-            return f"/static/{filename}?v={cached[1]}"
+            return f"/static/{cached[1]}?v={cached[2]}"
+        resolved = filename
+        if is_classic and filename.startswith(('js/', 'css/')):
+            classic_candidate = 'classic/' + filename
+            if (_static_root / classic_candidate).is_file():
+                resolved = classic_candidate
         try:
-            version = int((_static_root / filename).stat().st_mtime)
+            version = int((_static_root / resolved).stat().st_mtime)
         except OSError:
             version = 0
-        if len(_asset_mtime_cache) > 256:
-            _asset_mtime_cache.clear()
-        _asset_mtime_cache[filename] = (now, version)
-        return f"/static/{filename}?v={version}"
+        with _asset_mtime_lock:
+            if len(_asset_mtime_cache) > 256:
+                _asset_mtime_cache.clear()
+            _asset_mtime_cache[cache_key] = (now, resolved, version)
+        return f"/static/{resolved}?v={version}"
 
     @app.context_processor
     def _inject_ui_theme() -> dict:

@@ -16,9 +16,7 @@ from .database_schema import (
     PUBLICATION_DDL, QUEUED_COLUMN, QUEUE_INDEX_SQL, SUPERSEDED_COLUMN,
     SchemaError, catalog_triggers, validate_schema,
 )
-
-# 资源库最大条目安全上限（防止全表扫描 OOM）
-_LIBRARY_MAX_ITEMS = 10000
+from .validation import extract_album_id
 
 DB_DIR = get_data_dir()
 DB_PATH = DB_DIR / "app.db"
@@ -55,7 +53,8 @@ def _existing_schema() -> int | None:
 
 def get_db() -> sqlite3.Connection:
     """获取数据库连接"""
-    DB_DIR.mkdir(parents=True, exist_ok=True)
+    if not DB_DIR.is_dir():
+        DB_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     try:
         conn.row_factory = sqlite3.Row
@@ -70,8 +69,12 @@ def get_db() -> sqlite3.Connection:
 
 
 @contextmanager
-def transaction():
-    """一个 BEGIN IMMEDIATE 事务（写锁一开始就拿到，读到的就是提交时的状态）；出任何异常都回滚。"""
+def transaction(conn=None):
+    """一个 BEGIN IMMEDIATE 事务（写锁一开始就拿到，读到的就是提交时的状态）；出任何异常都回滚。
+    conn 传入时借用调用方的事务，不提交、不回滚、不关闭连接。"""
+    if conn is not None:
+        yield conn
+        return
     conn = get_db()
     conn.isolation_level = None
     try:
@@ -431,12 +434,23 @@ def claim_next_queued_job(excluded_album_ids=()) -> dict | None:
     将第一个 queued 任务的状态更新为 'running'，并返回任务记录。
     如果已被其他调度器抢先，返回 None。
     """
+    excluded_album_ids = tuple(str(a) for a in excluded_album_ids)
+    exclusion = " AND album_id NOT IN (SELECT value FROM json_each(?))" if excluded_album_ids else ""
+    params = (json.dumps(excluded_album_ids),) if excluded_album_ids else ()
+    # Fast read-only probe avoids acquiring a write lock every 2s when the queue is empty.
+    reader = get_db()
+    try:
+        has_candidate = reader.execute(
+            "SELECT 1 FROM jobs WHERE status='queued'" + exclusion + " LIMIT 1",
+            params,
+        ).fetchone()
+    finally:
+        reader.close()
+    if has_candidate is None:
+        return None
     # Take the write lock before selecting: concurrent claims must select from
     # the committed queue, rather than all waiting to update the same first row.
     with transaction() as conn:
-        excluded_album_ids = tuple(str(a) for a in excluded_album_ids)
-        exclusion = " AND album_id NOT IN (SELECT value FROM json_each(?))" if excluded_album_ids else ""
-        params = (json.dumps(excluded_album_ids),) if excluded_album_ids else ()
         row = conn.execute(
             "SELECT * FROM jobs WHERE status='queued'" + exclusion
             + " ORDER BY COALESCE(NULLIF(queued_at, ''), created_at, ''), id LIMIT 1",
@@ -619,21 +633,24 @@ def library_ids_after(cursor, limit=50):
 
 
 def add_wishlist(album_id: str, title: str = "", author: str = "", cover_url: str = "", *,
-                 added_at: str | None = "") -> bool:
-    """添加收藏。省略 added_at 用当前时间，None 保留旧收藏的空时间。"""
+                 added_at: str | None = "", conn=None) -> bool:
+    """添加收藏。省略 added_at 用当前时间，None 保留旧收藏的空时间。conn 传入时复用调用方事务。"""
     if added_at == "":
         added_at = datetime.now().isoformat()
-    conn = get_db()
+    own = conn is None
+    conn = conn or get_db()
     try:
         cur = conn.execute(
             """INSERT OR IGNORE INTO wishlist (album_id, title, author, cover_url, added_at, download_status)
                VALUES (?, ?, ?, ?, ?, 'none')""",
             (album_id, title, author, cover_url, added_at),
         )
-        conn.commit()
+        if own:
+            conn.commit()
         return cur.rowcount > 0
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
 def remove_wishlist(album_id: str) -> bool:
@@ -648,10 +665,13 @@ def remove_wishlist(album_id: str) -> bool:
 
 
 def get_wishlist(album_id: str) -> dict | None:
-    """获取单个收藏条目"""
+    """获取单个收藏条目（标题/作者/封面为空时回退到 album_meta）"""
     conn = get_db()
     try:
-        row = conn.execute("SELECT * FROM wishlist WHERE album_id=?", (album_id,)).fetchone()
+        row = conn.execute(
+            f"SELECT * FROM ({_WISHLIST_DISPLAY_SQL}) WHERE album_id=?",
+            (album_id,),
+        ).fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
@@ -784,6 +804,12 @@ def _wishlist_keyword_filter(keyword):
     if not keyword:
         return "", []
     like = f"%{_escape_like(keyword)}%"
+    extracted = extract_album_id(keyword)
+    if extracted and extracted != keyword:
+        return (
+            " AND (title LIKE ? ESCAPE ? OR author LIKE ? ESCAPE ? OR album_id LIKE ? ESCAPE ? OR album_id = ?)",
+            [*(like, chr(92)) * 3, extracted],
+        )
     return " AND (title LIKE ? ESCAPE ? OR author LIKE ? ESCAPE ? OR album_id LIKE ? ESCAPE ?)", [like, chr(92)] * 3
 
 
@@ -1067,13 +1093,14 @@ def _json(obj) -> str:
 # ─── Album Tags CRUD ───
 
 
-def add_album_tag(album_id: str, tag: str, source: str = 'auto') -> bool:
+def add_album_tag(album_id: str, tag: str, source: str = 'auto', *, conn=None) -> bool:
     """添加单个标签。新增或将自动标签提升为手工标签时返回 True。"""
     tag = tag.strip().lower()[:50]
     if not tag:
         return False
     now = datetime.now().isoformat()
-    conn = get_db()
+    own = conn is None
+    conn = conn or get_db()
     try:
         cur = conn.execute(
             "INSERT OR IGNORE INTO album_tags (album_id, tag, source, created_at) VALUES (?, ?, ?, ?) "
@@ -1081,23 +1108,28 @@ def add_album_tag(album_id: str, tag: str, source: str = 'auto') -> bool:
             "WHERE album_tags.source='auto' AND excluded.source='user'",
             (album_id, tag, source, now),
         )
-        conn.commit()
+        if own:
+            conn.commit()
         return cur.rowcount > 0
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
-def remove_album_tag(album_id: str, tag: str) -> bool:
+def remove_album_tag(album_id: str, tag: str, *, conn=None) -> bool:
     """删除单个标签。返回 True 表示已删除，False 表示不存在。"""
-    conn = get_db()
+    own = conn is None
+    conn = conn or get_db()
     try:
         cur = conn.execute(
             "DELETE FROM album_tags WHERE album_id=? AND tag=?", (album_id, tag.strip().lower())
         )
-        conn.commit()
+        if own:
+            conn.commit()
         return cur.rowcount > 0
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
 def get_album_tags(album_id: str) -> list[dict]:
@@ -1178,18 +1210,6 @@ def search_library_tags(keyword: str, limit: int = 20) -> list[dict]:
         conn.close()
 
 
-def get_albums_by_tag(tag: str) -> list[str]:
-    """获取含有某标签的所有 album_id 列表"""
-    conn = get_db()
-    try:
-        rows = conn.execute(
-            "SELECT album_id FROM album_tags WHERE tag=? ORDER BY album_id", (tag.strip().lower(),)
-        ).fetchall()
-        return [r["album_id"] for r in rows]
-    finally:
-        conn.close()
-
-
 def batch_sync_auto_tags(album_id: str, tags: list, *, detail=None) -> int:
     """同步自动标签：删除该 album 下所有 source='auto' 的标签，
     然后插入当前 tags 列表。保留用户自定义标签。
@@ -1254,44 +1274,17 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
 
 
-
-def _make_kw_sql(kw: str) -> str:
-    """生成关键词过滤的 WHERE 子句（ESCAPE 用 ? 参数避免字符串字面量歧义）"""
-    if not kw:
-        return ""
-    return """
-        AND (
-            LOWER(ai.title) LIKE ? ESCAPE ?
-            OR LOWER(ai.author) LIKE ? ESCAPE ?
-            OR ai.album_id LIKE ? ESCAPE ?
-        )
-    """
-
-
-def _make_kw_in_tags_sql(kw: str) -> str:
-    """生成关键词在标签中的过滤子句（ESCAPE 用 ? 参数）"""
-    if not kw:
-        return ""
-    return """
-        AND (
-            EXISTS (
-                SELECT 1 FROM album_tags t
-                WHERE t.album_id = ai.album_id
-                AND LOWER(t.tag) LIKE ? ESCAPE ?
-            )
-        )
-    """
-
-
-def _make_kw_combined_sql(kw: str) -> str:
+def _make_kw_combined_sql(kw: str, *, include_extracted_id: bool = False) -> str:
     """生成关键词 OR 组合过滤子句（标题/作者/ID 或 标签匹配任一即可）"""
     if not kw:
         return ""
-    return """
+    id_clause = "OR ai.album_id = ?" if include_extracted_id else ""
+    return f"""
         AND (
             LOWER(ai.title) LIKE ? ESCAPE ?
             OR LOWER(ai.author) LIKE ? ESCAPE ?
             OR ai.album_id LIKE ? ESCAPE ?
+            {id_clause}
             OR EXISTS (
                 SELECT 1 FROM album_tags t
                 WHERE t.album_id = ai.album_id
@@ -1327,13 +1320,20 @@ def _library_status_group_param(status: str) -> str:
 
 def _library_matches(tag, keyword, author, album_id=None):
     """Common non-status filters for the paginated list and local file candidates."""
-    kw = (keyword or "").strip().lower()
+    raw_kw = (keyword or "").strip()
+    kw = raw_kw.lower()
+    extracted_id = extract_album_id(raw_kw) if raw_kw else None
+    include_extracted_id = bool(extracted_id and extracted_id != kw)
     wanted_tags = list(dict.fromkeys(t.strip().lower() for t in tag.split(",") if t.strip())) if tag else []
     author = (author or "").strip()
     tag_having_sql = ""
     params = []
     if kw:
-        params.extend([f"%{_escape_like(kw)}%", chr(92)] * 4)
+        like_pair = [f"%{_escape_like(kw)}%", chr(92)]
+        params.extend(like_pair * 3)
+        if include_extracted_id:
+            params.append(extracted_id)
+        params.extend(like_pair)
     if wanted_tags:
         tag_placeholders = ",".join("?" for _ in wanted_tags)
         tag_having_sql = f"""
@@ -1385,7 +1385,7 @@ def _library_matches(tag, keyword, author, album_id=None):
         _matched AS (
             SELECT ai.* FROM all_items ai
             WHERE 1=1
-              {_make_kw_combined_sql(kw)}
+              {_make_kw_combined_sql(kw, include_extracted_id=include_extracted_id)}
               {tag_having_sql}
               {"AND LOWER(TRIM(ai.author)) = LOWER(?)" if author else ""}
               {"AND ai.album_id = ?" if album_id else ""}

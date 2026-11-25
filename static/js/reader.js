@@ -91,10 +91,11 @@
     if (following.length) stage.insertBefore(figure, mounted.get(Math.min.apply(null, following)).figure);
     else stage.appendChild(figure);
     var src = nav.imageUrl(page.url, prefixes);
-    var cancel, timer, response, autoRetried = false;
+    var cancel, timer, response, autoRetried = false, interrupted = false;
     var scope = new AbortController();
     function request(url) {
       if (cancel) cancel();
+      interrupted = false;
       response = undefined;
       cancel = nav.loadImage(img, url, function (failure) { response = failure; img.onerror(); });
     }
@@ -141,13 +142,26 @@
       error.classList.add('d-none'); img.classList.remove('d-none'); reload();
     });
     request(src);
-    return { figure: figure, remove: function () {
-      clearTimeout(timer); scope.abort(); cancel(); img.onload = img.onerror = null; figure.remove();
-    } };
+    return {
+      figure: figure,
+      pausePending: function () {
+        clearTimeout(timer);
+        if (cancel && cancel.abortPending && cancel.abortPending()) interrupted = true;
+      },
+      resumePending: function () {
+        if (interrupted && !scope.signal.aborted) {
+          interrupted = false;
+          request(src);
+        }
+      },
+      remove: function () {
+        clearTimeout(timer); scope.abort(); if (cancel) cancel(); img.onload = img.onerror = null; figure.remove();
+      }
+    };
   }
   function render(number, visibleEnd) {
-    var first = Math.max(1, number - 2);
-    var last = Math.min(pages.length, Math.max(first + 5, visibleEnd + 1, number + 2));
+    var first = Math.max(1, number - 5);
+    var last = Math.min(pages.length, Math.max(first + 8, visibleEnd + 2, number + 3));
     mounted.forEach(function (slot, key) {
       if (key < first || key > last) { slot.remove(); mounted.delete(key); }
     });
@@ -234,9 +248,13 @@
   stage.addEventListener('click', function (event) {
     if (!event.target.closest('a,button') && !window.getSelection().toString()) showTools(tools.hidden);
   });
+  var cycleWidth = nav.bindWidthToggle
+    ? nav.bindWidthToggle(root, byId('reader-width-btn'), function () { dirty = true; schedule(); })
+    : null;
   document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape') { showTools(false); return; }
     if (!nav.plainKey(event)) return;
+    if (event.key.toLowerCase() === 'w' && !event.repeat && cycleWidth) { event.preventDefault(); cycleWidth(); return; }
     var dest = { ArrowLeft: current - 1, ArrowRight: current + 1, Home: 1, End: pages.length }[event.key];
     if (dest !== undefined && pages.length) {
       event.preventDefault(); jump(dest, event.key === 'End' ? 'end' : event.key === 'Home' ? 'top' : 'start', true);
@@ -258,13 +276,19 @@
   byId('reader-retry').addEventListener('click', load);
   if (paged) nav.bindModeSwitch(paged);
   nav.bindBack(byId('reader-back')); nav.bindBack(byId('reader-origin'));
-  nav.bindLifecycle(function () {
+  nav.bindLifecycle(function (unloading) {
     active = false;
     if (frame) cancelAnimationFrame(frame); frame = 0;
     if (manifest) { manifest.cancel(); manifest = null; }
-    mounted.forEach(function (slot) { slot.remove(); }); mounted.clear();
+    if (unloading) {
+      mounted.forEach(function (slot) { slot.remove(); });
+      mounted.clear();
+    } else {
+      mounted.forEach(function (slot) { slot.pausePending(); });
+    }
   }, function () {
     active = true;
+    mounted.forEach(function (slot) { slot.resumePending(); });
     if (current) update(); else load();
   });
 })();

@@ -209,6 +209,21 @@ window.encodeJobId = function (id) {
   return encodeURIComponent(id);
 };
 
+/**
+ * 从纯数字、JM123456 / JM / 123456 或 18comic/jmcomic 专辑链接提取数字车号；普通关键词返回 null
+ * @param {string|null|undefined} raw
+ * @returns {string|null}
+ */
+window.extractAlbumId = function (raw) {
+  if (typeof raw !== 'string') return null;
+  var text = raw.trim();
+  if (!text) return null;
+  if (/^[0-9]{1,20}$/.test(text)) return text;
+  var m = text.match(/^(?:jm[\s/_-]*)?([0-9]{1,20})$/i)
+    || text.match(/^(?:https?:\/\/)?(?:[\w-]+\.)*(?:18comic|jmcomic|jm-comic)[\w.-]*\/album\/([0-9]{1,20})(?:[/?#].*)?$/i);
+  return m && /^[0-9]{1,20}$/.test(m[1]) ? m[1] : null;
+};
+
 window.jobCreationFeedback = function (data) {
   if (data && data.status === 'error') {
     return { outcome: 'failed', type: 'danger', message: data.message || '创建任务失败' };

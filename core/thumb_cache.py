@@ -87,7 +87,7 @@ def _prune_if_needed(folder: Path) -> None:
         if removed:
             dead = set(removed)
             with _mem_lock:
-                for key in [k for k, v in _mem_hits.items() if v[1] in dead]:
+                for key in [k for k, v in _mem_hits.items() if v in dead]:
                     _mem_hits.pop(key, None)
     except OSError:
         pass
@@ -126,8 +126,7 @@ def _cache_path(folder: Path, cache_key: str, width: int) -> Path:
 def _valid_thumbnail(folder: Path, target: Path) -> bool:
     try:
         return (target.parent == folder and not is_link(folder)
-                and not is_link(target) and target.is_file()
-                and target.resolve(strict=True).parent == folder.resolve(strict=True))
+                and not is_link(target) and target.is_file())
     except (OSError, RuntimeError):
         return False
 

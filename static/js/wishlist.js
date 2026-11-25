@@ -15,6 +15,18 @@
   var currentStatus = '';
   var currentSort = DEFAULT_SORT;
   var _refreshTimer = null;
+  var _searchTimer = null;
+  var _composing = false;
+  var _lastCheckedIndex = -1;
+  var lastRenderedSignature = '';
+
+  function computeWishlistSignature(items, total, page) {
+    return page + '|' + total + '|' + items.map(function (it) {
+      var u = it.update ? (it.update.state + ':' + it.update.new_count + ':' + (it.update.removed_count || 0)) : '';
+      return [it.album_id, it.title, it.author, it.readable ? 1 : 0, it.status_group, it.activity,
+        it.archive, it.files_missing ? 1 : 0, it.local_problem, it.archive_problem, it.added_at, u].join('~');
+    }).join('\n');
+  }
 
   var tbody = document.getElementById('wishlist-body');
   var searchInput = document.getElementById('wishlist-search');
@@ -64,6 +76,7 @@
   }
 
   function showTableMessage(text, className) {
+    lastRenderedSignature = '';
     var td = el('td', 'text-center py-4 ' + (className || 'text-muted'), text);
     td.colSpan = 7;
     var tr = el('tr');
@@ -152,6 +165,12 @@
         updateBatchActions();
         return;
       }
+
+      var sig = computeWishlistSignature(allItems, total, currentPage);
+      if (opts.onlyIfChanged && sig === lastRenderedSignature) {
+        return;
+      }
+      lastRenderedSignature = sig;
 
       renderRows(allItems);
       renderPagination(total, currentPage);
@@ -584,6 +603,7 @@
 
   // ── 搜索/筛选/排序 ──
   function searchWishlist() {
+    if (_searchTimer) { clearTimeout(_searchTimer); _searchTimer = null; }
     currentQuery = searchInput.value.trim();
     currentStatus = statusSelect.value;
     currentSort = sortSelect.value;
@@ -592,7 +612,12 @@
 
   // ── 导出收藏清单 ──
   function exportWishlist() {
-    window.open('/api/wishlist/export');
+    var a = el('a');
+    a.href = '/api/wishlist/export';
+    a.download = 'wishlist.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   }
 
   // ── 导入收藏清单（文件） ──
@@ -694,30 +719,48 @@
   window.addEventListener('pagehide', function () { importInterrupted = true; });
 
   function refreshList() {
+    lastRenderedSignature = '';
     loadWishlist(currentPage);
   }
 
   // ── 自动刷新定时器（每 10 秒检查一次下载状态变化） ──
-  // 页面隐藏或正用键盘操作表格按钮时跳过，免得重建表格把焦点弄丢；批量下载的确认窗口开着时也跳过
+  // 页面隐藏或正用键盘操作表格按钮时跳过，免得重建表格把焦点弄丢；批量下载或批量导入窗口开着时也跳过
   function canRefreshNow() {
+    var importModal = document.getElementById('importModal');
+    var importOpen = !!(importModal && importModal.classList.contains('show'));
     return !document.hidden && !tbody.contains(document.activeElement)
+      && !importOpen
       && !(window.batchDownloadDialog && window.batchDownloadDialog.isOpen());
   }
 
   function startAutoRefresh() {
     if (_refreshTimer) clearInterval(_refreshTimer);
     _refreshTimer = setInterval(function () {
-      if (canRefreshNow()) loadWishlist(currentPage);
+      if (canRefreshNow()) loadWishlist(currentPage, { onlyIfChanged: true });
     }, 10000);
   }
 
   function stopAutoRefresh() {
     if (_refreshTimer) clearInterval(_refreshTimer);
     _refreshTimer = null;
+    if (_searchTimer) clearTimeout(_searchTimer);
+    _searchTimer = null;
   }
 
-  // ── 事件绑定（取代内联 onclick；行内参数只从 data-* 读取） ──
+  // ── 事件绑定（取代内联属性；行内参数只从 data-* 读取） ──
   tbody.addEventListener('click', function (e) {
+    var cb = e.target.closest('input.item-checkbox');
+    if (cb && tbody.contains(cb)) {
+      var boxes = Array.prototype.slice.call(tbody.querySelectorAll('input.item-checkbox'));
+      var idx = boxes.indexOf(cb);
+      if (e.shiftKey && _lastCheckedIndex >= 0 && idx >= 0 && idx !== _lastCheckedIndex) {
+        var s = Math.min(_lastCheckedIndex, idx), end = Math.max(_lastCheckedIndex, idx);
+        for (var i = s; i <= end; i++) boxes[i].checked = cb.checked;
+        updateBatchActions();
+      }
+      _lastCheckedIndex = idx;
+      return;
+    }
     var btn = e.target.closest('button[data-action]');
     if (!btn || !tbody.contains(btn)) return;
     var row = btn.closest('tr');
@@ -740,8 +783,22 @@
   });
 
   selectAll.addEventListener('change', toggleSelectAll);
+  searchInput.addEventListener('compositionstart', function () {
+    _composing = true;
+    if (_searchTimer) { clearTimeout(_searchTimer); _searchTimer = null; }
+  });
+  searchInput.addEventListener('compositionend', function () {
+    _composing = false;
+    if (_searchTimer) clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(searchWishlist, 300);
+  });
+  searchInput.addEventListener('input', function (e) {
+    if (_composing || e.isComposing) return;
+    if (_searchTimer) clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(searchWishlist, 300);
+  });
   searchInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') searchWishlist();
+    if (e.key === 'Enter' && !_composing && !e.isComposing) searchWishlist();
   });
   document.getElementById('wishlist-search-btn').addEventListener('click', searchWishlist);
   statusSelect.addEventListener('change', searchWishlist);
@@ -775,7 +832,9 @@
   });
   // 切回本标签页时立即刷新（例如在别的标签页下载完成，或本地文件被移走）
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible' && _refreshTimer && canRefreshNow()) loadWishlist(currentPage);
+    if (document.visibilityState === 'visible' && _refreshTimer && canRefreshNow()) {
+      loadWishlist(currentPage, { onlyIfChanged: true });
+    }
   });
 
   // ── 供控制台/其他脚本调用（页面本身不再依赖这些全局函数） ──

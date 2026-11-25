@@ -66,7 +66,7 @@
         </div>
         <div class="mineral-stones">
         {% for spec in ui_themes %}
-            <button type="button" class="stone-btn" data-set-theme="{{ spec.key }}" aria-pressed="{{ 'true' if ui_theme == spec.key else 'false' }}" title="{{ spec.full_label }}" aria-label="切换主题：{{ spec.full_label }}"></button>
+            <button type="button" class="stone-btn" data-set-theme="{{ spec.key }}" aria-pressed="{{ 'true' if ui_theme == spec.key else 'false' }}" data-scheme="{{ 'dark' if spec.is_dark else 'light' }}" data-default-fx="{{ spec.default_fx }}" title="{{ spec.full_label }}" aria-label="切换主题：{{ spec.full_label }}"></button>
         {% endfor %}
         </div>
     </div>

@@ -14,7 +14,11 @@ from core.tag_jobs import tag_jobs
 from core.background_calls import BackgroundCallsStopped
 from core.upstream import known_failure
 from core.scheduler import window_state
-from core.validation import validate_numeric  # 统一 album_id 纯数字校验
+from core.validation import (
+    extract_album_id,
+    is_safe_upload_filename as _is_safe_upload_filename,
+    validate_numeric,
+)
 from routes.api_library import mark_local_details
 
 api_wishlist_bp = Blueprint("api_wishlist", __name__)
@@ -59,13 +63,30 @@ def add_wishlist():
     if len(str(cover_url)) > 2000:
         cover_url = str(cover_url)[:2000]
 
-    # 如果没有提供标题等信息，尝试从 jmcomic 获取
+    # 如果已在收藏或本地缓存已有元信息，优先复用，避免为已知标题同步阻塞等待上游 20s
     detail = None
     try:
         tag_jobs.require_accepting()
     except BackgroundCallsStopped as exc:
         return jsonify(known_failure(exc).payload()), 503
-    if not title or not author:
+    existing = db.get_wishlist(album_id)
+    if existing is not None:
+        return jsonify({
+            "status": "error",
+            "message": "该漫画已在收藏中",
+            "data": {
+                "album_id": album_id,
+                "title": title or existing.get("title", ""),
+                "author": author or existing.get("author", ""),
+            },
+        }), 409
+    if not title or not author or not cover_url:
+        local_meta = db.get_album_meta(album_id) if hasattr(db, "get_album_meta") else None
+        if local_meta:
+            title = title or local_meta.get("title", "")
+            author = author or local_meta.get("author", "")
+            cover_url = cover_url or local_meta.get("cover_url", "")
+    if not title:
         try:
             detail = get_album_detail_cached(album_id)
             if not title:
@@ -265,27 +286,29 @@ def batch_import_wishlist():
         token = token.strip()
         if not token:
             continue
-        if validate_numeric(token):
-            numeric_ids.append(token)
+        parsed_id = extract_album_id(token)
+        if parsed_id:
+            numeric_ids.append(parsed_id)
         else:
             failed_validation.append(token)
 
-    # 最多接受 _MAX_BATCH_IMPORT_RAW_ACTUAL 个
+    # 最多接受 _MAX_BATCH_IMPORT_RAW_ACTUAL 个（单个事务批量写入）
     numeric_ids = numeric_ids[:_MAX_BATCH_IMPORT_RAW_ACTUAL]
     added = 0
     skipped_existing = 0
     errors = []
 
-    for album_id in numeric_ids:
-        try:
-            result = db.add_wishlist(album_id, "", "", "")
-            if result:
-                added += 1
-            else:
-                skipped_existing += 1
-        except Exception as e:
-            errors.append({"album_id": album_id, "message": "导入失败"})
-            log.error(f"导入失败 album_id={album_id} error={e}")
+    try:
+        with db.transaction() as conn:
+            for album_id in numeric_ids:
+                result = db.add_wishlist(album_id, "", "", "", conn=conn)
+                if result:
+                    added += 1
+                else:
+                    skipped_existing += 1
+    except Exception as e:
+        log.error(f"批量导入事务失败 error={e}")
+        return jsonify({"status": "error", "message": "批量导入失败，请稍后重试"}), 500
 
     log.info(
         f"批量导入完成: added={added}, skipped_existing={skipped_existing}, "
@@ -328,26 +351,6 @@ def _imported_added_at(value, fallback):
     return fallback.isoformat()
 
 
-_WINDOWS_RESERVED_STEMS = frozenset({
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-})
-
-
-def _is_safe_upload_filename(filename: str) -> bool:
-    """Reject path traversal, separators, control chars, and reserved device names while allowing Unicode."""
-    if not isinstance(filename, str):
-        return False
-    cleaned = filename.strip()
-    if not cleaned or len(cleaned) > 255 or cleaned in {".", ".."} or cleaned.endswith("."):
-        return False
-    if any(ch in "/\\:" or ord(ch) < 32 or ord(ch) == 127 for ch in filename):
-        return False
-    stem = cleaned.split(".", 1)[0].strip().upper()
-    return stem not in _WINDOWS_RESERVED_STEMS
-
-
 @api_wishlist_bp.post("/api/wishlist/import-file")
 def import_wishlist_file():
     """通过上传 JSON 文件导入收藏"""
@@ -388,38 +391,34 @@ def import_wishlist_file():
     errors = []
 
     imported_at = datetime.now()
+    valid_entries = []
     for idx, entry in enumerate(data):
         if not isinstance(entry, dict):
             errors.append({"index": idx, "message": "条目不是对象"})
             continue
 
-        album_id = str(entry.get("album_id", "")).strip()
+        album_id = extract_album_id(str(entry.get("album_id", "")).strip()) or ""
         if not album_id or not validate_numeric(album_id):
-            errors.append({"index": idx, "album_id": album_id, "message": "album_id 缺失或不是纯数字"})
+            errors.append({"index": idx, "album_id": str(entry.get("album_id", "")).strip(), "message": "album_id 缺失或不是纯数字"})
             continue
 
-        title = str(entry.get("title", "") or "")
-        author = str(entry.get("author", "") or "")
-        cover_url = str(entry.get("cover_url", "") or "")
+        title = str(entry.get("title", "") or "")[:500]
+        author = str(entry.get("author", "") or "")[:200]
+        cover_url = str(entry.get("cover_url", "") or "")[:2000]
+        added_at = _imported_added_at(entry.get("added_at", ""), imported_at - timedelta(microseconds=idx))
+        valid_entries.append((idx, album_id, title, author, cover_url, added_at))
 
-        # 截断过长的字符串
-        if len(str(title)) > 500:
-            title = str(title)[:500]
-        if len(str(author)) > 200:
-            author = str(author)[:200]
-        if len(str(cover_url)) > 2000:
-            cover_url = str(cover_url)[:2000]
-
-        try:
-            added_at = _imported_added_at(entry.get("added_at", ""), imported_at - timedelta(microseconds=idx))
-            result = db.add_wishlist(album_id, title, author, cover_url, added_at=added_at)
-            if result:
-                added += 1
-            else:
-                skipped_existing += 1
-        except Exception as e:
-            errors.append({"index": idx, "album_id": album_id, "message": "导入失败"})
-            log.error(f"文件导入失败 album_id={album_id} error={e}")
+    try:
+        with db.transaction() as conn:
+            for idx, album_id, title, author, cover_url, added_at in valid_entries:
+                result = db.add_wishlist(album_id, title, author, cover_url, added_at=added_at, conn=conn)
+                if result:
+                    added += 1
+                else:
+                    skipped_existing += 1
+    except Exception as e:
+        log.error(f"文件导入事务失败 error={e}")
+        return jsonify({"status": "error", "message": "文件导入失败，请稍后重试"}), 500
 
     log.info(
         f"文件导入完成: added={added}, skipped_existing={skipped_existing}, errors={len(errors)}"

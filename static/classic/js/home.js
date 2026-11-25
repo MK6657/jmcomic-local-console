@@ -36,12 +36,31 @@
     window.addEventListener('pageshow', function (event) { if (event.persisted) syncVisible(); });
     syncVisible();
 
-    // 车号下载：带着输入框里的车号打开搜索页
+    // 车号下载：输入车号或漫画链接时直达详情页，否则带着关键词打开搜索页
+    var heroForm = document.getElementById('hero-search-form');
     var heroDownload = document.getElementById('hero-download-btn');
     var heroKeyword = document.getElementById('hero-keyword');
+    if (heroForm && heroKeyword) {
+      heroForm.addEventListener('submit', function () {
+        var raw = heroKeyword.value.trim();
+        if (window.extractAlbumId && (/^https?:\/\//i.test(raw) || /18comic|jmcomic/i.test(raw))) {
+          var parsed = window.extractAlbumId(raw);
+          if (parsed) heroKeyword.value = parsed;
+        }
+      });
+    }
     if (heroDownload && heroKeyword) {
       heroDownload.addEventListener('click', function () {
-        window.location.href = '/search?keyword=' + encodeURIComponent(heroKeyword.value.trim());
+        var raw = heroKeyword.value.trim();
+        var id = window.extractAlbumId ? window.extractAlbumId(raw) : raw.replace(/^JM\s*/i, '');
+        if (/^\d{1,20}$/.test(id)) {
+          window.location.href = '/album/' + id;
+        } else if (raw) {
+          window.location.href = '/search?keyword=' + encodeURIComponent(raw);
+        } else {
+          heroKeyword.focus();
+          if (typeof showToast === 'function') showToast('请输入数字车号或关键词，例如 JM123456', 'warning');
+        }
       });
     }
 

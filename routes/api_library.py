@@ -2,6 +2,7 @@
 资源库 + 标签管理 API
 """
 
+import threading
 from time import monotonic
 
 from flask import Blueprint, jsonify, request
@@ -19,19 +20,21 @@ api_library_bp = Blueprint("api_library", __name__, url_prefix="/api/library")
 
 _READABLE_COUNT_TTL = 3.0
 _readable_count_cache = None
+_readable_count_lock = threading.Lock()
 
 
 def _note_local_states(states):
     """Let fresh listing probes invalidate a disagreeing stats entry."""
     global _readable_count_cache
-    cached = _readable_count_cache
-    if cached is None:
-        return
-    key, _, readable_ids = cached
-    if key[:2] == (db.DB_PATH, path_guard.DOWNLOAD_ROOT) and any(
-        state.readable != (album_id in readable_ids) for album_id, state in states.items()
-    ):
-        _readable_count_cache = None
+    with _readable_count_lock:
+        cached = _readable_count_cache
+        if cached is None:
+            return
+        key, _, readable_ids = cached
+        if key[:2] == (db.DB_PATH, path_guard.DOWNLOAD_ROOT) and any(
+            state.readable != (album_id in readable_ids) for album_id, state in states.items()
+        ):
+            _readable_count_cache = None
 
 
 def _sanitize_tag(tag: str) -> str:
@@ -164,12 +167,14 @@ def _readable_count(conn):
     locations = db.resource_locations(conn)
     key = (db.DB_PATH, path_guard.DOWNLOAD_ROOT, locations)
     now = monotonic()
-    cached = _readable_count_cache
+    with _readable_count_lock:
+        cached = _readable_count_cache
     if cached is not None and cached[0] == key and now < cached[1]:
         return len(cached[2])
     states = states_among((row[0] for row in locations), conn)
     readable_ids = frozenset(album_id for album_id, state in states.items() if state.readable)
-    _readable_count_cache = key, now + _READABLE_COUNT_TTL, readable_ids
+    with _readable_count_lock:
+        _readable_count_cache = key, now + _READABLE_COUNT_TTL, readable_ids
     return len(readable_ids)
 
 
@@ -246,15 +251,16 @@ def album_tags_add(album_id: str):
 
         added = 0
         skipped = 0
-        for t in raw_tags:
-            cleaned = _sanitize_tag(str(t))
-            if not cleaned:
-                skipped += 1
-                continue
-            if db.add_album_tag(album_id, cleaned, source="user"):
-                added += 1
-            else:
-                skipped += 1
+        with db.transaction() as conn:
+            for t in raw_tags:
+                cleaned = _sanitize_tag(str(t))
+                if not cleaned:
+                    skipped += 1
+                    continue
+                if db.add_album_tag(album_id, cleaned, source="user", conn=conn):
+                    added += 1
+                else:
+                    skipped += 1
 
         log.info(f"API添加标签 album_id={album_id} added={added} skipped={skipped}")
         return jsonify({"status": "ok", "added": added, "skipped": skipped})
@@ -289,10 +295,11 @@ def album_tags_delete(album_id: str):
 
         # 模式1：删除指定标签列表
         if "tags" in body and isinstance(body["tags"], list):
-            for t in body["tags"]:
-                cleaned = _sanitize_tag(str(t))
-                if cleaned and db.remove_album_tag(album_id, cleaned):
-                    total_deleted += 1
+            with db.transaction() as conn:
+                for t in body["tags"]:
+                    cleaned = _sanitize_tag(str(t))
+                    if cleaned and db.remove_album_tag(album_id, cleaned, conn=conn):
+                        total_deleted += 1
         # 模式2：按 source 清空
         elif "source" in body and isinstance(body["source"], str):
             src = body["source"].strip()
@@ -333,6 +340,7 @@ def album_tags_sync(album_id: str):
             "status": "ok",
             "synced": synced,
             "total_tags": len(all_tags),
+            "tags": all_tags,
         })
     except Exception as e:
         log.error(f"API同步标签失败 album_id={album_id} error={e}")

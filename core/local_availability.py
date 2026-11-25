@@ -24,6 +24,7 @@
 记住压缩包的结论时同时记下目录里每个候选压缩包的文件版本，复用前逐个 lstat 确认没变；
 本程序自己往目录里下载、打包时调用 forget()，不必等有效期。
 """
+from collections import OrderedDict
 import os
 import stat
 import threading
@@ -43,8 +44,16 @@ MAX_IDS = 200  # 一次最多判断这么多个 album_id（一页搜索结果/�
 _READABLE_TTL = 600.0   # 记住“可读”多久（每次复用前还会确认记下的那一页仍在）
 _UNREADABLE_TTL = 30.0  # 记住“不可读”多久
 _CACHE_MAX = 5000
-_cache: dict[str, tuple] = {}  # 规范化的目录路径 → (签名, LocalState, 依据, 判断时间)
+_cache: OrderedDict[str, tuple] = OrderedDict()  # 规范化的目录路径 → (签名, LocalState, 依据, 判断时间)
 _cache_lock = threading.Lock()
+
+
+def _remember_cache(key: str, entry: tuple) -> None:
+    with _cache_lock:
+        _cache[key] = entry
+        _cache.move_to_end(key)
+        while len(_cache) > _CACHE_MAX:
+            _cache.popitem(last=False)
 
 
 def is_page_image(path) -> bool:
@@ -169,6 +178,8 @@ def _folder_state(path: str, job_id: str, now: float, root: list, *, conn=None) 
     signature = (info.st_dev, info.st_ino, info.st_mtime_ns, job_id, str(path_guard.DOWNLOAD_ROOT))
     with _cache_lock:
         cached = _cache.get(key)
+        if cached is not None:
+            _cache.move_to_end(key)
     if cached and cached[0] == signature:
         _, state, evidence, checked_at = cached
         ttl = _READABLE_TTL if state.readable else _UNREADABLE_TTL
@@ -183,10 +194,7 @@ def _folder_state(path: str, job_id: str, now: float, root: list, *, conn=None) 
             elif evidence and all(archive_pages._signature(path) == signature for path, signature in evidence):
                 return state      # 压缩包都没变
     if published_path(Path(path), path_guard.DOWNLOAD_ROOT, directory=True, conn=conn) is None:
-        with _cache_lock:
-            if len(_cache) >= _CACHE_MAX and key not in _cache:
-                _cache.clear()
-            _cache[key] = (signature, MISSING, None, now)
+        _remember_cache(key, (signature, MISSING, None, now))
         return MISSING
     state, evidence = MISSING, None
     page = _first_page_evidence(path)
@@ -194,10 +202,7 @@ def _folder_state(path: str, job_id: str, now: float, root: list, *, conn=None) 
         state, evidence = LocalState("loose"), page
     else:
         state, evidence = _archive_evidence(path)
-    with _cache_lock:
-        if len(_cache) >= _CACHE_MAX and key not in _cache:
-            _cache.clear()
-        _cache[key] = (signature, state, evidence, now)
+    _remember_cache(key, (signature, state, evidence, now))
     return state
 
 

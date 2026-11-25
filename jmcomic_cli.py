@@ -14,10 +14,15 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 import sqlite3
+import sys
 import uuid
 from jmcomic import JmMagicConstants, JmcomicText
 from core import database as db, sdk_adapter
-from core.jm_service import close_client
+
+
+def close_client(client):
+    from core.jm_service import close_client as _close_client
+    return _close_client(client)
 
 
 def cmd_backup(args):
@@ -301,7 +306,22 @@ def cmd_batch(args):
         close_client(client)
 
 
+def _configure_console_streams():
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        encoding = (getattr(stream, "encoding", None) or "").lower()
+        if encoding.startswith("utf"):
+            continue
+        try:
+            reconfigure(errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv=None):
+    _configure_console_streams()
     parser = argparse.ArgumentParser(
         description="JMComic 命令行工具 - 搜索/浏览/下载禁漫漫画",
         formatter_class=argparse.RawDescriptionHelpFormatter,

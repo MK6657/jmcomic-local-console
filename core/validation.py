@@ -19,15 +19,60 @@ import re
 from typing import Optional
 
 # ============================================================
-# album_id 纯数字校验（SSRF 保护）
+# album_id 纯数字校验（SSRF 保护）与车号提取
 # 使用场景：api_album / api_jobs / api_library / api_wishlist
 # ============================================================
 _RE_NUMERIC = re.compile(r"[0-9]{1,20}")
+_RE_JM_TOKEN = re.compile(r"^(?:jm[\s/_-]*)?([0-9]{1,20})$", re.IGNORECASE)
+_RE_ALBUM_URL = re.compile(
+    r"^(?:https?://)?(?:[\w-]+\.)*(?:18comic|jmcomic|jm-comic)[\w.-]*/album/([0-9]{1,20})(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
 
 
 def validate_numeric(album_id: str) -> bool:
     """校验 album_id 是否为纯数字（SSRF 保护）"""
     return isinstance(album_id, str) and bool(_RE_NUMERIC.fullmatch(album_id))
+
+
+def extract_album_id(raw: object) -> Optional[str]:
+    """从纯数字、JM123456 / JM / 123456 或禁漫专辑 URL 中提取纯数字车号；普通关键词返回 None。"""
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if _RE_NUMERIC.fullmatch(text):
+        return text
+    match = _RE_JM_TOKEN.fullmatch(text) or _RE_ALBUM_URL.fullmatch(text)
+    if match:
+        candidate = match.group(1)
+        if validate_numeric(candidate):
+            return candidate
+    return None
+
+
+def parse_numeric_id_list(
+    raw_ids: object,
+    *,
+    max_items: int,
+    allow_empty: bool = False,
+    field_name: str = "album_ids",
+) -> tuple[Optional[list[str]], Optional[str]]:
+    """统一校验纯数字 ID 列表，返回 (ids, error_message)。"""
+    if not isinstance(raw_ids, list) or (not allow_empty and not raw_ids):
+        return None, f"缺少 {field_name} 列表"
+    if len(raw_ids) > max_items:
+        return None, f"{field_name} 数量过多，最大 {max_items}"
+    cleaned: list[str] = []
+    for item in raw_ids:
+        if isinstance(item, bool):
+            return None, f"{field_name} 只能包含纯数字"
+        text = str(item).strip() if isinstance(item, (str, int)) else ""
+        if not validate_numeric(text):
+            return None, f"{field_name} 只能包含纯数字"
+        cleaned.append(text)
+    return cleaned, None
 
 
 def require_numeric(album_id: str, field_name: str = "album_id") -> Optional[str]:
@@ -190,6 +235,19 @@ def clamp_page(page: int, min_val: int = 1, max_val: int = 500) -> int:
 def clamp_page_size(size: int, min_val: int = 1, max_val: int = 200) -> int:
     """限制 page_size 参数在合法范围内"""
     return max(min_val, min(size, max_val))
+
+
+def is_safe_upload_filename(filename: str) -> bool:
+    """校验上传文件名：拒绝路径分隔符、控制字符、超长名称及 Windows 保留设备名。"""
+    if not isinstance(filename, str):
+        return False
+    cleaned = filename.strip()
+    if not cleaned or len(cleaned) > 255 or cleaned in {".", ".."} or cleaned.endswith("."):
+        return False
+    if any(ch in "/\\:" or ord(ch) < 32 or ord(ch) == 127 for ch in filename):
+        return False
+    stem = cleaned.split(".", 1)[0].strip().casefold()
+    return stem not in _WINDOWS_RESERVED
 
 
 def truncate_str(value: str, max_len: int = 200) -> str:

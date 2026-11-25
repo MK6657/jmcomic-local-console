@@ -69,15 +69,26 @@
     window.addEventListener('pageshow', function (event) { if (event.persisted) syncVisible(); });
     syncVisible();
 
+    var heroForm = document.getElementById('hero-search-form');
     var heroDownload = document.getElementById('hero-download-btn');
     var heroKeyword = document.getElementById('hero-keyword');
+    if (heroForm && heroKeyword) {
+      heroForm.addEventListener('submit', function () {
+        var raw = heroKeyword.value.trim();
+        if (window.extractAlbumId && (/^https?:\/\//i.test(raw) || /18comic|jmcomic/i.test(raw))) {
+          var parsed = window.extractAlbumId(raw);
+          if (parsed) heroKeyword.value = parsed;
+        }
+      });
+    }
     if (heroDownload && heroKeyword) {
       heroDownload.addEventListener('click', function () {
-        var id = heroKeyword.value.trim().replace(/^JM\s*/i, '');
+        var raw = heroKeyword.value.trim();
+        var id = window.extractAlbumId ? window.extractAlbumId(raw) : raw.replace(/^JM\s*/i, '');
         if (/^\d{1,20}$/.test(id)) window.location.href = '/album/' + id;
         else {
           heroKeyword.focus();
-          showToast('请输入数字车号，例如 JM123456', 'warning');
+          showToast('请输入数字车号或漫画链接，例如 JM123456', 'warning');
         }
       });
     }
