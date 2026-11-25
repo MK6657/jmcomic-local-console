@@ -54,6 +54,10 @@
       link.addEventListener('click', function (event) {
         if (!isPlainClick(event)) return;
         try {
+          if (window.navigation && window.navigation.currentEntry && window.quickNav) {
+            if (window.navigation.canGoBack && window.quickNav.goBack(event)) event.preventDefault();
+            return;
+          }
           var canGoBack = (window.navigation && typeof window.navigation.canGoBack === 'boolean')
             ? window.navigation.canGoBack
             : history.length > 1;
@@ -75,12 +79,18 @@
     archivePageProblem: function (url) {
       var archive;
       try {
-        var path = new URL(url, location.origin).pathname;
+        var path = new URL(url.url || url, location.origin).pathname;
         archive = path.indexOf('/api/preview-archive/') === 0;
         // 散图：只看 409（阅读页打开后这一页被打包进了压缩包）；真的不在了（404）照常给“重试”
         if (!archive && path.indexOf('/api/preview-img/') !== 0) return Promise.resolve(null);
       } catch (_) { return Promise.resolve(null); }
       return fetch(url, { cache: 'no-store' }).then(function (response) {
+        return window.readingNav.archiveResponse(archive, response);
+      }).catch(function () { return null; });
+    },
+
+    archiveResponse: function (archive, response) {
+      return Promise.resolve().then(function () {
         if (response.ok || !((archive && (response.status === 422 || response.status === 503)) || response.status === 409)) return null;
         return response.json().then(function (data) {
           if (!data || ['archive_corrupt', 'archive_changed', 'archive_busy'].indexOf(data.reason) < 0) return null;

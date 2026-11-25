@@ -159,6 +159,51 @@ def _focus_explorer_window(folder: Path, before_titles: dict[int, str]) -> None:
         time.sleep(0.05)
 
 
+def _select_in_explorer_windows(select_path, fallback_target: str) -> None:
+    """Highlight a file in Windows Explorer via SHOpenFolderAndSelectItems (handles spaces and commas)."""
+    import ctypes
+    from ctypes import wintypes
+
+    ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    ole32.CoInitializeEx.restype = ctypes.c_long
+    ole32.CoUninitialize.argtypes = []
+    ole32.CoUninitialize.restype = None
+    shell32.ILCreateFromPathW.argtypes = [wintypes.LPCWSTR]
+    shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+    shell32.SHOpenFolderAndSelectItems.argtypes = [
+        ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p, wintypes.DWORD
+    ]
+    shell32.SHOpenFolderAndSelectItems.restype = ctypes.c_long
+    shell32.ILFree.argtypes = [ctypes.c_void_p]
+    shell32.ILFree.restype = None
+
+    hr_init = ole32.CoInitializeEx(None, 0x2)  # COINIT_APARTMENTTHREADED
+    need_uninit = hr_init in (0, 1)  # S_OK or S_FALSE
+    pidl = None
+    try:
+        pidl = shell32.ILCreateFromPathW(os.path.abspath(os.fspath(select_path)))
+        if pidl:
+            hr = shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0)
+            if hr == 0:
+                return
+    except Exception:
+        pass
+    finally:
+        if pidl:
+            try:
+                shell32.ILFree(pidl)
+            except Exception:
+                pass
+        if need_uninit:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+    _REAL_STARTFILE(fallback_target)
+
+
 def open_folder(path, *, select=None) -> None:
     """Delegate one authorized path to the native opener without invoking a shell."""
     opener = getattr(os, "startfile", None)
@@ -174,7 +219,7 @@ def open_folder(path, *, select=None) -> None:
         except Exception:
             pass
     if select is not None and real_windows:
-        subprocess.Popen(["explorer.exe", f"/select,{os.fspath(select)}"])
+        _select_in_explorer_windows(select, target)
     else:
         opener(target)
     if real_windows and before_titles is not None:

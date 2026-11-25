@@ -22,7 +22,7 @@ def read_flat_page_name(name):
     path = Path(name)
     match = _FLAT_PAGE.search(path.stem)
     if (match and match[2] != "00000" and path.suffix.lower() in EXPORT_IMAGE_EXTENSIONS
-            and path.name == name and name.isprintable() and safe_dirname(name, max_len=255) == name):
+            and path.name == name and safe_dirname(name, max_len=255) == name):
         return match.groups()
     return None
 
@@ -140,7 +140,7 @@ def flatten(directory, photos, check_control):
                 for ext in (".webp", ".png", ".jpg"):
                     source = folder / f"{number:05d}{ext}"
                     if os.path.lexists(source) and not is_link(source) and source.is_file():
-                        confirmed.add(flat.place(source, prefix.replace(" ", "_"), photo_id))
+                        confirmed.add(flat.place(source, re.sub(r"\s+", "_", prefix), photo_id))
                         break
     return confirmed
 

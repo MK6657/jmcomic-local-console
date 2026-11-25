@@ -69,15 +69,19 @@ def _view_job(marker: Path) -> str | None:
     return record['job']
 
 
-def published_path(path: Path, root: Path, *, directory=False) -> Path | None:
+def published_path(path: Path, root: Path, *, directory=False, conn=None) -> Path | None:
     """Legacy paths need no DB row. A managed view is public only while its catalog row points here."""
+    abs_path, abs_root = Path(path).absolute(), Path(root).absolute()
+    lexical_rel = abs_path.is_relative_to(abs_root)
     real, real_root = Path(os.path.realpath(path)), Path(os.path.realpath(root))
-    if (real == real_root or not real.is_relative_to(real_root) or publication.private_path(path, root)
+    if (real == real_root or not real.is_relative_to(real_root)
+            or (lexical_rel and publication.private_path(abs_path, abs_root))
             or publication.private_path(real, real_root) or is_temporary_path(path) or is_temporary_path(real)):
         return None
     seen, managed, registered = set(), False, False
+    passes = ((abs_path, abs_root), (real, real_root)) if lexical_rel else ((real, real_root),)
     try:
-        for candidate, base in ((path.absolute(), root.absolute()), (real, real_root)):
+        for candidate, base in passes:
             parts = candidate.relative_to(base).parts
             managed |= any(part.casefold() == publication.VIEWS for part in parts)
             folders = (candidate, *candidate.parents) if directory else candidate.parents
@@ -90,10 +94,15 @@ def published_path(path: Path, root: Path, *, directory=False) -> Path | None:
                 job = _view_job(folder / '.jm-view.json')
                 if job is None:
                     continue
-                with closing(db.get_db()) as conn:
+                if conn is not None:
                     row = conn.execute('SELECT c.output_path FROM published_tasks p JOIN resource_catalog c '
                                        'ON c.job_id=p.job_id AND c.album_id=p.album_id '
                                        'WHERE p.job_id=? AND c.superseded_at IS NULL', (job,)).fetchone()
+                else:
+                    with closing(db.get_db()) as owned_conn:
+                        row = owned_conn.execute('SELECT c.output_path FROM published_tasks p JOIN resource_catalog c '
+                                                 'ON c.job_id=p.job_id AND c.album_id=p.album_id '
+                                                 'WHERE p.job_id=? AND c.superseded_at IS NULL', (job,)).fetchone()
                 location = Path(os.path.realpath(folder))
                 if (not row or not row[0] or Path(os.path.realpath(row[0])) != location
                         or not real.is_relative_to(location)):

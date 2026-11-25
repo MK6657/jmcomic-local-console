@@ -99,7 +99,19 @@ def _logical_pages(manifest):
 
 
 def _page_identity(info):
-    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink
+    created_ns = getattr(info, 'st_birthtime_ns', info.st_ctime_ns)
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, created_ns, info.st_nlink
+
+
+def _same_view_marker(marker: Path, identity: dict) -> bool:
+    try:
+        info = marker.lstat()
+        if not stat.S_ISREG(info.st_mode) or is_link(marker) or not 0 < info.st_size <= 1024:
+            return False
+        with marker.open('rb') as stream:
+            return json.loads(stream.read(1025)) == identity
+    except (OSError, ValueError, TypeError, RecursionError):
+        return False
 
 
 def _remove_receipt_pages(root, work, receipts):
@@ -144,11 +156,14 @@ def reclaim_work_pages(root, job_id, album_id):
         return
     base = checked(root, Path(WORK, _key(job_id)))
     work = checked(root, base.relative_to(root) / 'pages')
-    if not work.is_dir():
-        return
-    owner = _load(base / 'workspace.json')
-    if not isinstance(owner, dict) or (owner.get('job'), owner.get('album')) != (job_id, album_id):
-        return
+    work_exists = work.is_dir()
+    if work_exists:
+        try:
+            owner = _load(base / 'workspace.json')
+        except (OSError, ValueError):
+            return
+        if not isinstance(owner, dict) or (owner.get('job'), owner.get('album')) != (job_id, album_id):
+            return
     canonical = Path(os.path.realpath(work))
     with closing(db.get_db()) as conn:
         if conn.execute('SELECT job_id FROM jobs WHERE job_id=? UNION ALL '
@@ -162,11 +177,27 @@ def reclaim_work_pages(root, job_id, album_id):
                 if path.is_relative_to(canonical) or canonical.is_relative_to(path):
                     return
         receipts = dict(conn.execute('SELECT page,digest FROM task_page_receipts WHERE job_id=?', (job_id,)))
+    if not work_exists:
+        if receipts:
+            with db.transaction() as conn:
+                conn.execute('DELETE FROM task_page_receipts WHERE job_id=?', (job_id,))
+        return
     resolved = _remove_receipt_pages(root, work, receipts)
     if resolved:
         with db.transaction() as conn:
             conn.executemany('DELETE FROM task_page_receipts WHERE job_id=? AND page=? AND digest=?',
                              [(job_id, name, digest) for name, digest in resolved])
+    for child in list(work.iterdir()):
+        try:
+            if child.is_dir() and not is_link(child):
+                marker = child / CHAPTER_MARKER
+                chapter = re.search(r'__([0-9]{1,20})(?:_[0-9]+)?\Z', child.name)
+                if chapter and set(child.iterdir()) == {marker} and _load(marker).get('photo_id') == chapter[1]:
+                    marker.unlink()
+                if not any(child.iterdir()):
+                    child.rmdir()
+        except (OSError, ValueError, AttributeError):
+            pass
     if not any(work.iterdir()):
         work.rmdir()
 
@@ -334,10 +365,10 @@ class Workspace:
         generation = _key(','.join(map(str, sorted([order, *(r['job_order'] for r in records)]))))
         identity = {'job': self.job, 'generation': generation}
         target = self.target
-        if target.exists():
+        if os.path.lexists(target):
             # Never replace a user's own folder or mutate the previous committed view.
             marker = target / '.jm-view.json'
-            if not (marker.is_file() and _load(marker) == identity):
+            if not (target.is_dir() and not is_link(target) and _same_view_marker(marker, identity)):
                 target = checked(self.root, Path(VIEWS, _key(self.job + ':' + generation), self.target.name))
         entries = [(r['job_order'], r['job_id'], json.loads(r['manifest'])) for r in records]
         entries.append((order, self.job, manifest))
@@ -358,7 +389,7 @@ class Workspace:
                     raise OSError('任务成品记录已不存在')
             source = checked(self.root, (snapshots[owner] / folder / name).relative_to(self.root))
             selected.append((source, Path(chapters[pid]['folder'], name), digest))
-        if not target.exists():
+        if not os.path.lexists(target):
             with self.temporary_tree() as prepare:
                 copy_legacy(legacy, prepare, target.name, check, chapters=chapters, replacement_pages=pages)
                 for pid, p in chapters.items():
@@ -376,7 +407,7 @@ class Workspace:
                     checked(self.root, target.parent.relative_to(self.root), create=True)
                 prepare.rename(target)
         else:
-            if _load(target / '.jm-view.json') != identity:
+            if not (target.is_dir() and not is_link(target) and _same_view_marker(target / '.jm-view.json', identity)):
                 raise OSError('发布目录已被占用')
             # A previous process may have renamed this view and exited before
             # committing. Its marker proves identity, not that every byte survived.
@@ -411,9 +442,21 @@ def record(conn, job, album, publication):
     # A can finish after B despite having been created first. Both catalog entries
     # must resolve the new complete album; their exact task exports remain separate.
     path = conn.execute('SELECT output_path FROM jobs WHERE job_id=?', (job,)).fetchone()[0]
+    different = conn.execute(
+        "SELECT c.job_id, c.title, c.output_path, c.superseded_at FROM resource_catalog c "
+        "JOIN jobs j USING(job_id) WHERE j.album_id=? AND j.status='completed' AND "
+        "(j.title IS NOT c.title OR j.output_path IS NOT c.output_path OR j.superseded_at IS NOT c.superseded_at)",
+        (album,),
+    ).fetchall()
     conn.execute("UPDATE jobs SET output_path=? WHERE album_id=? AND status='completed' AND superseded_at IS NULL "
-                 'AND output_path!=? AND job_id IN (SELECT job_id FROM published_tasks WHERE album_id=?)',
+                 'AND output_path!=? AND job_id IN ('
+                 'SELECT p.job_id FROM published_tasks p JOIN resource_catalog c USING(job_id) '
+                 'WHERE p.album_id=? AND c.superseded_at IS NULL)',
                  (path, album, path, album))
+    conn.executemany(
+        'UPDATE resource_catalog SET title=?, output_path=?, superseded_at=? WHERE job_id=?',
+        ((row['title'], row['output_path'], row['superseded_at'], row['job_id']) for row in different),
+    )
     conn.execute('UPDATE resource_catalog SET output_path=? WHERE album_id=? AND superseded_at IS NULL '
                  'AND job_id IN (SELECT job_id FROM published_tasks WHERE album_id=?)', (path, album, album))
     if payload['auto_pack'] == 'true' or payload['organize_mode'] in ('flat', 'by_author') or payload['directory'] != payload['preferred_directory']:

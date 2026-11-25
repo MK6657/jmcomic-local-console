@@ -21,10 +21,20 @@ def _is_placeholder_title(title: object, album_id: object) -> bool:
 
 
 def _title_from_output_path(output_path: object, album_id: object) -> str:
+    import os
+    from . import path_guard
+    from .publication import WORK
+    from .storage import STAGING_DIRECTORY
+
     raw = str(output_path or '').strip()
     if not raw:
         return ''
-    name = Path(raw).name.strip()
+    path = Path(raw)
+    if any(part.casefold() in (WORK, STAGING_DIRECTORY) for part in path.parts):
+        return ''
+    if os.path.normcase(os.path.abspath(raw)) == os.path.normcase(os.path.abspath(str(path_guard.DOWNLOAD_ROOT))):
+        return ''
+    name = path.name.strip()
     if not name:
         return ''
     aid = str(album_id or '').strip()

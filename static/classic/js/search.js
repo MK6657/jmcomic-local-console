@@ -365,7 +365,7 @@
       html += window.readLink.html(item.album_id, undefined, 'btn-sm flex-fill reader-link');
       html += '</div><div class="d-flex gap-2">';
       html += '<button type="button" class="btn btn-success btn-sm flex-fill" data-action="download" data-album-id="' + escapeHtmlAttr(item.album_id) + '"><i class="bi bi-download"></i> 下载</button>';
-      html += '<button type="button" class="btn btn-sm wishlist-btn btn-outline-warning" data-action="wishlist" data-album-id="' + escapeHtmlAttr(item.album_id) + '" data-title="' + escapeHtmlAttr(item.title) + '" data-author="' + escapeHtmlAttr(item.author) + '" data-cover="' + escapeHtmlAttr(item.cover_url) + '" title="收藏" aria-label="收藏"><i class="bi bi-star"></i></button>';
+      html += '<button type="button" class="btn btn-sm wishlist-btn btn-outline-warning" data-action="wishlist" data-album-id="' + escapeHtmlAttr(item.album_id) + '" data-title="' + escapeHtmlAttr(item.title) + '" data-author="' + escapeHtmlAttr(item.author) + '" data-cover="' + escapeHtmlAttr(item.cover_url) + '" title="收藏" aria-label="收藏" aria-pressed="false"><i class="bi bi-star"></i></button>';
       html += '</div></div>';
 
       html += '</div></div></div>';
@@ -521,7 +521,7 @@
     btn.classList.toggle('btn-warning', starred);
     btn.classList.toggle('btn-outline-warning', !starred);
     btn.title = starred ? '取消收藏' : '收藏';
-    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-pressed', String(!!starred));
   }
 
   function toggleWishlist(btn) {

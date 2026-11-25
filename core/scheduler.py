@@ -77,13 +77,18 @@ def can_auto_schedule() -> bool:
     return is_schedule_time()
 
 
+_armed = False
+_draining = False
+
+
 def start():
     """启动定时调度器后台线程（幂等）"""
-    global _scheduler_thread, _stop_event
+    global _scheduler_thread, _stop_event, _armed
     with _scheduler_lock:
-        if _scheduler_thread is not None and _scheduler_thread.is_alive():
+        if _draining or (_scheduler_thread is not None and _scheduler_thread.is_alive()):
             return
 
+        _armed = True
         # 如果定时调度未启用，不启动线程以节省资源
         enabled = db.get_setting("schedule_enabled", "false")
         if enabled != "true":
@@ -92,21 +97,34 @@ def start():
 
         stop_ev = threading.Event()  # 本线程专属，stop() 只会操作到它
         _stop_event = stop_ev
-        _scheduler_thread = threading.Thread(
+        thread = threading.Thread(
             target=_loop, args=(stop_ev,), daemon=True, name="download-scheduler"
         )
-        _scheduler_thread.start()
+        _scheduler_thread = thread
+        thread.start()
         log.info("定时下载调度器已启动")
 
 
-def stop(timeout=5) -> bool:
-    """Stop within one budget; keep ownership of a still-running scheduler."""
-    global _scheduler_thread
+def request_stop() -> None:
+    """Close admission immediately so concurrent settings saves cannot revive the thread."""
+    global _armed, _draining
+    _armed = False
+    _draining = True
+    _stop_event.set()
+
+
+def _stop_worker(timeout=5, *, disarm=True) -> bool:
+    global _scheduler_thread, _armed, _draining
     deadline = time.monotonic() + max(0, timeout)
+    if disarm:
+        _armed = False
+        _draining = True
     _stop_event.set()
     if not _scheduler_lock.acquire(timeout=max(0, deadline - time.monotonic())):
         return False
     try:
+        if disarm:
+            _armed = False
         _stop_event.set()
         thread = _scheduler_thread
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
@@ -114,6 +132,8 @@ def stop(timeout=5) -> bool:
         if thread is not None and thread.is_alive():
             return False
         _scheduler_thread = None
+        if disarm:
+            _draining = False
         if thread is not None:
             log.info("定时下载调度器已停止")
         return True
@@ -121,18 +141,25 @@ def stop(timeout=5) -> bool:
         _scheduler_lock.release()
 
 
+def stop(timeout=5) -> bool:
+    """Stop within one budget; keep ownership of a still-running scheduler."""
+    return _stop_worker(timeout, disarm=True)
+
+
 def sync_with_settings():
     """根据当前 schedule_enabled 设置启停调度器线程。
 
-    修复：旧版只在应用启动时决定是否启动调度器线程，
-    运行中在设置页开启"定时下载"后线程不会启动（需重启应用才生效）。
-    设置保存/导入后调用本函数即可即时生效。start()/stop() 均幂等。
+    仅在正式运行实例已调用 start() 武装（_armed=True）时生效；
+    create_app() 测试/样书实例或停机排空期间不会意外拉起后台线程。
     """
+    if not _armed or _draining:
+        return
     enabled = db.get_setting("schedule_enabled", "false")
     if enabled == "true":
-        start()
+        if _armed and not _draining:
+            start()
     else:
-        stop()
+        _stop_worker(disarm=False)
 
 
 def _loop(stop_ev: threading.Event):

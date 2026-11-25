@@ -157,9 +157,11 @@ def has_local_pages(folder) -> bool:
     return found is not None and (found[1] == "ok" or found[3])
 
 
-def _folder_state(path: str, job_id: str, now: float, root: list) -> LocalState:
+def _folder_state(path: str, job_id: str, now: float, root: list, *, conn=None) -> LocalState:
     """path（最近一次完成的任务 job_id 的输出目录）的本地状态；目录、任务和压缩包都没变时复用上次的结论。
     root 是本批共用的下载目录真实路径（第一次需要时才解析）。"""
+    from .publication_access import published_path
+
     info = _lstat(path)
     if info is None or not stat.S_ISDIR(info.st_mode) or _is_link(info):
         return MISSING  # 不在了 / 不是目录 / 目录本身是链接：阅读器也打不开
@@ -180,15 +182,18 @@ def _folder_state(path: str, job_id: str, now: float, root: list) -> LocalState:
                 return state
             elif evidence and all(archive_pages._signature(path) == signature for path, signature in evidence):
                 return state      # 压缩包都没变
-    if not root:
-        root.append(path_guard.get_download_root())
+    if published_path(Path(path), path_guard.DOWNLOAD_ROOT, directory=True, conn=conn) is None:
+        with _cache_lock:
+            if len(_cache) >= _CACHE_MAX and key not in _cache:
+                _cache.clear()
+            _cache[key] = (signature, MISSING, None, now)
+        return MISSING
     state, evidence = MISSING, None
-    if is_safe_path(path, root[0]):
-        page = _first_page_evidence(path)
-        if page is not None:
-            state, evidence = LocalState("loose"), page
-        else:
-            state, evidence = _archive_evidence(path)
+    page = _first_page_evidence(path)
+    if page is not None:
+        state, evidence = LocalState("loose"), page
+    else:
+        state, evidence = _archive_evidence(path)
     with _cache_lock:
         if len(_cache) >= _CACHE_MAX and key not in _cache:
             _cache.clear()
@@ -202,15 +207,23 @@ def local_states(album_ids, *, conn=None) -> dict[str, LocalState]:
     ids = [a for a in dict.fromkeys(str(a) for a in album_ids) if validate_numeric(a)][:MAX_IDS]
     if not ids:
         return {}
-    rows = db.resource_records(ids, conn=conn, latest_only=True)
-    states: dict[str, LocalState] = {}
-    now, root = time.monotonic(), []
-    for row in rows:
-        album_id = row["album_id"]
-        if row["superseded_at"] or not row["output_path"]:
-            states[album_id] = MISSING  # 它的目录后来被重新下载重新建出：里面的内容不是这次完成的下载
-        else:
-            states[album_id] = _folder_state(row["output_path"], row["job_id"], now, root)
+    for attempt in range(2 if conn is None else 1):
+        rows = db.resource_records(ids, conn=conn, latest_only=True)
+        states: dict[str, LocalState] = {}
+        now, root = time.monotonic(), []
+        need_move_wait = False
+        for row in rows:
+            album_id = row["album_id"]
+            if row["superseded_at"] or not row["output_path"]:
+                states[album_id] = MISSING  # 它的目录后来被重新下载重新建出：里面的内容不是这次完成的下载
+            else:
+                st = _folder_state(row["output_path"], row["job_id"], now, root, conn=conn)
+                if st is MISSING and attempt == 0:
+                    need_move_wait = True
+                states[album_id] = st
+        if not need_move_wait or attempt == 1:
+            return states
+        path_guard.wait_for_active_move()
     return states
 
 
@@ -252,8 +265,13 @@ def readable_folder(album_id: str) -> str | None:
     album_id = str(album_id)
     if not validate_numeric(album_id):
         return None
-    row = db.get_completed_job_by_album_id(album_id)
-    if row is None or row["superseded_at"] or not row["output_path"]:
-        return None
-    state = _folder_state(row["output_path"], row["job_id"], time.monotonic(), [])
-    return row["output_path"] if state.readable else None
+    for attempt in range(2):
+        row = db.get_completed_job_by_album_id(album_id)
+        if row is None or row["superseded_at"] or not row["output_path"]:
+            return None
+        state = _folder_state(row["output_path"], row["job_id"], time.monotonic(), [])
+        if state.readable:
+            return row["output_path"]
+        if attempt == 0:
+            path_guard.wait_for_active_move()
+    return None

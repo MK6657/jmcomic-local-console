@@ -66,12 +66,28 @@ def merge_stored_settings(stored) -> dict:
     merged["download_root"] = str(DOWNLOAD_ROOT)
     merged["ui_theme"] = normalize_theme(merged.get("ui_theme"))
     merged["ui_fx_preset"] = normalize_fx_preset(merged.get("ui_fx_preset"))
+    client_type = str(merged.get("client_type", "")).strip().lower()
+    merged["client_type"] = client_type if client_type in {"api", "html"} else DEFAULT_SETTINGS["client_type"]
+    organize_mode = str(merged.get("organize_mode", "")).strip()
+    merged["organize_mode"] = organize_mode if organize_mode in {"none", "by_author", "flat"} else "none"
     image_format = str(merged.get("image_format", "")).strip().lower()
     merged["image_format"] = image_format if image_format in {"webp", "png", "jpg"} else "webp"
     pack_format = str(merged.get("pack_format", "")).strip().lower()
     merged["pack_format"] = pack_format if pack_format in {"cbz", "zip"} else "cbz"
-    if str(merged.get("ui_fx_enabled", "")).strip().lower() not in {"true", "false"}:
-        merged["ui_fx_enabled"] = DEFAULT_UI_FX_ENABLED
+    for key, (lo, hi) in (
+        ("timeout", (5, 120)),
+        ("retry_times", (0, 20)),
+        ("max_running_jobs", (1, 5)),
+        ("image_threads", (1, 50)),
+        ("photo_threads", (1, 10)),
+    ):
+        merged[key] = str(_bounded_int(merged, key, lo, hi))
+    for key in (
+        "auto_pack", "delete_originals", "skip_existing", "library_card_click",
+        "auto_update_check", "home_show_recent_downloads", "ui_fx_enabled",
+    ):
+        val = str(merged.get(key, "")).strip().lower()
+        merged[key] = val if val in {"true", "false"} else DEFAULT_SETTINGS[key]
     if merged["auto_pack"] != "true":
         merged["delete_originals"] = "false"
     return merged
@@ -204,11 +220,15 @@ def build_jmcomic_option(settings: dict | None = None) -> dict:
     s = get_settings() if settings is None else settings
     proxy = str(s.get("proxy") or "").strip()
     timeout = _bounded_int(s, "timeout", 5, 120)
+    fmt = str(s.get("image_format") or "webp").strip().lower()
+    image_suffix = {"webp": ".webp", "png": ".png", "jpg": ".jpg", "jpeg": ".jpg"}.get(fmt, ".webp")
+    skip_existing = str(s.get("skip_existing", "true")).strip().lower() != "false"
 
     option = {
         "download": {
+            "cache": skip_existing,
             "image": {
-                "suffix": "original",  # 第一版固定webp
+                "suffix": image_suffix,
             },
             "threading": {
                 "image": _bounded_int(s, "image_threads", 1, 50),

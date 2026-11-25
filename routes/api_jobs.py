@@ -354,6 +354,12 @@ def open_folder(job_id: str):
     if not output_path:
         return jsonify({"status": "error", "message": "该任务尚无输出路径"}), 400
 
+    from core.publication import WORK
+    if any(part.casefold() == WORK for part in Path(output_path).parts):
+        if job.get("status") in _ACTIVE_JOB_STATUSES:
+            return jsonify({"status": "error", "message": "任务正在隔离工作区下载中，完成后即可打开书架目录"}), 400
+        return jsonify({"status": "error", "message": "该任务未生成公开书架目录，可以重新下载"}), 404
+
     if not is_safe_path(output_path):
         return jsonify({"status": "error", "message": "路径安全校验失败"}), 403
 

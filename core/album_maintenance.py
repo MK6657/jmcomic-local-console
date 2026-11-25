@@ -7,13 +7,13 @@ import threading
 import time
 import uuid
 
-from . import database as db
+from . import database as db, path_guard
 from .backup_paths import safe_parts
 from .download_finalize import finalize_published
 from .file_tree import is_link
 from .local_availability import forget
-from .logger import log
-from .path_guard import get_download_root, is_safe_path
+from .logger import log, sanitize
+from .path_guard import MOVE_LOCK as _move_lock, get_download_root, is_safe_path, wait_for_active_move
 from .publication import VIEWS, WORK
 from .storage import STAGING_DIRECTORY
 from .task_commands import TaskCommandError
@@ -23,13 +23,6 @@ from .download_layout import author_output_name
 
 RETRY_DELAYS = (2, 8)
 MAX_ATTEMPTS = len(RETRY_DELAYS) + 1
-_move_lock = threading.Lock()
-
-
-def wait_for_active_move():
-    """等待进行中的目录迁移提交到数据库，避免并发读取落入改名与提交之间。"""
-    with _move_lock:
-        return
 
 
 def _public_path(relative):
@@ -40,13 +33,13 @@ def _public_path(relative):
             or any(part.casefold() in (WORK, STAGING_DIRECTORY) for part in parts)):
         raise ValueError('公开目录路径无效')
     safe_parts(parts, context='公开目录')
-    root = get_download_root()
+    root = Path(os.path.abspath(path_guard.DOWNLOAD_ROOT))
     path = root
     for part in parts:
         path = path / part
         if os.path.lexists(path) and is_link(path):
             raise ValueError('公开目录不能经过链接或目录联接')
-    if not is_safe_path(path, root):
+    if not is_safe_path(path, get_download_root()):
         raise ValueError('公开目录路径越权')
     return path
 
@@ -79,13 +72,13 @@ def public_directory(album_id, conn=None):
 
 
 def statuses(album_ids):
-    ids = tuple(set(album_ids))
+    ids = tuple(str(a) for a in set(album_ids))
     if not ids:
         return {}
     with closing(db.get_db()) as conn:
         rows = conn.execute('SELECT album_id,state,error,generation, CASE WHEN json_valid(payload) THEN '
                             "json_extract(payload,'$._attempt') END AS attempts FROM album_maintenance "
-                            'WHERE album_id IN (' + ','.join('?' for _ in ids) + ')', ids)
+                            'WHERE album_id IN (SELECT value FROM json_each(?))', (json.dumps(ids),))
         return {row['album_id']: {'state': row['state'], 'error': row['error'], 'generation': row['generation'],
                                   'attempts': row['attempts'] or 0, 'max_attempts': MAX_ATTEMPTS} for row in rows}
 
@@ -101,25 +94,38 @@ def failed_without_history(limit=20):
 
 def retry(album_id):
     with db.transaction() as conn:
-        row = conn.execute('SELECT state FROM album_maintenance WHERE album_id=?', (album_id,)).fetchone()
+        row = conn.execute('SELECT state, payload FROM album_maintenance WHERE album_id=?', (album_id,)).fetchone()
         if not row:
             raise TaskCommandError('not_found', '该漫画没有整理记录', 404)
         if row['state'] != 'failed':
             raise TaskCommandError('status', '只有失败的整理任务可以重试', 409)
+        drop_stale_move = False
+        try:
+            payload = json.loads(row['payload'])
+            intent = payload.get('_move') if isinstance(payload, dict) else None
+            if isinstance(intent, dict):
+                source = _public_path(payload['directory'])
+                target = _public_path(intent['to'])
+                if source.is_dir() and not os.path.lexists(target) and _identity(source) != intent.get('identity'):
+                    drop_stale_move = True
+        except Exception:
+            pass
+        remove_fields = "'$._attempt','$._retry_at','$._move'" if drop_stale_move else "'$._attempt','$._retry_at'"
         conn.execute("UPDATE album_maintenance SET state='pending',error='',payload=CASE WHEN json_valid(payload) "
-                     "THEN json_remove(payload,'$._attempt','$._retry_at') ELSE payload END WHERE album_id=?", (album_id,))
+                     f"THEN json_remove(payload,{remove_fields}) ELSE payload END WHERE album_id=?", (album_id,))
 
 
 def claim(excluded_albums=()):
     """Called under JobManager's admission gate; a draining executor also excludes its album."""
-    excluded = tuple(excluded_albums)
-    exclusion = (' AND m.album_id NOT IN (' + ','.join('?' for _ in excluded) + ')') if excluded else ''
+    excluded = tuple(str(a) for a in excluded_albums)
+    exclusion = ' AND m.album_id NOT IN (SELECT value FROM json_each(?))' if excluded else ''
+    params = (time.time(), json.dumps(excluded)) if excluded else (time.time(),)
     with db.transaction() as conn:
         row = conn.execute("SELECT m.* FROM album_maintenance m WHERE m.state='pending' "
                            "AND CASE WHEN json_valid(m.payload) THEN COALESCE(json_extract(m.payload,'$._retry_at'),0) "
                            "ELSE 0 END <= ? AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.album_id=m.album_id "
                            "AND j.status IN ('queued','running','paused'))" + exclusion + ' ORDER BY m.rowid LIMIT 1',
-                           (time.time(), *excluded)).fetchone()
+                           params).fetchone()
         if not row:
             return None
         work = dict(row)
@@ -227,7 +233,7 @@ def _previous_view(path, album_id):
 
 def _organize_location(work, check_control):
     payload = work['payload']
-    root = get_download_root()
+    root = Path(os.path.abspath(path_guard.DOWNLOAD_ROOT))
     source = _public_path(payload['directory'])
     if '_move' not in payload:
         if not source.is_dir():
@@ -285,7 +291,7 @@ def recover():
                 _save(conn, work, 'failed' if exhausted else 'pending', '上次整理被中断')
             except (OSError, KeyError, ValueError, AttributeError, TypeError) as error:
                 conn.execute("UPDATE album_maintenance SET state='failed',error=? WHERE album_id=?",
-                             (str(error)[:500], row['album_id']))
+                             (sanitize(str(error))[:500], row['album_id']))
 
 
 def _published_pages(work):
@@ -308,6 +314,9 @@ def _published_pages(work):
                 folders[pid] = chapter.get('folder')
                 digests = pages.setdefault(pid, {})
                 for name in chapter['files']:
+                    stem_key = Path(name).stem.casefold()
+                    for prev in [k for k in digests if k != name and Path(k).stem.casefold() == stem_key]:
+                        del digests[prev]
                     # Missing evidence in a newer row cannot revive an older digest.
                     digests[name] = chapter.get('digests', {}).get(name)
     return {pid: (folders[pid], digests) for pid, digests in pages.items()}
@@ -337,4 +346,4 @@ def run(work, stop_event):
         if state == 'pending':
             work['payload']['_retry_at'] = time.time() + RETRY_DELAYS[attempts - 1]
         log.warning(f"整册整理失败 album_id={work['album_id']} attempt={attempts} error={error}")
-        _record(work, state, str(error) or type(error).__name__)
+        _record(work, state, sanitize(str(error) or type(error).__name__)[:500])

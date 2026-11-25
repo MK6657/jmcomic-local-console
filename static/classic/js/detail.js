@@ -103,10 +103,10 @@
         html += '<div class="row mt-3">';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-person"></i> 作者：</strong> ' + window.escapeHtml(album.author || '-') + '</div>';
         html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-hash"></i> 车号：</strong> <code>' + window.escapeHtml(album.album_id) + '</code></div>';
-        if (album.views !== undefined) {
+        if (album.views != null && album.views !== '') {
             html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-eye"></i> 观看：</strong> ' + window.escapeHtml(String(album.views)) + '</div>';
         }
-        if (album.likes !== undefined) {
+        if (album.likes != null && album.likes !== '') {
             html += '<div class="col-sm-6 mb-2"><strong><i class="bi bi-heart"></i> 点赞：</strong> ' + window.escapeHtml(String(album.likes)) + '</div>';
         }
         html += '</div>';
@@ -155,7 +155,7 @@
 
         html += '<div class="card-body p-0">';
         if (album.photos && album.photos.length > 0) {
-            html += '<table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" title="全选"></th><th style="width:60px">序号</th><th>章节名</th><th style="width:80px">页数</th><th class="chapter-online"><span class="visually-hidden">在线观看</span></th></tr></thead>';
+            html += '<table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" title="全选" aria-label="全选章节"></th><th style="width:60px">序号</th><th>章节名</th><th style="width:80px">页数</th><th class="chapter-online"><span class="visually-hidden">在线观看</span></th></tr></thead>';
             // 章节行由 fillChapterRows 用 DOM 建（章节更新块里的 chapterRow），刷新章节表时只重建这些行
             html += '<tbody id="chapter-rows"></tbody></table>';
         } else {
@@ -374,13 +374,15 @@
         var cb = updateNode('input', 'form-check-input chapter-checkbox-item');
         cb.type = 'checkbox';
         cb.setAttribute('name', 'chapters');
+        cb.setAttribute('aria-label', '选择第 ' + (idx + 1) + ' 话');
         cb.value = pid;
         cb.checked = !!checked;
         pick.appendChild(cb);
         tr.appendChild(pick);
         tr.appendChild(updateNode('td', null, String(idx + 1)));
         tr.appendChild(updateNode('td', null, (photo && photo.title) || '-'));
-        tr.appendChild(updateNode('td', null, String((photo && photo.page_count) || '?')));
+        var pageText = (photo && photo.page_count != null && photo.page_count_known !== false && photo.page_count !== '') ? String(photo.page_count) : '?';
+        tr.appendChild(updateNode('td', null, pageText));
         var online = updateNode('td', 'chapter-online');
         var link = updateNode('a', 'btn btn-sm btn-outline-primary');
         link.href = '/online/' + encodeURIComponent(String(albumId)) + '?chapter=' + encodeURIComponent(pid);
@@ -1084,6 +1086,7 @@
 
     // 从 bfcache 返回（如 详情 → 下载管理 → 后退）：重新判断是否已下载、重新读检查新章节的状态；
     // 离开时详情请求被 pagehide 中止、页面仍停在加载中的，重新加载
+    window.addEventListener('pagehide', stopUpdatePoll);
     window.addEventListener('pageshow', function (event) {
         if (!event.persisted) return;
         if (rendered) {

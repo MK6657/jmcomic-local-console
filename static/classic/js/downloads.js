@@ -417,9 +417,9 @@
     var groups = { running: [], paused: [], queued: [], completed: [], failed: [] };
     jobs.forEach(function (job) {
       window._jobTitleMap[job.job_id] = job.title || job.album_id || job.job_id;
-      var total = job.total_pages || 1;
-      var done = job.done_pages || 0;
-      job._pct = Math.round(done / total * 100);
+      var total = Number(job.total_pages) || 0;
+      var done = Math.max(0, Number(job.done_pages) || 0);
+      job._pct = total > 0 ? Math.max(0, Math.min(100, Math.round(done / total * 100))) : 0;
       job._path = job.output_path || '';
       job._error = job.error_message || '';
       if (groups[job.status]) groups[job.status].push(job);
@@ -516,7 +516,8 @@
           if (infoEl.textContent !== infoText) infoEl.textContent = infoText;
           var widthText = job._pct + '%';
           if (barEl.style.width !== widthText) barEl.style.width = widthText;
-          if (job.status !== 'paused') {
+          barEl.setAttribute('aria-valuenow', String(job._pct));
+          if (job.status !== 'paused' && pctEl.textContent.indexOf('打包中') === -1) {
             var nextBadge = '<i class="bi-arrow-repeat"></i> ' + job._pct + '%';
             if (pctEl.innerHTML !== nextBadge) pctEl.innerHTML = nextBadge;
           }
@@ -543,6 +544,9 @@
     var badgeIcon = isPaused ? 'bi-pause-circle' : 'bi-arrow-repeat';
     var badgeText = isPaused ? '已暂停' : job._pct + '%';
     var jobIdAttr = escapeHtmlAttr(job.job_id);
+    var total = Number(job.total_pages) || 0;
+    var done = Math.max(0, Number(job.done_pages) || 0);
+    var infoText = total > 0 ? (done + ' / ' + total + ' 页') : '总页数待确认';
 
     var actionButtons = '';
     if (isPaused) {
@@ -555,18 +559,17 @@
         + jobButton('cancel', job, 'btn-outline-danger', '取消', '<i class="bi bi-x-circle"></i> 取消');
     }
 
-    // paused 状态时进度条停止动画
-    var progressClass = isPaused ? 'progress-bar' : 'progress-bar progress-bar-striped progress-bar-animated';
+    var progressClass = isPaused ? 'progress-bar' : 'progress-bar progress-bar-striped';
 
     return '<div class="card job-card shadow-sm mb-3" data-job-id="' + jobIdAttr + '" data-status="' + escapeHtmlAttr(job.status) + '">'
       + '<div class="card-body">'
       + '<div class="d-flex justify-content-between align-items-start mb-2">'
-      + '<div><h6 class="mb-1">' + escapeHtml(job.title) + '</h6>'
-      + '<small class="text-muted" id="info-' + jobIdAttr + '">' + (job.done_pages || 0) + ' / ' + (job.total_pages || 0) + ' 页</small></div>'
+      + '<div><h6 class="mb-1">' + escapeHtml(job.title || job.album_id || job.job_id) + '</h6>'
+      + '<small class="text-muted" id="info-' + jobIdAttr + '">' + infoText + '</small></div>'
       + '<span class="badge ' + badgeClass + '" id="pct-' + jobIdAttr + '"><i class="' + badgeIcon + '"></i> ' + badgeText + '</span>'
       + '</div>'
       + '<div class="progress mb-2">'
-      + '<div id="progress-' + jobIdAttr + '" class="' + progressClass + '" role="progressbar" style="width:' + job._pct + '%"></div>'
+      + '<div id="progress-' + jobIdAttr + '" class="' + progressClass + '" role="progressbar" aria-valuenow="' + job._pct + '" aria-valuemin="0" aria-valuemax="100" aria-label="下载进度" style="width:' + job._pct + '%"></div>'
       + '</div>'
       + '<div class="d-flex justify-content-end">'
       + actionButtons

@@ -8,7 +8,7 @@ class BackupPathError(ValueError):
         self.reason = reason
 
 
-_WINDOWS_RESERVED = {"con", "prn", "aux", "nul",
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", "conin$", "conout$",
                      *(prefix + digit for prefix in ("com", "lpt") for digit in "123456789¹²³")}
 
 
@@ -16,8 +16,10 @@ def safe_parts(parts, *, context="备份") -> tuple[str, ...]:
     result = tuple(parts)
     for part in result:
         if (not part or part in (".", "..") or part.endswith((".", " "))
-                or any(ord(char) < 32 or char in '<>:"/\\|?*' for char in part)
-                or part.split(".", 1)[0].casefold() in _WINDOWS_RESERVED):
+                or len(part.encode("utf-16-le", "surrogatepass")) // 2 > 255
+                or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF or char in '<>:"/\\|?*'
+                       for char in part)
+                or part.split(".", 1)[0].rstrip(" ").casefold() in _WINDOWS_RESERVED):
             raise BackupPathError("unsafe_path", f"{context}：包含无法安全迁移的路径名称")
     return result
 

@@ -458,9 +458,15 @@ def create_backup(database_path, download_root, destination, *, include_download
                     archive.writestr(MANIFEST_MEMBER, encoded)
                     archive.write(snapshot, DATABASE_MEMBER)
                     if include_downloads:
+                        import struct
                         for record in inventory:
                             path = root.joinpath(*record["path"].split("/"))
-                            with archive.open("downloads/" + record["path"], "w", force_zip64=True) as output:
+                            st = path.lstat()
+                            zinfo = zipfile.ZipInfo("downloads/" + record["path"])
+                            zinfo.compress_type = zipfile.ZIP_DEFLATED
+                            zinfo.date_time = time.localtime(max(315532800.0, st.st_mtime))[:6]
+                            zinfo.extra = struct.pack("<HHQ", 0x4A4D, 8, max(0, st.st_mtime_ns))
+                            with archive.open(zinfo, "w", force_zip64=True) as output:
                                 size, digest = _hash_file(path, budget, output)
                             if (size, digest) != (record["size"], record["sha256"]):
                                 raise BackupError("资源文件与备份清单不一致")

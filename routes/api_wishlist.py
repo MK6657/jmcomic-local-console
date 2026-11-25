@@ -37,7 +37,9 @@ _ADDED_AT_ISO = re.compile(
 @api_wishlist_bp.post("/api/wishlist")
 def add_wishlist():
     """添加收藏"""
-    body = request.get_json(force=True)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"status": "error", "message": "请求体需为 JSON 对象"}), 400
     album_id = str(body.get("album_id", "")).strip()
 
     if not album_id:
@@ -165,7 +167,9 @@ def get_single_wishlist(album_id: str):
 @api_wishlist_bp.post("/api/wishlist/check")
 def batch_check_wishlist():
     """批量查询收藏状态"""
-    body = request.get_json(force=True)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"status": "error", "message": "请求体需为 JSON 对象"}), 400
     album_ids = body.get("album_ids", [])
 
     if not album_ids or not isinstance(album_ids, list):
@@ -193,7 +197,9 @@ def batch_download_wishlist():
     """收藏单行的「下载」：整部下载（core.batch_downloads.enqueue_single，一个事务）。
     已有排队 / 下载中 / 已暂停任务的漫画不重复建任务，列在 skipped 里。有新任务时 201，否则 200；
     window 是定时下载时间段现在的状态（任务照常只在时间段内开始）。"""
-    body = request.get_json(force=True)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"status": "error", "message": "请求体需为 JSON 对象"}), 400
     ids = body.get("ids", [])
 
     if not ids or not isinstance(ids, list):
@@ -232,7 +238,9 @@ def batch_download_wishlist():
 @api_wishlist_bp.post("/api/wishlist/import")
 def batch_import_wishlist():
     """批量导入收藏"""
-    body = request.get_json(force=True)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"status": "error", "message": "请求体需为 JSON 对象"}), 400
     raw = body.get("raw", "")
     if not isinstance(raw, str):
         return jsonify(status="error", message="raw 必须是字符串"), 400

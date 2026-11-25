@@ -63,6 +63,14 @@ def _hosts(url):
     return parts, [host for host in candidates if host not in failed] + [host for host in candidates if host in failed]
 
 
+def reset_hosts() -> None:
+    """Clear transient CDN failure cooldowns when network/proxy settings change."""
+    global _good_host
+    with _host_lock:
+        _failed_hosts.clear()
+        _good_host = None
+
+
 def _result(host, success):
     global _good_host
     with _host_lock:

@@ -165,6 +165,8 @@ def process_alive(pid):
             os.kill(pid, 0)
         except ProcessLookupError:
             return False
+        except PermissionError:
+            return True
         return True
     import ctypes
     from ctypes import wintypes
@@ -173,11 +175,23 @@ def process_alive(pid):
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
     if not handle:
         error = ctypes.get_last_error()
         if error == 87:
+            return False
+        if error == 5:
+            limited = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if limited:
+                try:
+                    code = wintypes.DWORD()
+                    if kernel32.GetExitCodeProcess(limited, ctypes.byref(code)):
+                        return code.value == 259  # STILL_ACTIVE
+                finally:
+                    kernel32.CloseHandle(limited)
             return False
         raise ctypes.WinError(error)
     try:
@@ -206,7 +220,13 @@ def stop_outdated_server(pid, timeout=20, port=None, record=None, *, only_if_idl
     if os.name == "nt":
         if current.get("shutdown_protocol") != SHUTDOWN_PROTOCOL:
             raise RuntimeError("旧服务不支持协作停机，请在原启动窗口正常关闭，再启动新版本")
-        if not request_shutdown(current.get("shutdown_token")):
+        try:
+            signaled = request_shutdown(current.get("shutdown_token"))
+        except PermissionError:
+            if only_if_idle:
+                return "既有服务权限较高，已暂缓当前窗口升级。"
+            raise
+        if not signaled:
             raise RuntimeError("未找到该服务的停机通道，已保留进程")
     else:
         os.kill(pid, 15)

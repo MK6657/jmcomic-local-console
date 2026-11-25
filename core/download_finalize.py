@@ -160,7 +160,7 @@ def finalize_published(directory, settings, check_control, save_progress, publis
                 def verify_source():
                     if not _matches_publication(source, *proof):
                         raise ValueError('原图在扁平整理期间发生变化，保留原图')
-                prefix = source.parent.name.rsplit('__', 1)[0].replace(' ', '_') + '__' + photo_id
+                prefix = re.sub(r'\s+', '_', source.parent.name.rsplit('__', 1)[0]) + '__' + photo_id
                 placed = flat.place(source, prefix, photo_id, verify_source=verify_source)
                 # A pre-existing loose duplicate belongs to its owner even when identical.
                 if _signature(placed) == proof[1]:

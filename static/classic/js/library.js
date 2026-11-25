@@ -473,18 +473,22 @@
         if (active && tagCloud.contains(active) && active.dataset.tag !== undefined) focusedTag = active.dataset.tag;
 
         tagCloud.textContent = '';
-        var allBtn = el('button', 'tag-cloud-item tag-all' + (selectedTags.length === 0 ? ' active' : ''), '全部标签 ✕');
+        var allBtn = el('button', 'tag-cloud-item tag-all' + (selectedTags.length === 0 ? ' active' : ''), '全部标签');
         allBtn.type = 'button';
-        allBtn.dataset.action = 'clear-filters';
-        allBtn.title = '清除全部筛选';
+        allBtn.dataset.action = 'clear-tags';
+        allBtn.title = '清除标签条件';
+        allBtn.setAttribute('aria-pressed', String(!selectedTags.length));
         tagCloud.appendChild(allBtn);
 
         var maxCount = 1;
         for (var j = 0; j < allTags.length; j++) {
             if (allTags[j].count > maxCount) maxCount = allTags[j].count;
         }
-        for (var i = 0; i < allTags.length; i++) {
-            var t = allTags[i];
+        var available = new Set(allTags.map(function (tag) { return tag.tag; }));
+        var tags = selectedTags.filter(function (tag) { return !available.has(tag); })
+            .map(function (tag) { return { tag: tag }; }).concat(allTags);
+        for (var i = 0; i < tags.length; i++) {
+            var t = tags[i];
             var count = t.count || 1;
             var ratio = maxCount > 1 ? Math.log(count) / Math.log(maxCount) : 0.5;
             var isActive = selectedTags.indexOf(t.tag) !== -1;
@@ -494,7 +498,7 @@
             item.dataset.tag = t.tag;
             item.setAttribute('aria-pressed', isActive ? 'true' : 'false');
             item.appendChild(document.createTextNode(t.tag + ' '));
-            item.appendChild(el('small', null, '(' + count + ')'));
+            if (t.count != null) item.appendChild(el('small', null, '(' + count + ')'));
             tagCloud.appendChild(item);
             // 重建后把键盘焦点还给刚才操作的标签
             if (focusedTag !== null && t.tag === focusedTag) item.dataset.refocus = '1';
@@ -908,7 +912,13 @@
     tagCloud.addEventListener('click', function (e) {
         var btn = e.target.closest('button');
         if (!btn || !tagCloud.contains(btn)) return;
-        if (btn.dataset.action === 'clear-filters') {
+        if (btn.dataset.action === 'clear-tags') {
+            var changed = selectedTags.length > 0;
+            selectedTags = [];
+            renderTagCloud();
+            updateClearFiltersBtn();
+            if (changed) loadLibrary(1);
+        } else if (btn.dataset.action === 'clear-filters') {
             clearFilters();
         } else if (btn.dataset.tag !== undefined) {
             toggleTag(btn.dataset.tag);

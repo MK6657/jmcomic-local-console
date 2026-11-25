@@ -275,10 +275,25 @@ def cmd_batch(args):
     client, option = get_client(read_only=False)
     try:
         results = download_batch(download_album, ids, option=option)
-        if results.failed or len(results) != len(ids):
-            print(f"\n批量下载未全部完成: {len(results)}/{len(ids)}")
-            if results.failed:
-                print(f"失败车号: {', '.join(results.failed)}")
+        incomplete = []
+        for item in results:
+            if isinstance(item, tuple) and len(item) >= 2:
+                album, dler = item[0], item[1]
+            else:
+                album, dler = getattr(item, "detail", None), getattr(item, "downloader", None)
+            if dler is not None and (
+                not getattr(dler, "all_success", True)
+                or getattr(dler, "download_failed_image", None)
+                or getattr(dler, "download_failed_photo", None)
+            ):
+                aid = getattr(album, "album_id", None) or getattr(album, "id", None)
+                incomplete.append(str(aid) if aid is not None else "unknown")
+        failed_ids = list(dict.fromkeys([*(str(x) for x in results.failed), *incomplete]))
+        succeeded_count = max(0, len(results) - len(incomplete))
+        if failed_ids or len(results) != len(ids):
+            print(f"\n批量下载未全部完成: {succeeded_count}/{len(ids)}")
+            if failed_ids:
+                print(f"失败车号: {', '.join(failed_ids)}")
             return 1
         print(f"\n✅ 批量下载完成: {len(results)}/{len(ids)}")
         return 0

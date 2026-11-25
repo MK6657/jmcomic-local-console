@@ -60,6 +60,11 @@ class TagJobs:
             worker.start()
         return future
 
+    def active_count(self) -> int:
+        with self._lock:
+            self._reap()
+            return len(self._threads)
+
     def request_stop(self):
         with self._lock:
             self._stopped.set()

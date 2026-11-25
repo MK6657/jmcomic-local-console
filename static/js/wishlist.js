@@ -516,7 +516,8 @@
   function showImportModal() {
     document.getElementById('import-raw').value = '';
     document.getElementById('import-result').classList.add('d-none');
-    new bootstrap.Modal(document.getElementById('importModal')).show();
+    var modalEl = document.getElementById('importModal');
+    (bootstrap.Modal.getOrCreateInstance ? bootstrap.Modal.getOrCreateInstance(modalEl) : new bootstrap.Modal(modalEl)).show();
   }
 
   function importAlert(kind) {

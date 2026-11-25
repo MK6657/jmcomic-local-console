@@ -10,11 +10,19 @@
 """
 import os
 from pathlib import Path
+import threading
 
 from .path_utils import get_app_root, get_download_root as configured_download_root
 
 PROJECT_ROOT = get_app_root()
 DOWNLOAD_ROOT = configured_download_root()
+MOVE_LOCK = threading.Lock()
+
+
+def wait_for_active_move() -> None:
+    """等待进行中的目录迁移提交到数据库，避免并发读取落入改名与提交之间。"""
+    with MOVE_LOCK:
+        return
 
 
 def _real_resolve(path: str | Path) -> Path:

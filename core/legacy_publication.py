@@ -195,7 +195,7 @@ def _filtered_archive(archives, prepare, marked, transform, check):
             continue
         pages = [(p, transform(p.name, packed=True)) for p in index.pages
                  if p.chapter in marked and _numbered_page(p.name.rsplit('/', 1)[-1])]
-        if pages:
+        if any(name is not None for _, name in pages):
             _write_pack(index, pages, prepare / name, check)
         break  # the reader used this archive, never a union of older alternatives
 
@@ -241,13 +241,16 @@ def copy_legacy(source, prepare, name, check, *, chapters, replacement_pages):
         for path, dest in packs:
             check()
             index = archive_pages.read_index(path)
+            if index.status == 'corrupt':
+                raise OSError(f'无法核对旧资源包 {path.name}: {index.reason}')
             selected = [(page, transform(page.name, packed=True)) for page in index.pages]
             if any(page.name != target for page, target in selected):
                 if index.skipped:
                     raise OSError(f'无法完整核对旧资源包 {path.name}，保留原书架')
-                _write_pack(index, selected, prepare / dest, check)
-                info = archives[path]
-                os.utime(prepare / dest, ns=(info.st_atime_ns, info.st_mtime_ns))
+                if any(target is not None for _, target in selected):
+                    _write_pack(index, selected, prepare / dest, check)
+                    info = archives[path]
+                    os.utime(prepare / dest, ns=(info.st_atime_ns, info.st_mtime_ns))
             else:
                 _copy(path, prepare / dest, archives[path])
         # Keep other ZIP files as before, unless the new directory name would promote

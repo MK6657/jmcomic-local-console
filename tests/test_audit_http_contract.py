@@ -161,3 +161,44 @@ def test_independent_future_timeout_uses_tag_sync_failure_contract(
     future.result.assert_called_once_with(timeout=20)
     submit.assert_called_once_with(lookup, "123")
     lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("route", [
+    "/api/wishlist",
+    "/api/wishlist/batch-delete",
+    "/api/wishlist/import",
+    "/api/wishlist/download",
+])
+@pytest.mark.parametrize("body", ["[]", '"scalar"', "123", "{bad"])
+def test_wishlist_json_routes_reject_non_object_or_malformed_json_with_400(client, route, body):
+    response = client.post(route, data=body, content_type="application/json")
+    assert_json_error(response, 400)
+
+
+def test_deeply_nested_json_returns_400_without_500_recursion_error(client):
+    nested = "[" * 2000 + "]" * 2000
+    response = client.post("/api/jobs", data=nested, content_type="application/json")
+    assert_json_error(response, 400)
+
+
+@pytest.mark.parametrize("route", ["/api/jobs", "/api/settings", "/api/wishlist"])
+def test_multipart_form_data_rejected_on_non_upload_api_routes(client, route):
+    response = client.post(route, data={"file": (io.BytesIO(b"{}"), "x.json")})
+    assert_json_error(response, 415)
+
+
+def test_tag_cloud_huge_min_count_clamps_without_sqlite_overflow(client):
+    response = client.get("/api/library/tags?min_count=99999999999999999999999999")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "ok" and payload["tags"] == []
+
+
+def test_export_safe_name_clamps_length_and_reserved_windows_names():
+    from routes.api_export import _safe_export_name
+
+    long_name = _safe_export_name("漫" * 300)
+    assert len(long_name) <= 200 and not long_name.endswith((" ", "."))
+    assert _safe_export_name("CON").upper() != "CON"
+    assert _safe_export_name("...") == "export"
+

@@ -195,7 +195,7 @@ code {
   border-top: 1px solid var(--border) !important;
 }
 .modal-title { color: var(--text-primary); }
-.btn-close { filter: none; opacity: var(--btn-close-opacity); }
+.btn-close:not(.btn-close-white) { filter: none; opacity: var(--btn-close-opacity); }
 
 /* ── Alerts ── */
 .alert { border-radius: var(--radius-lg); }

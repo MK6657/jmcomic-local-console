@@ -16,6 +16,7 @@ PATTERNS = (
     "static/**/*.css", "static/**/*.js", "static/**/*.svg", "static/atelier-ui/LICENSE*.txt",
     "static/**/*.woff", "static/**/*.woff2",
     "tools/*.py", "tools/Preview-Atelier.cmd", "tools/windows-portable.manifest",
+    "tools/legacy-vue-transfer/*", "tools/legacy-vue-transfer/src/*",
     "tools/licenses/.gitattributes", "tools/licenses/*/LICENSE*",
     "tests/*.py", "tests/README.md", "tests/checks/*.py", "tests/legacy/*.py",
     "tests/js/*.js", "tests/js/*.cjs", "tests/js/*.mjs",

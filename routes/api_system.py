@@ -48,20 +48,27 @@ def diagnose():
         level = "healthy"
 
         # ── 日志系统状态 ──
-        log_files = sorted(
-            [f for f in LOG_DIR.iterdir() if f.is_file() and f.name.startswith(('app', 'error'))],
-            key=lambda f: f.stat().st_mtime, reverse=True,
-        )
+        stat_entries = []
+        try:
+            for f in LOG_DIR.iterdir():
+                try:
+                    if not f.is_symlink() and f.is_file() and f.name.startswith(('app', 'error')):
+                        st = f.stat()
+                        stat_entries.append((st.st_mtime, st.st_size, f.name))
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        stat_entries.sort(reverse=True)
         total_log_size = 0
         main_files = []
         error_files = []
-        for f in log_files:
-            sz = f.stat().st_size
+        for _, sz, name in stat_entries:
             total_log_size += sz
-            if f.name.startswith('app'):
-                main_files.append({"name": f.name, "size_kb": round(sz / 1024, 1)})
-            elif f.name.startswith('error'):
-                error_files.append({"name": f.name, "size_kb": round(sz / 1024, 1)})
+            if name.startswith('app'):
+                main_files.append({"name": name, "size_kb": round(sz / 1024, 1)})
+            elif name.startswith('error'):
+                error_files.append({"name": name, "size_kb": round(sz / 1024, 1)})
 
         log_status = {
             "main_log": {"files": main_files[:10], "count": len(main_files)},
@@ -115,6 +122,7 @@ def diagnose():
                     # 复用已经发现的网页域名，不在诊断请求中触发额外的域名发现。
                     known_html = getattr(JmModuleConfig, "DOMAIN_HTML", None)
                     domain_list = JmModuleConfig.DOMAIN_HTML_LIST or ([known_html] if known_html else [])
+            proxies = client_config.get("postman", {}).get("meta_data", {}).get("proxies") or {}
             if domain_list:
                 domain = domain_list[0]
                 parsed = urlsplit(domain if "://" in domain else "https://" + domain)
@@ -124,7 +132,6 @@ def diagnose():
                 jm_domain = f"[{host}]" if ":" in host else host
                 if parsed.port is not None:
                     jm_domain += f":{parsed.port}"
-                proxies = client_config.get("postman", {}).get("meta_data", {}).get("proxies") or {}
                 proxy = proxies.get(parsed.scheme) or proxies.get("all")
                 if proxy:
                     tcp_target, jm_reachable, proxy_reachable = "proxy", None, False
@@ -136,6 +143,14 @@ def diagnose():
                         proxy_reachable = True
                     else:
                         jm_reachable = True
+            else:
+                proxy = proxies.get("https") or proxies.get("http") or proxies.get("all")
+                if proxy:
+                    tcp_target, jm_reachable, proxy_reachable = "proxy", None, False
+                    parsed = urlsplit(proxy)
+                    port = parsed.port or (443 if parsed.scheme == "https" else 1080)
+                    with closing(socket.create_connection((parsed.hostname, port), timeout=3)):
+                        proxy_reachable = True
         except Exception:
             issues.append("无法连接已配置的代理端口" if tcp_target == "proxy" else "无法连接 jmcomic 域名端口")
             if level == "healthy":
@@ -179,18 +194,31 @@ def health_ping():
     try:
         with closing(get_db()) as conn:
             if include_activity:
-                activity["jobs"] = dict(_job_activity(conn), executors=job_manager.get_running_count())
+                activity["jobs"] = dict(
+                    _job_activity(conn),
+                    executors=max(job_manager.get_running_count(), job_manager.get_executor_count()),
+                )
             else:
                 conn.execute("SELECT 1").fetchone()
     except Exception:
         return jsonify({"status": "error", "message": "数据库连接不可用", "db": "unreachable", "ts": datetime.now().isoformat()}), 503
+    if include_activity:
+        from core import online_reader
+        from core.tag_jobs import tag_jobs
+        active_clients = (
+            get_in_flight_client_count()
+            + online_reader.in_flight_count()
+            + tag_jobs.active_count()
+        )
+    else:
+        active_clients = get_active_client_count()
     return jsonify({
         "status": "ok",
         "ts": datetime.now().isoformat(),
         "application": "jmcomic-local-console",
         "pid": os.getpid(),
         "instance_id": get_path_config().instance_id(os.environ.get("JMCONSOLE_LAUNCH_TOKEN", "")),
-        "jm_active_clients": get_in_flight_client_count() if include_activity else get_active_client_count(),
+        "jm_active_clients": active_clients,
         **activity,
     })
 

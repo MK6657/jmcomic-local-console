@@ -8,6 +8,8 @@ import time
 
 from .logger import sanitize_fields
 
+_DONE_SENTINEL = object()
+
 
 class ProgressTracker:
     """单个任务的进度跟踪器（支持多客户端独立消费）"""
@@ -22,7 +24,10 @@ class ProgressTracker:
         """SSE 客户端订阅进度事件，返回独立专属队列"""
         q = queue.Queue(maxsize=500)
         with self._lock:
-            self._subscribers.append(q)
+            if self._done:
+                q.put_nowait((_DONE_SENTINEL, None))
+            else:
+                self._subscribers.append(q)
         return q
 
     def unsubscribe(self, q: queue.Queue):
@@ -84,6 +89,8 @@ class ProgressTracker:
                     timeout = min(timeout, remaining)
                 try:
                     event, data = q.get(timeout=timeout)
+                    if event is _DONE_SENTINEL:
+                        continue
                     if deadline is not None and time.monotonic() >= deadline:
                         break
                     yield f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -97,8 +104,20 @@ class ProgressTracker:
             raise
 
     def close(self):
-        self.mark_done()
         with self._lock:
+            self._done = True
+            for q in self._subscribers:
+                try:
+                    q.put_nowait((_DONE_SENTINEL, None))
+                except queue.Full:
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        q.put_nowait((_DONE_SENTINEL, None))
+                    except queue.Full:
+                        pass
             self._subscribers.clear()
 
 

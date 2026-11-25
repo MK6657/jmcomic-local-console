@@ -1,4 +1,4 @@
-# 上游同步与 UI 维护指南（Fresh Eye-Care Atelier v3.5）
+# 上游同步与 UI 维护指南（Fresh Eye-Care Atelier v3.6）
 
 本重构严格采用 **「核心层最小钩子 + 表现层独立隔离」** 分层设计，使后续同步上游 `MK6657/jmcomic-local-console` 提交及 `jmcomic` SDK 版本升级尽可能做到无冲突或极小冲突。目录总览见 [docs/README.md](README.md)。
 

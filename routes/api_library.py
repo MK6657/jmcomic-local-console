@@ -147,7 +147,7 @@ def library_list():
 def tag_cloud():
     """标签云 GET /api/library/tags?min_count="""
     try:
-        min_count = request.args.get("min_count", 1, type=int)
+        min_count = max(1, min(request.args.get("min_count", 1, type=int), 1_000_000))
         tags = db.get_all_tags(min_count=min_count)
         return jsonify({"status": "ok", "tags": tags})
     except Exception as e:

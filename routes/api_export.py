@@ -412,8 +412,10 @@ def _read_archive_page(read, source, budget):
 
 
 def _safe_export_name(name: str) -> str:
-    """生成下载文件名（去除路径分隔符和空格）"""
-    return name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    """生成下载文件名（去除路径分隔符和空格，并限制 Windows 合法长度与保留字）"""
+    from core.validation import safe_filename
+    cleaned = name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    return safe_filename(cleaned, max_len=200) or "export"
 
 
 def _zip_file_chunks(source, budget):

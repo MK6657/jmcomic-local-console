@@ -857,9 +857,30 @@ def _download(url: str, photo_id: str, page: int, deadline: float, background: b
     raise UpstreamTimeout()
 
 
+def in_flight_count() -> int:
+    """Active online-reader operations, chapter lookups, and page prefetches."""
+    with _lifecycle_cond:
+        return _active_operations + _lookup_callbacks + len(_prefetch_active)
+
+
+def evict_stale_clients() -> None:
+    """Immediately close idle pooled clients from older option generations and reset host cooldowns."""
+    global _idle_clients, _last_good_host
+    generation = jm_service.option_generation()
+    with _pool_lock:
+        stale = [client for gen, client in _idle_clients if gen != generation]
+        _idle_clients = [(gen, client) for gen, client in _idle_clients if gen == generation]
+    for old in stale:
+        _close_reader_client(old)
+    with _hosts_lock:
+        _host_failed_at.clear()
+        _last_good_host = None
+
+
 def _describe(error) -> str:
+    from .logger import sanitize
     text = " ".join(str(error).split()).split(" See https://curl.se/")[0]  # 去掉 curl 固定附带的文档链接
-    return f"{type(error).__name__}: {text[:300]}"
+    return f"{type(error).__name__}: {sanitize(text)[:300]}"
 
 
 # ── 预取 ──────────────────────────────────────────────

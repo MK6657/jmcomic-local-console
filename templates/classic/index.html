@@ -53,12 +53,12 @@
                     {% for job in running_jobs %}
                     <div class="mb-3" data-job-id="{{ job.job_id }}" data-status="running">
                         <div class="d-flex justify-content-between mb-1">
-                            <strong>{{ job.title }}</strong>
+                            <strong>{{ job.title or job.album_id }}</strong>
                             <span id="pct-{{ job.job_id }}" class="badge bg-primary">{{ job.percentage }}%</span>
                         </div>
                         <div class="progress">
                             <div id="progress-{{ job.job_id }}"
-                                 class="progress-bar progress-bar-striped progress-bar-animated"
+                                 class="progress-bar progress-bar-striped"
                                  role="progressbar"
                                  style="width: {{ job.percentage }}%"
                                  aria-valuenow="{{ job.percentage }}"
@@ -95,9 +95,9 @@
                     {% for job in recent_jobs %}
                         <div class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
                             <div class="me-2 text-truncate">
-                                <strong>{{ job.title }}</strong>
+                                <strong>{{ job.title or job.album_id }}</strong>
                                 <br>
-                                <small class="text-muted">{{ job.completed_at }}</small>
+                                <small class="text-muted">{{ job.completed_at or '' }}</small>
                             </div>
                             <div class="d-flex align-items-center gap-2 flex-shrink-0">
                                 {% if job.status == 'completed' %}

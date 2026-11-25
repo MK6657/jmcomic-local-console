@@ -692,6 +692,9 @@
 
     // Bind edits before starting the asynchronous refresh of the server-rendered form.
     refreshSettings(0);
+    window.addEventListener('pageshow', function (event) {
+      if (event.persisted && !writeOperation) refreshSettings(editVersion);
+    });
   }
 
   if (document.readyState === 'loading') {

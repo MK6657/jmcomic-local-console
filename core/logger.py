@@ -78,7 +78,7 @@ SENSITIVE_KEYS = {
 _UPPERCASE_PLACEHOLDER_KEYS = {
     "cookie", "token", "authorization", "apikey", "api_key", "refresh_token",
 }
-_AUTHORITY = re.compile(r"\b((?:https?|socks5h?)://)([^/\s?#]+)", re.I)
+_AUTHORITY = re.compile(r"\b((?:https?|socks(?:4a?|5h?))://)((?:\[[^\]]*\]|[^/\s?#\"',;<>()\[\]{}\\|])+)", re.I)
 _CREDENTIAL = re.compile(r"\b(Bearer|Basic)[ \t]+[^\s,'\";}]+", re.I)
 _PRIVATE_HEADER = re.compile(r"(\b(?:(?:(?:set-)?cookie|(?:proxy-)?authorization)[ \t]*:"
                              r"|(?:set-)?cookie[ \t]*=(?=[ \t]*[\w.-]+=))[ \t]*)"
@@ -288,7 +288,14 @@ def _clean_external(record: logging.LogRecord):
     if len(message) > EXTERNAL_MESSAGE_MAX_CHARS:
         prefix = message[:EXTERNAL_MESSAGE_MAX_CHARS]
         if prefix and not prefix[-1].isspace() and not message[len(prefix)].isspace():
-            prefix = prefix[:-len(prefix.rsplit(None, 1)[-1])]
+            parts = prefix.rsplit(None, 1)
+            if len(parts) == 2:
+                prefix = parts[0]
+            elif "://" in prefix:
+                scheme_at = prefix.rfind("://")
+                while scheme_at > 0 and prefix[scheme_at - 1].isalnum():
+                    scheme_at -= 1
+                prefix = prefix[:scheme_at]
         record.msg = f"{sanitize(prefix)}…(已截断 {len(message) - len(prefix)} 字符)"
     else:
         record.msg = sanitize(message)

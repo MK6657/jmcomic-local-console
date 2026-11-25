@@ -202,7 +202,10 @@ class JobManager:
                     self._recover_maintenance = False
                 if not can_auto_schedule():
                     return
-                max_running = int(db.get_setting("max_running_jobs", "1") or 1)
+                try:
+                    max_running = max(1, min(5, int(db.get_setting("max_running_jobs", "1") or 1)))
+                except (TypeError, ValueError):
+                    max_running = 1
                 with self._lock:
                     if self._stop_event.is_set() or len(self._running_jobs) >= max_running:
                         return
@@ -505,6 +508,11 @@ class JobManager:
         """获取当前运行中的任务数量"""
         with self._lock:
             return len(self._running_jobs)
+
+    def get_executor_count(self) -> int:
+        """获取当前运行中的下载任务与整册整理执行器总数"""
+        with self._lock:
+            return len(self._running_jobs) + (1 if self._maintenance_thread else 0)
 
 
 # 全局实例

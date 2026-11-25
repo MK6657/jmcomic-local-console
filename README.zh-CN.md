@@ -1,8 +1,8 @@
-# 藏书阁 · Atelier Edition v3.5
+# 藏书阁 · Atelier Edition v3.6
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-> **当前基线**：`main` 为 **Atelier Edition v3.5**（2026-11-24）；上一版 `v3.4` 主分支基线（提交 `3fedba1`）已完整归档于分支 `archive/main-v3.4` 与标签 `atelier-v3.4-archive-2026-11-24`。
+> **当前基线**：`main` 为 **Atelier Edition v3.6**（2026-11-25），在 `v3.5`（标签 `atelier-v3.5-baseline-2026-11-24`）基础上完成全仓存储、并发、CLI、安全脱敏与双端 UI 深度审计修复；早期 `v3.4` 主分支基线（提交 `3fedba1`）仍完整归档于分支 `archive/main-v3.4` 与标签 `atelier-v3.4-archive-2026-11-24`。
 
 本目录是 Windows 藏书阁版的独立源码。**先看[本版使用说明](docs/ATELIER_WINDOWS.md)**：Windows 包的 `Preview-Atelier.cmd` 打开隔离样书，`JMComic.exe` 打开普通实例；在源码目录可运行 `start-demo-preview.bat` 或 `start.bat`。下文提到的旧版 ZIP、GitHub 分支和验收记录属于后端基线，不是本版下载地址。
 

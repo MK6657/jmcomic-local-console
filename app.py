@@ -266,12 +266,21 @@ def create_app() -> Flask:
                 return jsonify(status="error", message="拒绝跨站请求"), 403
         except ValueError:
             return jsonify(status="error", message="无效主机地址"), 403
-        if request.path.startswith("/api/") and request.is_json:
-            if not isinstance(request.get_json(silent=True), dict):
-                return jsonify(status="error", message="请求体需为 JSON 对象"), 400
-        elif (request.path.startswith("/api/") and request.content_length
-              and request.mimetype != "multipart/form-data"):
-            return jsonify(status="error", message="请使用 application/json 或文件上传"), 415
+        if request.path.startswith("/api/"):
+            upload_endpoint = request.path in {"/api/settings/import", "/api/wishlist/import-file"}
+            if request.is_json:
+                try:
+                    parsed_body = request.get_json(silent=True)
+                except RecursionError:
+                    return jsonify(status="error", message="请求体 JSON 嵌套过深"), 400
+                if not isinstance(parsed_body, dict):
+                    return jsonify(status="error", message="请求体需为 JSON 对象"), 400
+            elif not (upload_endpoint and request.mimetype == "multipart/form-data"):
+                has_body = bool(request.content_length) or (
+                    bool(request.headers.get("Transfer-Encoding")) and bool(request.get_data(cache=True))
+                )
+                if has_body:
+                    return jsonify(status="error", message="请使用 application/json 或文件上传"), 415
 
     # 页面路由
     app.register_blueprint(page_bp)

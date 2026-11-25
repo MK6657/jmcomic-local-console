@@ -87,6 +87,8 @@ def install_catalog(app, books):
                        pages=pages, skipped_chapters=0)
 
     def demo_image(photo_id, index):
+        if not validate_numeric(photo_id):
+            return jsonify(status='error', message='photo_id 必须是纯数字'), 400
         pair = by_chapter.get(photo_id)
         if not pair or not 0 <= index < pair[1]['page_count']:
             return jsonify(status='error', message='样书中没有这一页。'), 404
@@ -94,12 +96,51 @@ def install_catalog(app, books):
         data = render_story_page_bytes(book, chapter['title'], index+1, chapter['page_count'])
         return send_file(io.BytesIO(data), mimetype='image/webp', max_age=86400)
 
+    def demo_retry_maintenance(album_id):
+        import threading
+        from core import album_maintenance
+        from core.task_commands import TaskCommandError
+        if not validate_numeric(album_id):
+            return jsonify(status='error', message='album_id 必须是纯数字'), 400
+        try:
+            album_maintenance.retry(album_id)
+        except TaskCommandError as exc:
+            return jsonify(status='error', reason=exc.reason, message=str(exc)), exc.http_status
+        work = album_maintenance.claim()
+        if work:
+            album_maintenance.run(work, threading.Event())
+        return jsonify(status='ok', album_id=album_id, state='pending', message='已加入整册整理队列'), 202
+
+    def demo_add_wishlist():
+        from core import database as db
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify(status='error', message='请求体需为 JSON 对象'), 400
+        album_id = str(body.get('album_id', '')).strip()
+        if not album_id:
+            return jsonify(status='error', message='缺少 album_id'), 400
+        if not validate_numeric(album_id):
+            return jsonify(status='error', message='album_id 必须是纯数字'), 400
+        book = by_id.get(album_id)
+        title = str(body.get('title', '') or (book['title'] if book else ''))[:500]
+        author = str(body.get('author', '') or (book['author'] if book else ''))[:200]
+        cover_url = str(body.get('cover_url', '') or ('/api/cover/' + album_id if book else ''))[:2000]
+        if not db.add_wishlist(album_id, title, author, cover_url):
+            return jsonify(status='error', message='该漫画已在收藏中',
+                           data={'album_id': album_id, 'title': title, 'author': author}), 409
+        if book and book.get('auto_tags'):
+            db.batch_sync_auto_tags(album_id, list(book['auto_tags']))
+        return jsonify(status='ok', message='已添加到收藏', warnings=[],
+                       data={'album_id': album_id, 'title': title, 'author': author}), 201
+
     # Only this dedicated Flask application serves the synthetic catalog. Real service uses the SDK.
     app.view_functions['api_search.search'] = search
     app.view_functions['api_album.album_detail'] = demo_album_detail
     app.view_functions['api_album.cover_redirect'] = demo_cover
     app.view_functions['api_online.online_album'] = demo_pages
     app.view_functions['api_online.online_image'] = demo_image
+    app.view_functions['api_jobs.retry_maintenance'] = demo_retry_maintenance
+    app.view_functions['api_wishlist.add_wishlist'] = demo_add_wishlist
     app.context_processor(lambda: {'atelier_demo': True})
     app.config['ATELIER_DEMO'] = True
 
@@ -111,6 +152,7 @@ def install_catalog(app, books):
             or (path.startswith('/api/updates/') and path.endswith('/check'))
             or path == '/api/library/tags/sync-all'
             or (path.startswith('/api/library/') and path.endswith('/tags/sync'))
+            or path == '/api/system/clear-cache'
         )
         if blocked_post or path == '/api/system/diagnose':
             return jsonify(status='error', message='此处是离线样书实例。实际下载或联网诊断请在正式实例使用。'), 409
@@ -121,12 +163,13 @@ def run_demo(*, open_browser):
     import time
     import webbrowser
     from flask import request, abort
-    from tools.seed_atelier_demo import seed_demo, demo_lock_name, DEMO_BOOKS
+    from tools.seed_atelier_demo import _resolve_demo_home, seed_demo, demo_lock_name, DEMO_BOOKS
     base = Path(os.environ['LOCALAPPDATA'])
     if not base.is_absolute() or not base.is_dir():
         raise ValueError('没有找到当前用户的本地应用数据目录。')
     # No arbitrary --home, no caller-supplied instance paths, no reset/delete.
-    home = base / 'JMComic-Atelier-Demo-v1'
+    # Resolve 8.3 short paths (e.g. RUNNER~1 on Windows CI) before binding core modules.
+    home = _resolve_demo_home(base / 'JMComic-Atelier-Demo-v1')
     for key in list(os.environ):
         if key.upper().startswith('JMCONSOLE_'):
             del os.environ[key]
@@ -175,6 +218,11 @@ def run_demo(*, open_browser):
                 pass
             finally:
                 server.stop()
+                from core import background_calls, scheduler
+                from core.tag_jobs import tag_jobs
+                tag_jobs.stop(timeout=2)
+                background_calls.stop(timeout=2)
+                scheduler.stop(timeout=2)
     finally:
         lease.close()
     return 0

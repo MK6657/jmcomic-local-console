@@ -480,3 +480,74 @@ def test_cli_invalid_album_id_exits_cleanly_without_opening_client(monkeypatch, 
     acquire.assert_not_called()
 
 
+def test_build_jmcomic_option_maps_valid_image_suffix_and_cache_flag(client):
+    from core import sdk_adapter
+    from core.settings import build_jmcomic_option, merge_stored_settings, update_settings
+
+    for fmt, expected_suffix in [("webp", ".webp"), ("original", ".webp"), ("png", ".png"), ("jpg", ".jpg"), ("jpeg", ".jpg")]:
+        cfg = build_jmcomic_option({"image_format": fmt, "skip_existing": "false"})
+        assert cfg["download"]["image"]["suffix"] == expected_suffix
+        assert cfg["download"]["cache"] is False
+        option = sdk_adapter.build_option(cfg)
+        assert option.download.image.suffix == expected_suffix
+        assert option.download.cache is False
+
+    update_settings({"image_format": "png", "skip_existing": "true"})
+    cfg_default = build_jmcomic_option()
+    assert cfg_default["download"]["image"]["suffix"] == ".png"
+    assert cfg_default["download"]["cache"] is True
+
+    normalized = merge_stored_settings({
+        "client_type": "INVALID",
+        "organize_mode": "unknown_mode",
+        "timeout": "999999",
+        "retry_times": "-5",
+        "max_running_jobs": "0",
+        "skip_existing": "false",
+        "auto_pack": "invalid_bool",
+    })
+    assert normalized["client_type"] == "api"
+    assert normalized["organize_mode"] == "none"
+    assert normalized["timeout"] == "30"
+    assert normalized["retry_times"] == "2"
+    assert normalized["max_running_jobs"] == "1"
+    assert normalized["skip_existing"] == "false"
+    assert normalized["auto_pack"] == "false"
+
+
+@pytest.mark.parametrize("all_success,failed_images,failed_photos,expected", [
+    (True, [], [], 0),
+    (False, [], [], 1),
+    (True, ["img1"], [], 1),
+    (True, [], ["photo1"], 1),
+])
+def test_cli_batch_exit_code_reflects_partial_downloader_failures(
+    monkeypatch, capsys, all_success, failed_images, failed_photos, expected
+):
+    import jmcomic
+    import jmcomic_cli as cli
+    from core import instance_lock
+
+    instance, option = object(), SimpleNamespace(dir_rule=SimpleNamespace())
+    monkeypatch.setattr(cli, "get_client", Mock(return_value=(instance, option)))
+    monkeypatch.setattr(cli, "close_client", Mock())
+    monkeypatch.setattr(instance_lock, "maintenance_lock", nullcontext)
+
+    def fake_download(album_id, passed_option, downloader):
+        dler = SimpleNamespace(
+            all_success=all_success if album_id == "2" else True,
+            download_failed_image=failed_images if album_id == "2" else [],
+            download_failed_photo=failed_photos if album_id == "2" else [],
+        )
+        return jmcomic.DownloadResult(SimpleNamespace(id=album_id), dler)
+
+    monkeypatch.setattr(jmcomic, "download_album", fake_download)
+    assert cli.main(["batch", "1,2"]) == expected
+    out = capsys.readouterr().out
+    if expected == 1:
+        assert "1/2" in out and "2" in out
+    else:
+        assert "2/2" in out
+
+
+

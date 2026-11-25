@@ -36,10 +36,11 @@ def use_root_staging(root: Path) -> bool:
 
 
 def staging_parent(parent: Path) -> Path:
-    from .path_guard import DOWNLOAD_ROOT
+    from .path_guard import DOWNLOAD_ROOT, get_download_root
     # Backup/checkpoint files outside the download tree keep their own volume.
     root = Path(DOWNLOAD_ROOT)
-    return root if parent.is_relative_to(root) and use_root_staging(root) else parent
+    in_download_tree = parent.is_relative_to(root) or Path(os.path.realpath(parent)).is_relative_to(get_download_root())
+    return root if in_download_tree and use_root_staging(root) else parent
 
 
 @contextmanager
@@ -63,14 +64,14 @@ def publication_tree(base: Path, root: Path):
             if (_directory_identity(staging) == identity and temp.parent == staging
                     and _directory_identity(temp) == temp_identity):
                 shutil.rmtree(temp)
-        except FileNotFoundError:
+        except (OSError, ValueError):
             pass
         with _staging_lock:
             try:
                 _check_directories(ancestors)
                 if _directory_identity(staging) == identity:
                     staging.rmdir()  # only if empty; concurrent or interrupted attempts stay intact
-            except OSError:
+            except (OSError, ValueError):
                 pass
 
 

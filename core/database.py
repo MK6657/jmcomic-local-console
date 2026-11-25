@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .path_utils import get_data_dir, get_backup_dir, get_download_root
 from .instance_lock import maintenance_lock
@@ -57,12 +57,16 @@ def get_db() -> sqlite3.Connection:
     """获取数据库连接"""
     DB_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA trusted_schema=OFF")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA trusted_schema=OFF")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 @contextmanager
@@ -75,7 +79,8 @@ def transaction():
         try:
             yield conn
         except BaseException:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
         conn.execute("COMMIT")
     finally:
@@ -388,23 +393,24 @@ def mark_completed_jobs_superseded(album_id: str, output_path: str, by_job_id: s
     写到这个目录的任务，它们下载的文件已经不在了。记下 superseded_at，之后目录里的内容只在写入它的任务完成后
     才算“本地可读”——重新下载失败或被取消时，残缺的几页不会让旧任务重新显示成完整、可离线阅读。
     返回标记的任务数。"""
-    conn = get_db()
-    try:
+    with transaction() as conn:
         rows = conn.execute(
-            "SELECT job_id, output_path FROM resource_catalog WHERE album_id=? "
+            "SELECT job_id, title, output_path FROM resource_catalog WHERE album_id=? "
             "AND superseded_at IS NULL AND job_id != ? AND output_path IS NOT NULL AND output_path != ''",
             (album_id, by_job_id),
         ).fetchall()
-        job_ids = [row["job_id"] for row in rows if _same_path(row["output_path"], output_path)]
-        if job_ids:
+        matched = [row for row in rows if _same_path(row["output_path"], output_path)]
+        if matched:
             now = datetime.now().isoformat()
-            with conn:
-                conn.executemany("UPDATE resource_catalog SET superseded_at=? WHERE job_id=?",
-                                 [(now, j) for j in job_ids])
-                conn.executemany("UPDATE jobs SET superseded_at=? WHERE job_id=?", [(now, j) for j in job_ids])
-        return len(job_ids)
-    finally:
-        conn.close()
+            conn.executemany(
+                "UPDATE jobs SET superseded_at=? WHERE job_id=?",
+                [(now, row["job_id"]) for row in matched],
+            )
+            conn.executemany(
+                "UPDATE resource_catalog SET title=?, output_path=?, superseded_at=? WHERE job_id=?",
+                [(row["title"], row["output_path"], now, row["job_id"]) for row in matched],
+            )
+        return len(matched)
 
 
 def get_jobs_by_status(status: str) -> list[dict]:
@@ -428,13 +434,13 @@ def claim_next_queued_job(excluded_album_ids=()) -> dict | None:
     # Take the write lock before selecting: concurrent claims must select from
     # the committed queue, rather than all waiting to update the same first row.
     with transaction() as conn:
-        excluded_album_ids = tuple(excluded_album_ids)
-        exclusion = (" AND album_id NOT IN (" + ",".join("?" for _ in excluded_album_ids) + ")"
-                     if excluded_album_ids else "")
+        excluded_album_ids = tuple(str(a) for a in excluded_album_ids)
+        exclusion = " AND album_id NOT IN (SELECT value FROM json_each(?))" if excluded_album_ids else ""
+        params = (json.dumps(excluded_album_ids),) if excluded_album_ids else ()
         row = conn.execute(
             "SELECT * FROM jobs WHERE status='queued'" + exclusion
             + " ORDER BY COALESCE(NULLIF(queued_at, ''), created_at, ''), id LIMIT 1",
-            excluded_album_ids,
+            params,
         ).fetchone()
         if not row:
             return None
@@ -932,10 +938,9 @@ def batch_check_wishlist(album_ids: list[str]) -> dict[str, str]:
         return {}
     conn = get_db()
     try:
-        placeholders = ",".join("?" for _ in album_ids)
         rows = conn.execute(
-            f"SELECT album_id, download_status FROM wishlist WHERE album_id IN ({placeholders})",
-            album_ids,
+            "SELECT album_id, download_status FROM wishlist WHERE album_id IN (SELECT value FROM json_each(?))",
+            (json.dumps([str(a) for a in album_ids]),),
         ).fetchall()
         return {r["album_id"]: r["download_status"] for r in rows}
     finally:
@@ -1603,8 +1608,11 @@ _DETAIL_CACHE_TTL = 3600  # 缓存有效期 1 小时
 
 def get_cached_album_detail(album_id: str, ttl: int = 3600) -> dict | None:
     """从 SQLite 读取持久化的专辑详情缓存，过期返回 None。"""
-    cutoff_ts = datetime.now().timestamp() - ttl  # Unix 时间戳（秒）
-    cutoff_iso = datetime.fromtimestamp(cutoff_ts).isoformat()  # ISO 字符串，与 cached_at 列类型一致
+    now = datetime.now()
+    try:
+        cutoff_iso = (now - timedelta(seconds=max(0, ttl))).isoformat()
+    except OverflowError:
+        cutoff_iso = datetime.min.isoformat()
     conn = get_db()
     try:
         row = conn.execute(
@@ -1615,16 +1623,19 @@ def get_cached_album_detail(album_id: str, ttl: int = 3600) -> dict | None:
             return None
         try:
             cached_at = datetime.fromisoformat(row["cached_at"])
+            if cached_at.tzinfo is not None:
+                cached_at = cached_at.astimezone().replace(tzinfo=None)
             detail = json.loads(row["detail_json"])
             if not isinstance(detail, dict):
                 return None
-        except (ValueError, TypeError):
-            return None
-        if (datetime.now() - cached_at).total_seconds() > ttl:
+            if (now - cached_at).total_seconds() > ttl:
+                return None
+            cached_ts = cached_at.timestamp()
+        except (ValueError, TypeError, RecursionError, OSError, OverflowError):
             return None
         return {
             "detail": detail,
-            "cached_at": cached_at.timestamp(),
+            "cached_at": cached_ts,
             "cover_cdn_url": row["cover_cdn_url"] or "",
         }
     finally:

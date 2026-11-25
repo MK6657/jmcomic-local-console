@@ -217,7 +217,7 @@
     lastBurst = now;
     pending = { mode, x: Math.round(event.clientX), y: Math.round(event.clientY) };
     if (!rafId) rafId = requestAnimationFrame(flushBurst);
-  }, { passive: true });
+  }, { capture: true, passive: true });
 
   // Clean up pool immediately when FX is turned off (no whole-page switching animation).
   document.addEventListener('atelier-appearance', () => {

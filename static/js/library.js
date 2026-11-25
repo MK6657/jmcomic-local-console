@@ -238,7 +238,7 @@
 
     // 重建卡片前记住键盘焦点（哪张卡片的第几个控件），重建后还回去。
     // 例如用键盘点“阅读”、再返回时列表会立即重新加载，焦点不会被甩回页面开头；鼠标点出来的焦点不管
-    var FOCUSABLE = 'a[href], button';
+    var FOCUSABLE = 'a[href], button, select';
 
     function rememberKeyboardFocus() {
         var active = document.activeElement;

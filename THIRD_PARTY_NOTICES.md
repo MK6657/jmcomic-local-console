@@ -10,10 +10,10 @@ apply to those components, not automatically to this project's original code.
 - Bootstrap Icons 1.11.3: `static/vendor/bootstrap-icons/`, including icon fonts.
   [Upstream license](https://github.com/twbs/icons/blob/v1.11.3/LICENSE).
   Copyright (c) 2019-2024 The Bootstrap Authors.
-- Vue 3.5.30: the production runtime in `static/atelier-ui/transfer.js` contains
-  Vue, @vue/runtime-core, @vue/runtime-dom, @vue/reactivity, and @vue/shared.
-  The original MIT license for each package is included alongside it in `LICENSE-*.txt`.
-  Vite and TypeScript are used at build time only; they are not required to run the program.
+- Vue 3.5.30 (historical reference): `static/atelier-ui/transfer.js` is now a
+  zero-dependency vanilla JavaScript module; the archived Vue-based reference source
+  under `tools/legacy-vue-transfer/` and its preserved `static/atelier-ui/LICENSE-*.txt`
+  notices retain the original MIT license terms.
 
 Both use the following permission and warranty terms:
 

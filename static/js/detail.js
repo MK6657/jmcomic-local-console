@@ -1065,6 +1065,7 @@
 
     // 从 bfcache 返回（如 详情 → 下载管理 → 后退）：重新判断是否已下载、重新读检查新章节的状态；
     // 离开时详情请求被 pagehide 中止、页面仍停在加载中的，重新加载
+    window.addEventListener('pagehide', stopUpdatePoll);
     window.addEventListener('pageshow', function (event) {
         if (!event.persisted) return;
         if (rendered) {

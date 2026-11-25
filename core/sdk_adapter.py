@@ -298,20 +298,35 @@ def _html_domain(option, config, deadline):
     from . import background_calls, metadata_budget
     from .logger import bind_request_id
     stop = background_calls.stop_event()
-    metadata_budget.remaining(deadline, stop)
-    with _configure_lock:
-        future = getattr(option, "_html_discovery", None)
-        if future is None or (future.done() and (future.cancelled() or future.exception() is not None)):
-            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="html-discovery")
-            try:
-                future = background_calls.submit(pool, bind_request_id(_discover_html), deepcopy(config), deadline, stop)
-                option._html_discovery = future
-            finally:
-                pool.shutdown(wait=False)
-    while not future.done():
-        wait((future,), timeout=min(0.05, metadata_budget.remaining(deadline, stop)))
-    metadata_budget.remaining(deadline, stop)
-    return future.result()
+    base_config = deepcopy(option.client.postman.src_dict)
+    if "verify" in config.get("meta_data", {}):
+        base_config.setdefault("meta_data", {})["verify"] = config["meta_data"]["verify"]
+    while True:
+        metadata_budget.remaining(deadline, stop)
+        launched = False
+        with _configure_lock:
+            future = getattr(option, "_html_discovery", None)
+            if future is None or (future.done() and (future.cancelled() or future.exception() is not None)):
+                pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="html-discovery")
+                try:
+                    future = background_calls.submit(
+                        pool, bind_request_id(_discover_html), deepcopy(base_config), deadline, stop
+                    )
+                    option._html_discovery = future
+                    launched = True
+                finally:
+                    pool.shutdown(wait=False)
+        while not future.done():
+            wait((future,), timeout=min(0.05, metadata_budget.remaining(deadline, stop)))
+        metadata_budget.remaining(deadline, stop)
+        try:
+            return future.result()
+        except TimeoutError:
+            if launched:
+                raise
+            # A shorter-budget peer launched the shared probe and timed out;
+            # retry with our own remaining deadline if any budget remains.
+            continue
 
 
 def new_client(option, domain_list=None, impl=None, cache=None, domain_retry_strategy=None,

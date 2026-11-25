@@ -53,10 +53,24 @@ def cover_redirect(album_id: str):
         if width is None and request.path.endswith("/portrait") and request.args.get("original") != "1":
             width = thumb_cache.DEFAULT_PORTRAIT_WIDTH
 
-        job = get_completed_job_by_album_id(album_id)
-        if job and job.get("output_path") and not job.get("superseded_at"):
-            album_dir = Path(job["output_path"])
-            if album_dir.is_dir() and is_safe_path(album_dir) and not is_link(album_dir):
+        from core import album_maintenance, path_guard
+        from core.publication_access import published_path
+
+        album_dir = None
+        for attempt in range(2):
+            job = get_completed_job_by_album_id(album_id)
+            if job and job.get("output_path") and not job.get("superseded_at"):
+                resolved = published_path(Path(job["output_path"]), path_guard.DOWNLOAD_ROOT, directory=True)
+                if resolved is not None and resolved.is_dir() and not is_link(resolved):
+                    album_dir = resolved
+                    break
+                if attempt == 0:
+                    album_maintenance.wait_for_active_move()
+                    continue
+            break
+
+        if album_dir is not None:
+            if True:
                 loose = scan_page_images(album_dir, check_paths=False)
                 index = archive_pages.select(album_dir)
                 pages = archive_pages.merge_pages(loose, index)

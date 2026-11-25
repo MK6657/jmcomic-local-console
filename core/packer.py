@@ -61,9 +61,14 @@ class CbzPacker(Packer):
     @staticmethod
     def packable_images(source_dir) -> list[Path]:
         """会被打包的散图：图片后缀、非空、不超过阅读器的单页上限（其他的留在原处，也不会被当作已打包的原图删掉）"""
+        root = Path(source_dir)
         images = []
-        for entry in safe_files(Path(source_dir)):
+        for entry in safe_files(root):
             if entry.is_file() and entry.suffix.lower() in EXPORT_IMAGE_EXTENSIONS:
+                rel = entry.relative_to(root).as_posix()
+                parts = rel.split("/")
+                if not rel or len(rel) > archive_pages.MAX_NAME or parts[0] == "__MACOSX" or parts[-1].startswith("._"):
+                    continue
                 size = entry.stat().st_size
                 if 0 < size <= archive_pages.MAX_PAGE_BYTES:
                     images.append(entry)

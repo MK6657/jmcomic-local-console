@@ -213,3 +213,53 @@ def test_install_catalog_serves_offline_detail_cover_and_blocks_live_syncs(app):
         assert resp.status_code == 409, f'{blocked_path} returned {resp.status_code}'
     assert demo_client.get('/api/system/diagnose').status_code == 409
 
+    # Demo online image route validates numeric photo_id
+    assert demo_client.get('/api/online-img/not-a-number/0').status_code == 400
+    assert demo_client.get('/api/online-img/90100101/0').status_code == 200
+
+    # Demo wishlist add stays 100% offline without spawning tag_jobs sync
+    wish_resp = demo_client.post('/api/wishlist', json={'album_id': '901006', 'title': 'Demo Wish'})
+    assert wish_resp.status_code == 201 and wish_resp.get_json()['status'] == 'ok'
+
+    # Classic settings template exposes #settings-reset-btn for parity with Atelier
+    classic_settings = demo_client.get('/settings?ui=classic')
+    assert classic_settings.status_code == 200
+    assert 'id="settings-reset-btn"' in classic_settings.get_data(as_text=True)
+
+
+def test_demo_retry_maintenance_packs_pending_album_offline(tmp_path):
+    home = tmp_path / 'demo_maint_home'
+    run_seed(home)
+    runner = """
+import json, os, socket, sqlite3, sys
+from pathlib import Path
+from curl_cffi.curl import Curl
+def offline(*args, **kwargs):
+    raise AssertionError('demo maintenance retry must stay offline')
+socket.socket.connect = socket.create_connection = Curl.perform = offline
+home = Path(sys.argv[1])
+os.environ['JMCONSOLE_HOME'] = str(home)
+from app import create_app
+from core.atelier_demo import install_catalog
+from tools.seed_atelier_demo import DEMO_BOOKS
+app = create_app()
+app.config['TESTING'] = True
+install_catalog(app, DEMO_BOOKS)
+client = app.test_client()
+resp = client.post('/api/albums/901004/maintenance/retry')
+assert resp.status_code == 202, resp.get_data(as_text=True)
+conn = sqlite3.connect(home / 'runtime/data/app.db')
+state = conn.execute("SELECT state FROM album_maintenance WHERE album_id='901004'").fetchone()[0]
+conn.close()
+cbz_files = [p.name for p in (home / 'downloads').rglob('*901004*.cbz')]
+print(json.dumps({'state': state, 'cbz': cbz_files}, ensure_ascii=False))
+"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith('JMCONSOLE_')}
+    env['PYTHONIOENCODING'] = 'utf-8'
+    res = subprocess.run([sys.executable, '-B', '-c', runner, str(home)],
+                         cwd=demo.ATELIER_ROOT, env=env, encoding='utf-8', capture_output=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.splitlines()[-1])
+    assert out['state'] == 'completed' and len(out['cbz']) == 1
+
+

@@ -81,7 +81,7 @@ def _validate_schema(conn, manifest_version: int, deadline: float) -> dict[str, 
 
 
 def _rewrite_database(path: Path, version: int, source_root: PurePath, final_downloads: Path,
-                      deadline: float) -> tuple[int, int, int]:
+                      deadline: float, include_downloads: bool = False) -> tuple[int, int, int]:
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA trusted_schema=OFF")
@@ -119,6 +119,11 @@ def _rewrite_database(path: Path, version: int, source_root: PurePath, final_dow
             requeued = len(interrupted)
         else:
             requeued = connection.execute("UPDATE jobs SET status='queued' WHERE status='running'").rowcount
+        if version >= 5 and not include_downloads:
+            connection.execute(
+                "UPDATE album_maintenance SET state=CASE WHEN state='running' THEN 'pending' ELSE state END, "
+                "payload=CASE WHEN json_valid(payload) THEN json_remove(payload, '$._move') ELSE payload END"
+            )
         for sql in triggers.values():
             connection.execute(sql)
         connection.commit()
@@ -207,9 +212,11 @@ def _finish_restored_moves(database, version, final_downloads, staged_downloads,
 
 
 def _copy_member(archive, name: str, target: Path, expected: dict, deadline: float) -> None:
+    import struct
     digest = hashlib.sha256()
     size = 0
-    with archive.open(name) as source, target.open("xb") as output:
+    info = archive.getinfo(name)
+    with archive.open(info) as source, target.open("xb") as output:
         while True:
             _check_deadline(deadline)
             block = source.read(1024 * 1024)
@@ -222,6 +229,18 @@ def _copy_member(archive, name: str, target: Path, expected: dict, deadline: flo
             output.write(block)
     if size != expected["size"] or digest.hexdigest() != expected["sha256"]:
         raise RestoreError("invalid_backup", "备份内容与清单不一致，目标实例未发布")
+    if name.startswith("downloads/"):
+        try:
+            if len(info.extra) >= 12:
+                tag, length, mtime_ns = struct.unpack("<HHQ", info.extra[:12])
+                if tag == 0x4A4D and length == 8 and mtime_ns > 0:
+                    os.utime(target, ns=(mtime_ns, mtime_ns))
+                    return
+            if info.date_time > (1980, 1, 1, 0, 0, 0):
+                ts = time.mktime((*info.date_time, 0, 0, -1))
+                os.utime(target, (ts, ts))
+        except (OSError, OverflowError, ValueError):
+            pass
 
 
 def _publish_new_directory(stage: Path, target: Path) -> None:
@@ -294,8 +313,11 @@ def restore_backup(archive_path, target_dir, *, timeout: float = 120) -> Restore
             with _open_backup_zip(handle, lambda: _check_deadline(deadline)) as archive:
                 _copy_member(archive, "app.db", database, manifest["database"], deadline)
                 # Validate schema and all output paths before extracting resources.
-                jobs, resources, requeued = _rewrite_database(database, manifest["schema_version"], source_root,
-                                                              target / "downloads", deadline)
+                jobs, resources, requeued = _rewrite_database(
+                    database, manifest["schema_version"], source_root,
+                    target / "downloads", deadline,
+                    bool(manifest["resources"]["included"]),
+                )
                 restored = 0
                 if manifest["resources"]["included"]:
                     _check_chain(chain)

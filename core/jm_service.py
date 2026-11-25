@@ -91,6 +91,12 @@ def invalidate_option_cache(*, _owned_cleanup=False):
             previous._jm_retired = True
             _retired_clients[id(previous)] = previous
         idle = [client for client in _retired_clients.values() if not getattr(client, "_jm_users", 0)]
+    image_download.reset_hosts()
+    if not _owned_cleanup:
+        import sys
+        reader = sys.modules.get("core.online_reader")
+        if reader is not None and hasattr(reader, "evict_stale_clients"):
+            reader.evict_stale_clients()
     safe = True
     for retired in idle:
         if not _dispose_client(retired):
@@ -104,12 +110,12 @@ def _acquire_client(kind, timeout=None, stop=None):
     """Construct optimistically, publish only into the generation we sampled."""
     global _global_client, _active_independent_clients
     shared = kind == "shared"
-    deadline = metadata_budget.deadline_after(20 if shared else 120)
+    outer_deadline = metadata_budget.deadline_after(20 if shared else 120)
     while True:
         with _option_lock:
             if shared and stop.is_set():
                 raise BackgroundCallsStopped("后台调用正在停止，请稍后重试")
-            metadata_budget.remaining(deadline)
+            metadata_budget.remaining(outer_deadline)
             if shared and _global_client is not None:
                 _global_client._jm_users += 1
                 return _global_client, _global_option
@@ -118,7 +124,7 @@ def _acquire_client(kind, timeout=None, stop=None):
             option = _get_or_create_option(generation)
             if option is None:
                 continue
-        deadline = min(deadline, sdk_adapter.discovery_deadline(option, timeout))
+        deadline = min(outer_deadline, sdk_adapter.discovery_deadline(option, timeout))
         metadata_budget.remaining(deadline, stop)
         overrides = {}
         if kind == "image":

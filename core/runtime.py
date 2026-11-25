@@ -64,10 +64,11 @@ class ApplicationRuntime:
         # gate before draining any service, without holding a service's lock.
         for name, service in (("updates", self.update_checker),
                               *reversed(self.additional_services), ("jobs", self.job_manager)):
-            try:
-                service.request_stop()
-            except Exception as exc:
-                errors.append(f"{name}.request_stop: {type(exc).__name__}")
+            if hasattr(service, "request_stop"):
+                try:
+                    service.request_stop()
+                except Exception as exc:
+                    errors.append(f"{name}.request_stop: {type(exc).__name__}")
 
     def stop(self, timeout=None) -> bool:
         """Request no more downloads, then stop producers and drain jobs in one budget.

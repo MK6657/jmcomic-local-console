@@ -40,6 +40,10 @@
                 }
                 pages = data.pages || [];
                 var albumTitle = data.title || '';
+                if (!pages.length) {
+                    showError('本地没有找到图片', false);
+                    return;
+                }
 
                 // 显示阅读器
                 $('preview-loading').classList.add('d-none');
@@ -50,8 +54,7 @@
                 document.title = albumTitle + ' - JMComic 图片预览';
 
                 renderThumbnails();
-                if (pages.length) goPage(nav.initialPage(albumId), true);
-                else showImageHint('本地没有找到图片', false);
+                goPage(nav.initialPage(albumId), true);
             })
             .catch(function (err) {
                 if (err && err.name === 'AbortError') return; // pagehide 中止，静默

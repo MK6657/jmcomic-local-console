@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import json
 import os
+from pathlib import Path
 
 from . import database as db
 from . import update_store
@@ -161,6 +162,9 @@ def retry_download(job_id: str) -> EnqueueResult:
         except (TypeError, ValueError) as error:
             raise TaskCommandError("invalid_source", "原任务的章节数据无效，无法重新下载", 409) from error
         output_path = source["output_path"]
+        from .publication import WORK
+        if output_path and any(part.casefold() == WORK for part in Path(output_path).parts):
+            output_path = None
         # Preserve the existing completed-job rule: a removed folder must not be
         # recreated merely by opening the new job's folder while it is queued.
         if output_path and source["status"] == "completed" and not os.path.isdir(output_path):

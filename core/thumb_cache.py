@@ -14,6 +14,7 @@ import io
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from .file_tree import is_link
@@ -47,16 +48,51 @@ def parse_width(raw: str | None) -> int | None:
     return ALLOWED_WIDTHS[-1]
 
 
+_prune_lock = threading.Lock()
+
+
 def _prune_if_needed(folder: Path) -> None:
+    if not _prune_lock.acquire(blocking=False):
+        return
     try:
-        entries = [p for p in folder.iterdir() if p.suffix == ".webp" and not is_link(p) and p.is_file()]
-        if len(entries) <= MAX_CACHED_THUMBS:
+        candidates = []
+        now = time.time()
+        with os.scandir(folder) as it:
+            for entry in it:
+                try:
+                    if not entry.name.endswith(".webp") or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                    if is_link(Path(entry.path)):
+                        continue
+                    candidates.append((st.st_mtime, Path(entry.path)))
+                except OSError:
+                    continue
+        if len(candidates) <= MAX_CACHED_THUMBS:
             return
-        entries.sort(key=lambda p: p.stat().st_mtime)
-        for stale in entries[: max(0, len(entries) - PRUNE_TARGET)]:
-            stale.unlink(missing_ok=True)
+        candidates.sort(key=lambda item: item[0])
+        to_remove = len(candidates) - PRUNE_TARGET
+        removed = []
+        for mtime, stale in candidates:
+            if len(removed) >= to_remove:
+                break
+            # Keep freshly written thumbnails so concurrent send_file() calls never hit ENOENT
+            if now - mtime < 10.0:
+                continue
+            try:
+                stale.unlink(missing_ok=True)
+                removed.append(stale)
+            except OSError:
+                continue
+        if removed:
+            dead = set(removed)
+            with _mem_lock:
+                for key in [k for k, v in _mem_hits.items() if v[1] in dead]:
+                    _mem_hits.pop(key, None)
     except OSError:
         pass
+    finally:
+        _prune_lock.release()
 
 
 def _encode_thumbnail(source_bytes: bytes | None, source_path: Path | None, width: int) -> bytes | None:

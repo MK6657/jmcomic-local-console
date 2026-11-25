@@ -3,7 +3,7 @@ name: Windows portable package
 on:
   workflow_dispatch:
   push:
-    branches: [codex/refactor-windows, codex/windows-vnext, codex/atelier-windows]
+    branches: [main, codex/refactor-windows, codex/windows-vnext, codex/atelier-windows]
     tags: ['windows-v*']
     paths:
       - 'app.py'
@@ -81,7 +81,7 @@ jobs:
         run: python tests/checks/check_windows_release.py releases/ci-windows-x64 --check-launcher --check-restore --check-vnext
       - name: Verify Atelier EXE pages, exports, theme persistence and classic UI
         run: python tests/checks/check_atelier_release.py releases/ci-windows-x64/JMComic/JMComic.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: JMComic-windows-x64
           if-no-files-found: error

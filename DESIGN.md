@@ -1,6 +1,6 @@
 ---
-name: 藏书阁 · JMComic 本地控制台（Fresh Eye-Care Atelier v3.5）— 项目设计系统
-version: 3.5
+name: 藏书阁 · JMComic 本地控制台（Fresh Eye-Care Atelier v3.6）— 项目设计系统
+version: 3.6
 description: 清新护眼与个性风格兼备的现代本地漫画控制台规范，内置 9 套经 WCAG AAA/AA 全表面与按钮悬停对比度校验的主题（6 套清新护眼 + 像素/科技/二次元 3 套个性风格），采用四节点复用池与独立交互动效、均衡比例设置页表单栅格，以及单行整合的 CBZ/ZIP/PDF 导出组件。
 
 project_theme:
@@ -985,6 +985,10 @@ Primary(蓝色) / Secondary(暖灰+边框) / Ghost(全透明) / Danger(红色)
 ### 藏书阁 · Atelier Edition v3.5（2026-11-24）
 
 - **基线升级与双版一致性**。在 `v3.4`（归档于 `archive/main-v3.4` / `atelier-v3.4-archive-2026-11-24`）基础上推进至 `v3.5`：统一在 `core.APP_VERSION` 与构建清单 `release.json` 记录 `3.5`；补齐经典版日志查看器的凭据脱敏、设置重置确认契约与进度钳制，补齐连续阅读悬浮快捷栏虚拟滚动锚点及模态框打开时的快捷键防误触，增强离线样书模式的接口隔离与 Windows 非 ASCII 路径下的 TLS 证书兼容，视觉 Token 与护眼锁定规则保持不变。
+
+### 藏书阁 · Atelier Edition v3.6（2026-11-25）
+
+- **全仓深度审计修复与双端细节收口**。升级 `core.APP_VERSION` 至 `3.6`：修复 CLI 图片扩展名映射与批处理部分失败退出码、紧凑多 URL 凭据脱敏、Windows 资源管理器含空格/逗号文件精准高亮、SSE 停机即时唤醒、全量备份纳秒级时间戳还原、扁平整理全角空白归一与私有工作区目录隔离；补齐经典版设置页「恢复默认」按钮、Toast 白色关闭图标对比度、设置页 `pageshow` 与详情页 `pagehide` 生命周期，并移除经典版常驻循环进度条动画、补齐 `prefers-reduced-motion`，严格保持九套主题 Token 与 `project_theme.locked = true` 不变。
 
 本项目已锁定 `project_theme.locked = true`，后续所有 UI 修改必须遵守：
 

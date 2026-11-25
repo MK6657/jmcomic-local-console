@@ -195,7 +195,7 @@ code {
   border-top: 1px solid var(--border) !important;
 }
 .modal-title { color: var(--text-primary); }
-.btn-close { filter: none; opacity: var(--btn-close-opacity); }
+.btn-close:not(.btn-close-white) { filter: none; opacity: var(--btn-close-opacity); }
 
 /* ── Alerts ── */
 .alert { border-radius: var(--radius-lg); }
@@ -1885,4 +1885,17 @@ a.badge.status-badge-warning:hover { text-decoration: underline; }
   font-size: 12px;
   font-weight: 400;
   color: var(--text-secondary);
+}
+
+.progress-bar-animated {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
