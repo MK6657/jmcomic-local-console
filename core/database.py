@@ -387,22 +387,31 @@ def get_completed_job_by_album_id(album_id: str) -> dict | None:
         conn.close()
 
 
-def _same_path(a: str, b: str) -> bool:
+def _same_path(a: str | None, b: str | None) -> bool:
+    if not a or not b:
+        return False
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
-def mark_completed_jobs_superseded(album_id: str, output_path: str, by_job_id: str) -> int:
+def mark_completed_jobs_superseded(
+    album_id: str, output_path: str, by_job_id: str, *, missing_predicate=None,
+) -> int:
     """任务 by_job_id 重新建出了 output_path（原目录已被删除，或只剩没有图片的空壳）：同一部漫画更早完成、
     写到这个目录的任务，它们下载的文件已经不在了。记下 superseded_at，之后目录里的内容只在写入它的任务完成后
     才算“本地可读”——重新下载失败或被取消时，残缺的几页不会让旧任务重新显示成完整、可离线阅读。
     返回标记的任务数。"""
     with transaction() as conn:
         rows = conn.execute(
-            "SELECT job_id, title, output_path FROM resource_catalog WHERE album_id=? "
+            "SELECT job_id, job_order, title, selected_photo_ids, output_path, "
+            "created_at, updated_at, completed_at FROM resource_catalog WHERE album_id=? "
             "AND superseded_at IS NULL AND job_id != ? AND output_path IS NOT NULL AND output_path != ''",
             (album_id, by_job_id),
         ).fetchall()
-        matched = [row for row in rows if _same_path(row["output_path"], output_path)]
+        matched = [
+            row for row in rows
+            if _same_path(row["output_path"], output_path)
+            or (missing_predicate is not None and missing_predicate(row["output_path"]))
+        ]
         if matched:
             now = datetime.now().isoformat()
             conn.executemany(
@@ -410,8 +419,12 @@ def mark_completed_jobs_superseded(album_id: str, output_path: str, by_job_id: s
                 [(now, row["job_id"]) for row in matched],
             )
             conn.executemany(
-                "UPDATE resource_catalog SET title=?, output_path=?, superseded_at=? WHERE job_id=?",
-                [(row["title"], row["output_path"], now, row["job_id"]) for row in matched],
+                "UPDATE resource_catalog SET job_order=?, title=?, selected_photo_ids=?, output_path=?, "
+                "created_at=?, updated_at=?, completed_at=?, superseded_at=? WHERE job_id=?",
+                [(
+                    row["job_order"], row["title"], row["selected_photo_ids"], row["output_path"],
+                    row["created_at"], row["updated_at"], row["completed_at"], now, row["job_id"],
+                ) for row in matched],
             )
         return len(matched)
 
@@ -813,10 +826,12 @@ def _wishlist_keyword_filter(keyword):
     return " AND (title LIKE ? ESCAPE ? OR author LIKE ? ESCAPE ? OR album_id LIKE ? ESCAPE ?)", [like, chr(92)] * 3
 
 
-_WISHLIST_ITEMS_CTE = f"""
+def _wishlist_items_cte(display_where: str = "") -> str:
+    return f"""
     WITH readable_ids(album_id) AS (SELECT value FROM json_each(?)),
-    display AS ({_WISHLIST_DISPLAY_SQL}),
-    facts AS (
+    raw_display AS ({_WISHLIST_DISPLAY_SQL}),
+    display AS (SELECT * FROM raw_display WHERE 1=1{display_where}),
+    facts AS MATERIALIZED (
         SELECT w.id, w.album_id, w.title, w.author, w.cover_url, w.added_at,
                COALESCE(NULLIF(LOWER(TRIM(w.download_status)), ''), 'none') AS download_status,
                w.album_id IN (SELECT album_id FROM readable_ids) AS readable,{_job_facts_sql('w.album_id')}
@@ -834,6 +849,9 @@ _WISHLIST_ITEMS_CTE = f"""
         FROM classified
     )
 """
+
+
+_WISHLIST_ITEMS_CTE = _wishlist_items_cte()
 
 
 def _wishlist_item(row) -> dict:
@@ -869,22 +887,24 @@ def get_all_wishlist(
         status = None
 
     where, keyword_params = _wishlist_keyword_filter((keyword or "").strip())
+    cte = _wishlist_items_cte(where)
     params = [json.dumps(sorted({str(a) for a in (readable_ids or ())})), *keyword_params]
 
     with library_snapshot(conn) as conn:
         counts = {group: 0 for group in WISHLIST_STATUS_GROUPS}
         for row in conn.execute(
-            f"{_WISHLIST_ITEMS_CTE} SELECT filter_group, COUNT(*) FROM items WHERE 1=1{where} "
-            "GROUP BY filter_group", params,
+            f"{cte} SELECT filter_group, COUNT(*) FROM items GROUP BY filter_group", params,
         ):
             counts[row[0]] = row[1]
         total = counts[status] if status else sum(counts.values())
+        status_where = ""
+        query_params = list(params)
         if status:
-            where += " AND filter_group = ?"
-            params.append(status)
+            status_where = " WHERE filter_group = ?"
+            query_params.append(status)
         rows = conn.execute(
-            f"{_WISHLIST_ITEMS_CTE} SELECT * FROM items WHERE 1=1{where} ORDER BY {order} LIMIT ? OFFSET ?",
-            params + [page_size, (page - 1) * page_size],
+            f"{cte} SELECT * FROM items{status_where} ORDER BY {order} LIMIT ? OFFSET ?",
+            query_params + [page_size, (page - 1) * page_size],
         ).fetchall() if total else []
     return {
         "items": [_wishlist_item(r) for r in rows],
@@ -1215,37 +1235,36 @@ def batch_sync_auto_tags(album_id: str, tags: list, *, detail=None) -> int:
     然后插入当前 tags 列表。保留用户自定义标签。
     返回写入的标签数。
     """
-    conn = get_db()
-    try:
-        now = datetime.now().isoformat()
-        # 删除所有 auto 标签
+    now = datetime.now().isoformat()
+    cleaned = list(dict.fromkeys(
+        t for tag in tags if isinstance(tag, str) and (t := tag.strip().lower()[:50])
+    ))
+    with transaction() as conn:
         conn.execute(
             "DELETE FROM album_tags WHERE album_id=? AND source='auto'", (album_id,)
         )
-        # 插入新标签
         count = 0
-        for tag in tags:
-            tag = tag.strip().lower()[:50]
-            if not tag:
-                continue
-            try:
-                conn.execute(
-                    "INSERT INTO album_tags (album_id, tag, source, created_at) VALUES (?, ?, 'auto', ?)",
-                    (album_id, tag, now),
-                )
-                count += 1
-            except sqlite3.IntegrityError:
-                pass
+        for tag in cleaned:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO album_tags (album_id, tag, source, created_at) VALUES (?, ?, 'auto', ?)",
+                (album_id, tag, now),
+            )
+            count += cur.rowcount
         if detail is not None:
             _write_album_meta(conn, album_id, detail.get("title"), detail.get("author"), detail.get("cover"), now)
-        # 更新 album_meta 的同步时间戳
-        conn.execute(
-            "UPDATE album_meta SET tags_synced_at=? WHERE album_id=?", (now, album_id)
-        )
-        conn.commit()
+            conn.execute(
+                "UPDATE album_meta SET tags_synced_at=? WHERE album_id=?", (now, album_id)
+            )
+        else:
+            conn.execute(
+                """INSERT INTO album_meta (album_id, tags_synced_at, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(album_id) DO UPDATE SET
+                       tags_synced_at=excluded.tags_synced_at,
+                       updated_at=excluded.updated_at""",
+                (album_id, now, now),
+            )
         return count
-    finally:
-        conn.close()
 
 
 def clear_album_tags(album_id: str, source: str | None = None) -> int:
@@ -1274,15 +1293,21 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
 
 
-def _make_kw_combined_sql(kw: str, *, include_extracted_id: bool = False) -> str:
+def _has_non_ascii_case(text: str) -> bool:
+    return any(ord(ch) > 127 and ch.lower() != ch.upper() for ch in text)
+
+
+def _make_kw_combined_sql(kw: str, *, include_extracted_id: bool = False, unicode_variants: int = 1) -> str:
     """生成关键词 OR 组合过滤子句（标题/作者/ID 或 标签匹配任一即可）"""
     if not kw:
         return ""
     id_clause = "OR ai.album_id = ?" if include_extracted_id else ""
+    title_clause = " OR ".join(["LOWER(ai.title) LIKE ? ESCAPE ?"] * unicode_variants)
+    author_clause = " OR ".join(["LOWER(ai.author) LIKE ? ESCAPE ?"] * unicode_variants)
     return f"""
         AND (
-            LOWER(ai.title) LIKE ? ESCAPE ?
-            OR LOWER(ai.author) LIKE ? ESCAPE ?
+            ({title_clause})
+            OR ({author_clause})
             OR ai.album_id LIKE ? ESCAPE ?
             {id_clause}
             OR EXISTS (
@@ -1328,9 +1353,16 @@ def _library_matches(tag, keyword, author, album_id=None):
     author = (author or "").strip()
     tag_having_sql = ""
     params = []
+    kw_variants = [kw]
     if kw:
+        if _has_non_ascii_case(raw_kw):
+            kw_variants = list(dict.fromkeys((raw_kw, kw, raw_kw.upper())))
+        for variant in kw_variants:
+            params.extend((f"%{_escape_like(variant)}%", chr(92)))
+        for variant in kw_variants:
+            params.extend((f"%{_escape_like(variant)}%", chr(92)))
         like_pair = [f"%{_escape_like(kw)}%", chr(92)]
-        params.extend(like_pair * 3)
+        params.extend(like_pair)
         if include_extracted_id:
             params.append(extracted_id)
         params.extend(like_pair)
@@ -1344,8 +1376,16 @@ def _library_matches(tag, keyword, author, album_id=None):
             ) = ?
         """
         params.extend([*wanted_tags, len(wanted_tags)])
+    author_sql = ""
     if author:
-        params.append(author)
+        if _has_non_ascii_case(author):
+            author_variants = list(dict.fromkeys((author, author.lower(), author.upper())))
+            author_placeholders = ",".join(["LOWER(?)"] * len(author_variants))
+            author_sql = f"AND LOWER(TRIM(ai.author)) IN ({author_placeholders})"
+            params.extend(author_variants)
+        else:
+            author_sql = "AND LOWER(TRIM(ai.author)) = LOWER(?)"
+            params.append(author)
     if album_id:
         params.append(album_id)
     sql = f"""
@@ -1385,9 +1425,9 @@ def _library_matches(tag, keyword, author, album_id=None):
         _matched AS (
             SELECT ai.* FROM all_items ai
             WHERE 1=1
-              {_make_kw_combined_sql(kw, include_extracted_id=include_extracted_id)}
+              {_make_kw_combined_sql(kw, include_extracted_id=include_extracted_id, unicode_variants=len(kw_variants))}
               {tag_having_sql}
-              {"AND LOWER(TRIM(ai.author)) = LOWER(?)" if author else ""}
+              {author_sql}
               {"AND ai.album_id = ?" if album_id else ""}
         )
     """
@@ -1432,9 +1472,12 @@ def get_library(
         # ── 排序子句 ──
         sort_lower = sort.lower()
         if sort_lower == "title":
-            order_clause = "ORDER BY LOWER(_base.title) ASC, _base.album_id ASC"
+            order_clause = "ORDER BY TRIM(_base.title) = '' ASC, LOWER(_base.title) ASC, _base.album_id ASC"
         elif sort_lower == "added_at":
-            order_clause = "ORDER BY _base.added_at DESC, _base.album_id ASC"
+            order_clause = (
+                "ORDER BY _base.is_wishlisted DESC, _base.added_at IS NULL ASC, "
+                "_base.added_at DESC, _base.album_id ASC"
+            )
         elif sort_lower == "album_id":
             order_clause = "ORDER BY _base.album_id ASC"
         elif sort_lower == "author":
@@ -1451,7 +1494,7 @@ def get_library(
         if status:
             # 按状态筛选：先按其他条件缩小范围，再给每条算出与收藏相同的分组（_status_group_sql）
             cte_sql += f""",
-            _facts AS (
+            _facts AS MATERIALIZED (
                 SELECT m.*,
                        m.album_id IN (SELECT value FROM json_each(?)) AS readable,
                        COALESCE(NULLIF(LOWER(TRIM(w.download_status)), ''), 'none') AS legacy_status,{_job_facts_sql('m.album_id')}

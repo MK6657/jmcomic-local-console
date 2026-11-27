@@ -144,7 +144,7 @@
     clear(box);
     box.className = 'log-viewer-status' + (kind ? ' log-viewer-status--' + kind : '');
     if (kind === 'loading') {
-      var spinner = el('span', 'spinner-border spinner-border-sm');
+      var spinner = el('i', 'bi bi-hourglass');
       spinner.setAttribute('aria-hidden', 'true');
       box.appendChild(spinner);
     } else if (kind === 'error') {

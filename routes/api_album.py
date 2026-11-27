@@ -38,7 +38,7 @@ def _remember_cover_key(album_id: str, entry: tuple[str, int, str, int, int, str
             _cover_key_cache.popitem(last=False)
 
 
-def _lookup_fast_cover_thumb(album_id: str, album_dir: Path, width: int) -> Path | None:
+def _lookup_fast_cover_thumb(album_id: str, album_dir: Path, width: int | None) -> tuple[Path, str] | None:
     try:
         dir_mtime_ns = album_dir.stat().st_mtime_ns
     except OSError:
@@ -58,7 +58,16 @@ def _lookup_fast_cover_thumb(album_id: str, album_dir: Path, width: int) -> Path
         return None
     if st.st_mtime_ns != verify_mtime or st.st_size != verify_size:
         return None
-    return thumb_cache.get_cached_thumbnail(cache_key=cache_key, width=width)
+    if width is not None:
+        thumb = thumb_cache.get_cached_thumbnail(cache_key=cache_key, width=width)
+        if thumb is not None:
+            return thumb, "image/webp"
+    if cache_key.startswith("file:"):
+        direct = Path(verify_str)
+        if width is None or thumb_cache._lookup_cached((get_cache_dir() / "thumbs", cache_key, width)) == (True, None):
+            if is_safe_path(direct) and not is_link(direct):
+                return direct, get_image_mime(direct.suffix.lower())
+    return None
 
 
 def _send_bytes_thumb(data: bytes):
@@ -114,10 +123,13 @@ def cover_redirect(album_id: str):
             break
 
         if album_dir is not None:
-            if width is not None:
-                fast_thumb = _lookup_fast_cover_thumb(album_id, album_dir, width)
-                if fast_thumb is not None:
-                    return send_file(str(fast_thumb), mimetype="image/webp", max_age=0)
+            fast_hit = _lookup_fast_cover_thumb(album_id, album_dir, width)
+            if fast_hit is not None:
+                fast_path, fast_mime = fast_hit
+                try:
+                    return send_file(str(fast_path), mimetype=fast_mime, max_age=0)
+                except FileNotFoundError:
+                    pass
             dir_mtime_ns = album_dir.stat().st_mtime_ns
             loose = scan_page_images(album_dir, check_paths=False)
             index = archive_pages.select(album_dir)
@@ -128,16 +140,26 @@ def cover_redirect(album_id: str):
                     version = archive_pages.version(index)
                     arc_key = f"arc:{album_id}:{version}:{first_page.name}"
                     arc_path = getattr(index, "path", None)
+                    etag = f"{version}-cover"
                     if width is not None:
                         cached_thumb = thumb_cache.get_cached_thumbnail(cache_key=arc_key, width=width)
                         if cached_thumb is not None:
-                            if arc_path is not None:
-                                arc_st = os.stat(arc_path)
-                                _remember_cover_key(
-                                    album_id,
-                                    (str(album_dir), dir_mtime_ns, str(arc_path), arc_st.st_mtime_ns, arc_st.st_size, arc_key),
-                                )
-                            return send_file(str(cached_thumb), mimetype="image/webp", max_age=0)
+                            try:
+                                resp = send_file(str(cached_thumb), mimetype="image/webp", max_age=0)
+                                if arc_path is not None:
+                                    arc_st = os.stat(arc_path)
+                                    _remember_cover_key(
+                                        album_id,
+                                        (str(album_dir), dir_mtime_ns, str(arc_path), arc_st.st_mtime_ns, arc_st.st_size, arc_key),
+                                    )
+                                return resp
+                            except FileNotFoundError:
+                                pass
+                    elif request.if_none_match.contains_weak(etag) and archive_pages.can_revalidate(index, first_page):
+                        resp = make_response("", 304)
+                        resp.set_etag(etag)
+                        resp.headers["Cache-Control"] = "public, max-age=0"
+                        return resp
                     raw = archive_pages.read_page(index, first_page)
                     if width is not None:
                         resized = thumb_cache.get_or_build_thumbnail(
@@ -146,38 +168,50 @@ def cover_redirect(album_id: str):
                             source_bytes=raw,
                         )
                         if isinstance(resized, Path):
-                            if arc_path is not None:
-                                arc_st = os.stat(arc_path)
-                                _remember_cover_key(
-                                    album_id,
-                                    (str(album_dir), dir_mtime_ns, str(arc_path), arc_st.st_mtime_ns, arc_st.st_size, arc_key),
-                                )
-                            return send_file(str(resized), mimetype="image/webp", max_age=0)
+                            try:
+                                resp = send_file(str(resized), mimetype="image/webp", max_age=0)
+                                if arc_path is not None:
+                                    arc_st = os.stat(arc_path)
+                                    _remember_cover_key(
+                                        album_id,
+                                        (str(album_dir), dir_mtime_ns, str(arc_path), arc_st.st_mtime_ns, arc_st.st_size, arc_key),
+                                    )
+                                return resp
+                            except FileNotFoundError:
+                                pass
                         if isinstance(resized, bytes):
                             return _send_bytes_thumb(resized)
                     mime = get_image_mime(first_page.suffix)
                     log.debug(f"API封面返回本地归档首页 album_id={album_id}")
-                    return send_file(io.BytesIO(raw), mimetype=mime, max_age=0, etag=f"{version}-cover")
+                    return send_file(io.BytesIO(raw), mimetype=mime, max_age=0, etag=etag)
                 except archive_pages.ArchiveError:
                     pass
             if loose and is_safe_path(loose[0][1]):
                 first_img = loose[0][1]
+                st = first_img.stat()
+                file_key = f"file:{first_img}:{st.st_mtime_ns}:{st.st_size}"
                 if width is not None:
-                    st = first_img.stat()
-                    file_key = f"file:{first_img}:{st.st_mtime_ns}:{st.st_size}"
                     resized = thumb_cache.get_or_build_thumbnail(
                         cache_key=file_key,
                         width=width,
                         source_path=first_img,
                     )
                     if isinstance(resized, Path):
-                        _remember_cover_key(
-                            album_id,
-                            (str(album_dir), dir_mtime_ns, str(first_img), st.st_mtime_ns, st.st_size, file_key),
-                        )
-                        return send_file(str(resized), mimetype="image/webp", max_age=0)
+                        try:
+                            resp = send_file(str(resized), mimetype="image/webp", max_age=0)
+                            _remember_cover_key(
+                                album_id,
+                                (str(album_dir), dir_mtime_ns, str(first_img), st.st_mtime_ns, st.st_size, file_key),
+                            )
+                            return resp
+                        except FileNotFoundError:
+                            pass
                     if isinstance(resized, bytes):
                         return _send_bytes_thumb(resized)
+                _remember_cover_key(
+                    album_id,
+                    (str(album_dir), dir_mtime_ns, str(first_img), st.st_mtime_ns, st.st_size, file_key),
+                )
                 mime = get_image_mime(first_img.suffix.lower())
                 log.debug(f"API封面返回本地文件 album_id={album_id}")
                 return send_file(str(first_img), mimetype=mime, max_age=0)

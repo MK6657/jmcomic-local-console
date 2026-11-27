@@ -2,6 +2,7 @@ from . import database as db
 from .background_calls import BackgroundCallsStopped
 from .jm_service import get_album_detail_cached
 from .logger import log
+from .metadata_budget import MetadataStopped
 from .tag_jobs import tag_jobs
 from .upstream import UpstreamFailure
 
@@ -23,6 +24,13 @@ def sync_one(album_id, detail=None):
         save_tags(album_id, detail if detail is not None else get_album_detail_cached(album_id))
     except BackgroundCallsStopped:
         raise
+    except MetadataStopped as exc:
+        raise BackgroundCallsStopped(str(exc)) from exc
+    except UpstreamFailure as exc:
+        if exc.kind == "stopping":
+            raise BackgroundCallsStopped(str(exc)) from exc
+        log.warning(f"同步标签失败 album_id={album_id} error={exc}")
+        return False
     except Exception as exc:
         log.warning(f"同步标签失败 album_id={album_id} error={exc}")
         return False

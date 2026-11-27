@@ -120,6 +120,8 @@ def _rewrite_database(path: Path, version: int, source_root: PurePath, final_dow
         else:
             requeued = connection.execute("UPDATE jobs SET status='queued' WHERE status='running'").rowcount
         if version >= 5 and not include_downloads:
+            connection.execute("DELETE FROM task_page_receipts")
+            connection.execute("DELETE FROM published_tasks")
             connection.execute(
                 "UPDATE album_maintenance SET state=CASE WHEN state='running' THEN 'pending' ELSE state END, "
                 "payload=CASE WHEN json_valid(payload) THEN json_remove(payload, '$._move') ELSE payload END"
@@ -184,15 +186,26 @@ def _finish_restored_moves(database, version, final_downloads, staged_downloads,
             payload = move.payload
             if phases[move.album_id] == "at_target":
                 source, target = (final_downloads.joinpath(*parts) for parts in (move.source, move.target))
-                connection.execute("UPDATE jobs SET output_path=? WHERE album_id=? AND status='completed' AND "
-                                   "job_id IN (SELECT p.job_id FROM published_tasks p JOIN resource_catalog c USING(job_id) "
-                                   "WHERE p.album_id=? AND c.output_path=? AND c.superseded_at IS NULL)",
-                                   (str(target), move.album_id, move.album_id, str(source)))
+                source_norm = os.path.normcase(os.path.abspath(source))
+                matched_jobs = [
+                    row[0] for row in connection.execute(
+                        "SELECT p.job_id, c.output_path FROM published_tasks p JOIN resource_catalog c USING(job_id) "
+                        "WHERE p.album_id=? AND c.superseded_at IS NULL AND c.output_path IS NOT NULL",
+                        (move.album_id,),
+                    ).fetchall()
+                    if row[1] and os.path.normcase(os.path.abspath(row[1])) == source_norm
+                ]
+                if matched_jobs:
+                    placeholders = ",".join("?" for _ in matched_jobs)
+                    connection.execute(
+                        f"UPDATE jobs SET output_path=? WHERE album_id=? AND status='completed' AND job_id IN ({placeholders})",
+                        (str(target), move.album_id, *matched_jobs),
+                    )
                 for table in output_path_tables(version):
                     for (path,) in connection.execute(f"SELECT DISTINCT output_path FROM {table} WHERE album_id=?",
                                                       (move.album_id,)).fetchall():
                         _check_deadline(deadline)
-                        if path and Path(path) == source:
+                        if path and os.path.normcase(os.path.abspath(path)) == source_norm:
                             connection.execute(f"UPDATE {table} SET output_path=? WHERE album_id=? AND output_path=?",
                                                (str(target), move.album_id, path))
                 relative = "/".join(move.target)

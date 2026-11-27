@@ -133,7 +133,10 @@
           var target = nav.onlinePageUrl(albumId, page);
           var link = document.createElement('a');
           link.href = target.url; link.className = retry.className;
-          link.textContent = target.exact ? '在线阅读这一页' : '在线阅读';
+          var icon = document.createElement('i');
+          icon.className = 'bi bi-globe2'; icon.setAttribute('aria-hidden', 'true');
+          link.appendChild(icon);
+          link.appendChild(document.createTextNode(' ' + (target.exact ? '在线阅读这一页' : '在线阅读')));
           retry.replaceWith(link);
         }
       });
@@ -252,7 +255,7 @@
     ? nav.bindWidthToggle(root, byId('reader-width-btn'), function () { dirty = true; schedule(); })
     : null;
   document.addEventListener('keydown', function (event) {
-    if (event.key === 'Escape') { showTools(false); return; }
+    if (event.key === 'Escape') { if (!event.defaultPrevented) showTools(false); return; }
     if (!nav.plainKey(event)) return;
     if (event.key.toLowerCase() === 'w' && !event.repeat && cycleWidth) { event.preventDefault(); cycleWidth(); return; }
     var dest = { ArrowLeft: current - 1, ArrowRight: current + 1, Home: 1, End: pages.length }[event.key];

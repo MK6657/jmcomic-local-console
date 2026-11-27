@@ -18,7 +18,7 @@
     <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
     <!-- Bootstrap Icons -->
     <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css">
-    <!-- 自定义样式（Fresh Eye-Care & Style Studio v3.6） -->
+    <!-- 自定义样式（Fresh Eye-Care & Style Studio v{{ app_version | default('3.7') }}） -->
     <link rel="stylesheet" href="{{ asset_url('css/style.css') }}">
     <link rel="stylesheet" href="{{ asset_url('css/atelier.css') }}">
     <link rel="stylesheet" href="{{ asset_url('css/atelier-fx.css') }}">
@@ -66,7 +66,7 @@
         </div>
         <div class="mineral-stones">
         {% for spec in ui_themes %}
-            <button type="button" class="stone-btn" data-set-theme="{{ spec.key }}" aria-pressed="{{ 'true' if ui_theme == spec.key else 'false' }}" data-scheme="{{ 'dark' if spec.is_dark else 'light' }}" data-default-fx="{{ spec.default_fx }}" title="{{ spec.full_label }}" aria-label="切换主题：{{ spec.full_label }}"></button>
+            <button type="button" class="stone-btn" data-set-theme="{{ spec.key }}" aria-pressed="{{ 'true' if ui_theme == spec.key else 'false' }}" data-scheme="{{ spec.scheme }}" data-default-fx="{{ spec.default_fx }}" title="{{ spec.full_label }}" aria-label="切换主题：{{ spec.full_label }}"></button>
         {% endfor %}
         </div>
     </div>

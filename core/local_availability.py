@@ -193,8 +193,12 @@ def _folder_state(path: str, job_id: str, now: float, root: list, *, conn=None) 
                 return state
             elif evidence and all(archive_pages._signature(path) == signature for path, signature in evidence):
                 return state      # 压缩包都没变
-    if published_path(Path(path), path_guard.DOWNLOAD_ROOT, directory=True, conn=conn) is None:
-        _remember_cache(key, (signature, MISSING, None, now))
+    if not root:
+        dl_root = path_guard.DOWNLOAD_ROOT
+        root.append((Path(dl_root).absolute(), Path(os.path.realpath(dl_root))))
+    if published_path(Path(path), path_guard.DOWNLOAD_ROOT, directory=True, conn=conn, _resolved_root=root[0]) is None:
+        if conn is None:
+            _remember_cache(key, (signature, MISSING, None, now))
         return MISSING
     state, evidence = MISSING, None
     page = _first_page_evidence(path)

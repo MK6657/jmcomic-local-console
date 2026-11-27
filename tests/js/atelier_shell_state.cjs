@@ -20,7 +20,7 @@ async function run() {
   };
   const stones = Object.fromEntries(themes.map(theme => {
     const stone = new EventTarget();
-    stone.dataset = { setTheme: theme };
+    stone.dataset = { setTheme: theme, scheme: darkThemes.has(theme) ? 'dark' : 'light' };
     stone.setAttribute = (key, value) => { stone[key] = value; };
     return [theme, stone];
   }));

@@ -28,6 +28,12 @@
     var thumbContainer = $('thumb-container');
     var jumpInput = $('page-jump-input');
     var continuousLink = $('preview-continuous');
+    var IMAGE_PREFIXES = ['/api/preview-img/', '/api/preview-archive/'];
+    var cycleWidth = nav.bindWidthToggle ? nav.bindWidthToggle(container, $('preview-width-btn'), function () { centerActiveThumb(); }) : null;
+
+    function safeImageUrl(value) {
+        return nav.imageUrl ? nav.imageUrl(value, IMAGE_PREFIXES) : value;
+    }
 
     // ── 加载数据 ──
     function loadPreview() {
@@ -84,9 +90,10 @@
         var end = Math.min(start + THUMBNAILS_PER_PAGE, pages.length);
         var html = '';
         for (var i = start; i < end; i++) {
+            var thumbUrl = safeImageUrl(pages[i].url) || '';
             html += '<button type="button" class="thumb-item" data-page="' + (i + 1)
                   + '" aria-label="第 ' + (i + 1) + ' 页" title="第 ' + (i + 1) + ' 页">'
-                  + '<img src="' + window.escapeHtmlAttr(pages[i].url) + '" alt="" loading="lazy" decoding="async">'
+                  + '<img src="' + window.escapeHtmlAttr(thumbUrl) + '" alt="" loading="lazy" decoding="async">'
                   + '<span class="thumb-number">' + (i + 1) + '</span></button>';
         }
         thumbContainer.insertAdjacentHTML('beforeend', html);
@@ -148,7 +155,11 @@
     // 旧图保留到新图加载完成（浏览器会继续显示当前图片），超过 200ms 才显示加载指示，避免翻页闪烁
     function showImage(retry) {
         var pageData = pages[currentPage - 1];
-        var src = pageData.url;
+        var src = safeImageUrl(pageData && pageData.url);
+        if (!src) {
+            showImageHint('图片地址无效', false);
+            return;
+        }
         if (retry) {
             var url = new URL(src, location.origin);
             url.searchParams.set('retry', Date.now());
@@ -167,7 +178,8 @@
         imageHint.classList.add('d-none');
         previewImage.classList.remove('d-none');
         var next = pages[currentPage];
-        if (next) preloader.src = next.url;
+        var nextUrl = next ? safeImageUrl(next.url) : null;
+        if (nextUrl) preloader.src = nextUrl;
     });
     previewImage.addEventListener('error', function () {
         var src = previewImage.getAttribute('src');
@@ -265,10 +277,14 @@
     $('thumb-prev').addEventListener('click', function () { thumbContainer.scrollBy({ left: -thumbContainer.clientWidth * 0.8, behavior: 'instant' }); });
     $('thumb-next').addEventListener('click', function () { thumbContainer.scrollBy({ left: thumbContainer.clientWidth * 0.8, behavior: 'instant' }); });
 
-    // 方向键翻页；带修饰键时交给浏览器（Alt+← 是后退），输入框内不拦截
+    // 方向键翻页与画幅切换；带修饰键、输入框、弹窗开启时不拦截
     document.addEventListener('keydown', function (e) {
-        if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || !pages.length) return;
-        if (e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+        if (!pages.length || !nav.plainKey || !nav.plainKey(e)) return;
+        if ((e.key === 'w' || e.key === 'W') && !e.repeat && cycleWidth) {
+            e.preventDefault();
+            cycleWidth();
+            return;
+        }
         var target = { ArrowLeft: currentPage - 1, ArrowRight: currentPage + 1, Home: 1, End: pages.length }[e.key];
         if (target === undefined) return;
         e.preventDefault();
@@ -279,6 +295,10 @@
     window.addEventListener('resize', function () {
         if (resizeFrame) return;
         resizeFrame = requestAnimationFrame(function () { resizeFrame = 0; centerActiveThumb(); });
+    });
+    window.addEventListener('pagehide', function () {
+        clearTimeout(spinnerTimer);
+        preloader.removeAttribute('src');
     });
     window.addEventListener('pageshow', function (event) { if (event.persisted && !pages.length) loadPreview(); });
 

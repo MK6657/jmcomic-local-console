@@ -973,7 +973,15 @@
         });
     });
 
-    tagSearch.addEventListener('input', renderTagCloud);
+    var _tagComposing = false;
+    if (tagSearch) {
+        tagSearch.addEventListener('compositionstart', function () { _tagComposing = true; });
+        tagSearch.addEventListener('compositionend', function () { _tagComposing = false; renderTagCloud(); });
+        tagSearch.addEventListener('input', function (e) {
+            if (_tagComposing || (e && e.isComposing)) return;
+            renderTagCloud();
+        });
+    }
     tagCloud.addEventListener('click', function (e) {
         var btn = e.target.closest('button');
         if (!btn || !tagCloud.contains(btn)) return;
@@ -1014,7 +1022,16 @@
         }
     });
 
-    searchInput.addEventListener('input', debouncedSearch);
+    var _searchComposing = false;
+    searchInput.addEventListener('compositionstart', function () { _searchComposing = true; });
+    searchInput.addEventListener('compositionend', function () {
+        _searchComposing = false;
+        debouncedSearch();
+    });
+    searchInput.addEventListener('input', function (e) {
+        if (_searchComposing || (e && e.isComposing)) return;
+        debouncedSearch();
+    });
     statusSelect.addEventListener('change', function () { loadLibrary(1); });
     sortSelect.addEventListener('change', function () { loadLibrary(1); });
     document.getElementById('clear-filters-btn').addEventListener('click', clearFilters);

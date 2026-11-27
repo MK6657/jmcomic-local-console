@@ -21,6 +21,10 @@ class ThemeSpec:
     swatch_card: str
     swatch_accent: str
 
+    @property
+    def is_dark(self) -> bool:
+        return self.scheme == "dark"
+
 
 @dataclass(frozen=True)
 class FxPresetSpec:

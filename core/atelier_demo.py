@@ -6,6 +6,9 @@ import socket
 
 
 def install_catalog(app, books):
+    from collections import OrderedDict
+    import hashlib
+    import threading
     from flask import jsonify, request, send_file
     from core.database import add_search_history
     from core.validation import validate_numeric
@@ -14,6 +17,25 @@ def install_catalog(app, books):
     by_id = {book['album_id']: book for book in books}
     by_chapter = {chapter['photo_id']: (book, chapter) for book in books for chapter in book['chapters']}
     original_cover = app.view_functions['api_album.cover_redirect']
+    demo_maint_lock = threading.Lock()
+    demo_img_lock = threading.Lock()
+    demo_img_cache: OrderedDict[tuple, tuple[bytes, str]] = OrderedDict()
+
+    def _cached_demo_webp(cache_key: tuple, builder):
+        with demo_img_lock:
+            hit = demo_img_cache.get(cache_key)
+            if hit is not None:
+                demo_img_cache.move_to_end(cache_key)
+                data, etag = hit
+                return send_file(io.BytesIO(data), mimetype='image/webp', max_age=86400, etag=etag)
+        data = builder()
+        etag = hashlib.sha1(data).hexdigest()[:20]
+        with demo_img_lock:
+            demo_img_cache[cache_key] = (data, etag)
+            demo_img_cache.move_to_end(cache_key)
+            while len(demo_img_cache) > 96:
+                demo_img_cache.popitem(last=False)
+        return send_file(io.BytesIO(data), mimetype='image/webp', max_age=86400, etag=etag)
 
     def search():
         keyword = request.args.get('q', '').strip()
@@ -25,9 +47,13 @@ def install_catalog(app, books):
                 if keyword.casefold() in ' '.join([b['album_id'], b['title'], b['author'], *b['auto_tags']]).casefold()]
         sort = request.args.get('sort')
         rows.sort(key=lambda row: row[sort if sort in ('pictures', 'views', 'likes') else 'album_id'], reverse=True)
-        size = max(1, min(100, request.args.get('page_size', 20, type=int)))
-        page = max(1, request.args.get('page', 1, type=int))
-        add_search_history(keyword)
+        size = max(1, min(100, request.args.get('page_size', 20, type=int) or 20))
+        page = max(1, min(500, request.args.get('page', 1, type=int) or 1))
+        if page == 1:
+            try:
+                add_search_history(keyword)
+            except Exception:
+                pass
         return jsonify(status='ok', items=rows[(page-1)*size:page*size], total=len(rows), page=page,
                        page_size=size, has_more=page*size < len(rows))
 
@@ -69,7 +95,7 @@ def install_catalog(app, books):
             return jsonify(status='error', message='这本书不在离线样书目录中。'), 404
         response = original_cover(album_id)
         if getattr(response, 'status_code', None) == 302:
-            return send_file(io.BytesIO(render_cover_bytes(book)), mimetype='image/webp', max_age=86400)
+            return _cached_demo_webp(('cover', album_id), lambda: render_cover_bytes(book))
         return response
 
     def demo_pages(album_id):
@@ -93,23 +119,34 @@ def install_catalog(app, books):
         if not pair or not 0 <= index < pair[1]['page_count']:
             return jsonify(status='error', message='样书中没有这一页。'), 404
         book, chapter = pair
-        data = render_story_page_bytes(book, chapter['title'], index+1, chapter['page_count'])
-        return send_file(io.BytesIO(data), mimetype='image/webp', max_age=86400)
+        return _cached_demo_webp(
+            ('page', photo_id, index),
+            lambda: render_story_page_bytes(book, chapter['title'], index+1, chapter['page_count']),
+        )
 
     def demo_retry_maintenance(album_id):
-        import threading
-        from core import album_maintenance
+        from core import album_maintenance, database as db
         from core.task_commands import TaskCommandError
         if not validate_numeric(album_id):
             return jsonify(status='error', message='album_id 必须是纯数字'), 400
-        try:
-            album_maintenance.retry(album_id)
-        except TaskCommandError as exc:
-            return jsonify(status='error', reason=exc.reason, message=str(exc)), exc.http_status
-        work = album_maintenance.claim()
-        if work:
-            album_maintenance.run(work, threading.Event())
-        return jsonify(status='ok', album_id=album_id, state='pending', message='已加入整册整理队列'), 202
+        with demo_maint_lock:
+            try:
+                album_maintenance.retry(album_id)
+            except TaskCommandError as exc:
+                return jsonify(status='error', reason=exc.reason, message=str(exc)), exc.http_status
+            other_ids = [aid for aid in by_id if aid != album_id]
+            work = album_maintenance.claim(excluded_albums=other_ids)
+            if work and work.get('album_id') == album_id:
+                album_maintenance.run(work, threading.Event())
+                current = album_maintenance.statuses([album_id]).get(album_id) or {}
+                if current.get('state') == 'pending' and current.get('error'):
+                    with db.transaction() as conn:
+                        conn.execute("UPDATE album_maintenance SET state='failed' WHERE album_id=?", (album_id,))
+                    current = album_maintenance.statuses([album_id]).get(album_id) or {}
+                state = current.get('state') or 'pending'
+            else:
+                state = (album_maintenance.statuses([album_id]).get(album_id) or {}).get('state') or 'pending'
+        return jsonify(status='ok', album_id=album_id, state=state, message='已加入整册整理队列'), 202
 
     def demo_add_wishlist():
         from core import database as db
@@ -147,14 +184,15 @@ def install_catalog(app, books):
     @app.before_request
     def keep_demo_offline():
         path = request.path
+        blocked_delete = request.method == 'DELETE' and path.startswith('/api/jobs/')
         blocked_post = request.method == 'POST' and (
-            (path.startswith(('/api/jobs', '/api/batch', '/api/wishlist/download')) and not path.endswith('/open-folder'))
+            (path.startswith(('/api/jobs', '/api/batch-downloads/confirm', '/api/wishlist/download')) and not path.endswith('/open-folder'))
             or (path.startswith('/api/updates/') and path.endswith('/check'))
             or path == '/api/library/tags/sync-all'
             or (path.startswith('/api/library/') and path.endswith('/tags/sync'))
             or path == '/api/system/clear-cache'
         )
-        if blocked_post or path == '/api/system/diagnose':
+        if blocked_delete or blocked_post or path == '/api/system/diagnose':
             return jsonify(status='error', message='此处是离线样书实例。实际下载或联网诊断请在正式实例使用。'), 409
 
 def run_demo(*, open_browser):

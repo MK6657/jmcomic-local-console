@@ -13,8 +13,15 @@ from core.settings import DEFAULT_SETTINGS, get_settings, normalize_settings_pat
 from core.logger import log
 from core.jm_service import invalidate_option_cache
 from core.scheduler import sync_with_settings as sync_scheduler
+from core.validation import is_safe_upload_filename
 
 api_settings_bp = Blueprint("api_settings", __name__)
+
+
+@api_settings_bp.after_request
+def _no_store_settings(response):
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 _NETWORK_KEYS = {"proxy", "timeout", "retry_times", "client_type", "image_threads", "photo_threads"}
 _SCHEDULE_KEYS = {"schedule_enabled", "schedule_start", "schedule_end"}
@@ -150,6 +157,8 @@ def import_settings():
     file = request.files.get("file")
     if not file:
         return jsonify({"status": "error", "message": "请上传设置文件"}), 400
+    if not file.filename or not is_safe_upload_filename(file.filename):
+        return jsonify({"status": "error", "message": "上传文件名不合法"}), 400
 
     # 限制上传文件大小为 1MB
     MAX_SIZE = 1 * 1024 * 1024
@@ -168,25 +177,31 @@ def import_settings():
 
     if not isinstance(data, dict):
         return jsonify({"status": "error", "message": "设置文件内容需为 JSON 对象"}), 400
+    if len(data) > 200:
+        return jsonify({"status": "error", "message": "设置文件包含过多字段，最多允许 200 项"}), 400
 
     skipped = 0
     errors = []
 
     patch = {}
     for key, value in data.items():
+        safe_key = str(key)[:64]
         if key not in DEFAULT_SETTINGS:
             skipped += 1
-            errors.append(f"未知设置项 '{key}'，已跳过")
+            if len(errors) < 50:
+                errors.append(f"未知设置项 '{safe_key}'，已跳过")
             continue
         if key == "download_root":
             skipped += 1
-            errors.append("download_root 为只读项，已跳过")
+            if len(errors) < 50:
+                errors.append("download_root 为只读项，已跳过")
             continue
         try:
             patch.update(normalize_settings_patch({key: value}))
         except ValueError:
             skipped += 1
-            errors.append(f"设置 '{key}' 失败，已跳过")
+            if len(errors) < 50:
+                errors.append(f"设置 '{safe_key}' 失败，已跳过")
 
     changed = update_settings(patch)
     imported = len(patch)

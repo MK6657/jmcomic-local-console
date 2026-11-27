@@ -24,12 +24,15 @@
   });
   const classicSwitch = document.querySelector('a.atelier-classic[href="/ui/classic"]');
   if (classicSwitch && typeof classicSwitch.addEventListener === 'function') {
-    classicSwitch.addEventListener('click', () => {
+    const syncClassicHref = () => {
       if (!window.location) return;
-      const cur = (window.location.pathname || '') + (window.location.search || '');
+      const cur = (window.location.pathname || '') + (window.location.search || '') + (window.location.hash || '');
       if (cur && cur !== '/downloads' && !cur.startsWith('/ui/')) {
         classicSwitch.href = '/ui/classic?next=' + encodeURIComponent(cur);
       }
+    };
+    ['pointerover', 'focusin', 'pointerdown', 'click', 'contextmenu'].forEach(evt => {
+      classicSwitch.addEventListener(evt, syncClassicHref);
     });
   }
   const themes = new Set(
@@ -292,6 +295,7 @@
 
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape' && fabMode) {
+        event.preventDefault();
         const inside = readerFab.contains(document.activeElement);
         setFabOpen(null);
         if (inside && fabToggle) fabToggle.focus();

@@ -1,6 +1,9 @@
 /* Paged reader (单页翻页): every paged-only rule lives here, using the locked eye-care tokens.
    The page header (.reader-toolbar) is shared with the continuous reader and lives in style.css. */
 .preview-container { max-width: 1200px; margin: 0 auto; padding: 16px 0; }
+.preview-container[data-width="wide"] { max-width: min(94vw, 1480px); }
+.preview-container[data-width="full"] { max-width: 100%; padding-left: 8px; padding-right: 8px; }
+.preview-container[data-width="full"] .preview-image-wrapper img { max-height: none; width: 100%; }
 .preview-mode-switch .btn[aria-current="page"] { pointer-events: none; }
 
 /* ── Page canvas: header, the whole page and the page controls fit one desktop screen ── */

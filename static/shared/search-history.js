@@ -95,7 +95,11 @@
       return;
     }
     const keyword = button.dataset.historyDelete;
-    if (!confirm(keyword ? '确定删除这条搜索历史？' : '确定清空全部搜索历史？')) return;
+    if (!keyword && !button.hasAttribute('data-history-clear')) return;
+    const ok = window.confirmAction
+      ? await window.confirmAction(keyword ? '确定删除这条搜索历史？' : '确定清空全部搜索历史？')
+      : confirm(keyword ? '确定删除这条搜索历史？' : '确定清空全部搜索历史？');
+    if (!ok) return;
     try {
       await window.apiFetch(keyword ? endpoint + '?keyword=' + encodeURIComponent(keyword) : endpoint + '/clear', {
         method: keyword ? 'DELETE' : 'POST', timeoutMs: 15000,
@@ -127,7 +131,7 @@
       const response = await fetch(endpoint, { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(3000) });
       if (response.ok) current = response.headers.get('X-JM-History-Session');
     } catch (_) {}
-    if (version !== requestVersion || current === session) return;
+    if (!current || version !== requestVersion || current === session) return;
     if (current) session = current;
     revealed = false;
     display(false);

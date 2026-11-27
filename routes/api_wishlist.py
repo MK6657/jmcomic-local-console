@@ -202,10 +202,10 @@ def batch_check_wishlist():
 
     # 校验所有 album_id 为纯数字
     for aid in album_ids:
-        if not validate_numeric(str(aid).strip()):
+        if isinstance(aid, bool) or not validate_numeric(str(aid).strip()):
             return jsonify({
                 "status": "error",
-                "message": f"album_id '{aid}' 不是合法的纯数字格式",
+                "message": f"album_id '{str(aid)[:32]}' 不是合法的纯数字格式",
             }), 400
 
     str_ids = [str(aid).strip() for aid in album_ids]
@@ -232,10 +232,10 @@ def batch_download_wishlist():
 
     # 校验所有 album_id 为纯数字
     for aid in ids:
-        if not validate_numeric(str(aid).strip()):
+        if isinstance(aid, bool) or not validate_numeric(str(aid).strip()):
             return jsonify({
                 "status": "error",
-                "message": f"album_id '{aid}' 不是合法的纯数字格式",
+                "message": f"album_id '{str(aid)[:32]}' 不是合法的纯数字格式",
             }), 400
 
     try:

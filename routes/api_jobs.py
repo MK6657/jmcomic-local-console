@@ -17,12 +17,12 @@ from core.task_commands import TaskCommandError
 from core.logger import log
 from core.progress import progress_manager, StreamCapacityError
 from core.path_guard import is_safe_path, DOWNLOAD_ROOT
-from core.validation import validate_numeric, validate_job_id, require_job_id
+from core.validation import validate_numeric, validate_job_id
 from core.packer import CbzPacker
 from core import album_maintenance, archive_pages, download_folios
 from core import desktop_platform
 # ── 模块级压缩包检查缓存（避免 N+1 文件系统扫描）：值是压缩包格式 'cbz' / 'zip'，没有为 None ──
-_cbz_cache: dict[str, tuple[str | None, float]] = {}
+_cbz_cache: dict[str, tuple[str | None, float, int | None]] = {}
 _CBZ_CACHE_TTL = 60  # 缓存有效期（秒）
 _CBZ_CACHE_MAX = 500  # 最大缓存条目数
 _cbz_cache_lock = threading.Lock()
@@ -162,25 +162,27 @@ def list_jobs():
             or (view != 'jobs' and status != 'all')):
         return jsonify(status='error', message='任务视图或车号无效'), 400
     try:
-        result = (db.get_jobs_page(status=status, **numbers) if view == 'jobs' else
-                  download_folios.transfer_page(**numbers, album_id=album_id if view == 'album' else None))
+        with db.library_snapshot() as conn:
+            result = (db.get_jobs_page(status=status, **numbers) if view == 'jobs' else
+                      download_folios.transfer_page(**numbers, album_id=album_id if view == 'album' else None, conn=conn))
+            jobs = result["jobs"]
+            maintenance = album_maintenance.statuses((job['album_id'] for job in jobs), conn=conn)
+            for job in jobs:
+                job['maintenance'] = maintenance.get(job['album_id'])
+                if isinstance(job.get("selected_photo_ids"), str):
+                    try:
+                        job["selected_photo_ids"] = json.loads(job["selected_photo_ids"])
+                    except (json.JSONDecodeError, TypeError):
+                        job["selected_photo_ids"] = []
+            if 'view' in request.args:
+                result['view'] = view
+                result['books'] = download_folios.book_metadata(jobs, conn=conn)
+                download_folios.resolve_job_titles(jobs, result['books'], conn=conn)
+            else:
+                download_folios.resolve_job_titles(jobs, conn=conn)
+            maint_failures = album_maintenance.failed_without_history(conn=conn)
     except ValueError as error:
         return jsonify(status="error", message=str(error)), 400
-    jobs = result["jobs"]
-    maintenance = album_maintenance.statuses(job['album_id'] for job in jobs)
-    for job in jobs:
-        job['maintenance'] = maintenance.get(job['album_id'])
-        if isinstance(job.get("selected_photo_ids"), str):
-            try:
-                job["selected_photo_ids"] = json.loads(job["selected_photo_ids"])
-            except (json.JSONDecodeError, TypeError):
-                job["selected_photo_ids"] = []
-    if 'view' in request.args:
-        result['view'] = view
-        result['books'] = download_folios.book_metadata(jobs)
-        download_folios.resolve_job_titles(jobs, result['books'])
-    else:
-        download_folios.resolve_job_titles(jobs)
     # 批量检查 CBZ 存在性（避免 N+1 文件系统扫描，利用 TTL 缓存）
     output_paths = list({j.get("output_path", "") for j in jobs if j.get("output_path")})
     cbz_map = {p: _check_cbz_path(p) for p in output_paths}
@@ -189,7 +191,7 @@ def list_jobs():
         fmt = cbz_map.get(op) if op else None
         job["has_cbz"] = bool(fmt)
         job["archive_format"] = fmt if fmt in ("cbz", "zip") else ("cbz" if fmt else None)
-    return jsonify({"status": "ok", **result, 'maintenance_failures': album_maintenance.failed_without_history()})
+    return jsonify({"status": "ok", **result, 'maintenance_failures': maint_failures})
 
 
 @api_jobs_bp.get("/api/jobs/<job_id>")
@@ -246,7 +248,7 @@ def job_events(job_id: str):
         if job and job["status"] in ("completed", "failed", "canceled"):
             def _done():
                 yield f"event: {job['status']}\ndata: {json.dumps({'job_id': job_id, 'status': job['status']}, ensure_ascii=False)}\n\n"
-            return Response(_done(), mimetype="text/event-stream")
+            return Response(_done(), mimetype="text/event-stream", headers={"Cache-Control": "no-store"})
         return jsonify({"status": "error", "message": "任务不存在或已完成"}), 404
 
     try:

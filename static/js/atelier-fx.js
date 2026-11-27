@@ -235,20 +235,6 @@
 
   if (activeMode() !== 'none') ensurePool();
 
-  // Click-to-copy JM 车号 badge on detail page
-  document.addEventListener('click', event => {
-    const seal = event.target && event.target.closest ? event.target.closest('.album-id-seal') : null;
-    if (!seal) return;
-    const match = String(seal.textContent || '').match(/\d+/);
-    if (!match) return;
-    const idText = match[0];
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(idText).then(() => {
-        if (window.showToast) window.showToast('已复制车号 ' + idText, 'success');
-      }).catch(() => {});
-    }
-  });
-
   // Quick `/` shortcut to focus page's primary search box; Esc blurs focused search box cleanly
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape') {

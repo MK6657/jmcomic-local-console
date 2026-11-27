@@ -69,11 +69,12 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # ── 敏感信息脱敏 ─────────────────────────────────────
 SENSITIVE_KEYS = {
-    "cookie", "token", "password", "secret", "authorization",
+    "cookie", "cookies", "token", "password", "passwd", "pwd", "secret",
+    "authorization", "auth", "proxy_auth", "proxies",
     "proxy_password", "apikey", "api_key", "private_key",
     "access_key", "refresh_token", "credential",
     "session", "jwt", "bearer", "set-cookie", "proxy-authorization", "access_token",
-    "x-api-key",
+    "x-api-key", "avs", "ipb_pass_hash",
 }
 _UPPERCASE_PLACEHOLDER_KEYS = {
     "cookie", "token", "authorization", "apikey", "api_key", "refresh_token",
@@ -84,12 +85,12 @@ _AUTHORITY = re.compile(
     re.I,
 )
 _CREDENTIAL = re.compile(r"\b(Bearer|Basic)[ \t]+[^\s,'\";}]+", re.I)
-_PRIVATE_HEADER = re.compile(r"(\b(?:(?:(?:set-)?cookie|(?:proxy-)?authorization)[ \t]*:"
-                             r"|(?:set-)?cookie[ \t]*=(?=[ \t]*[\w.-]+=))[ \t]*)"
+_PRIVATE_HEADER = re.compile(r"(\b(?:(?:(?:set-)?cookies?|(?:proxy-)?authorization)[ \t]*:"
+                             r"|(?:set-)?cookies?[ \t]*=(?=[ \t]*[\w.-]+=))[ \t]*)"
                              r"[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*", re.I)
 _KEY_VALUE = re.compile(
     r'''(?P<prefix>(?<!\w)['"]?(?P<key>''' + '|'.join(map(re.escape, sorted(SENSITIVE_KEYS))) +
-    r''')['"]?[ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\\r\n])*(?:"|$)|'(?:\\.|[^'\\\r\n])*(?:'|$)|[^\s,;}]+)''',
+    r''')['"]?[ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\\r\n])*(?:"|$)|'(?:\\.|[^'\\\r\n])*(?:'|$)|[^\s,;&}#\])]+)''',
     re.I | re.M,
 )
 
@@ -103,8 +104,14 @@ def _safe_authority(match):
     if '@' in authority:
         return scheme + '****@' + authority.rsplit('@', 1)[1]
     # A caller may already have truncated an exception inside user:password.
-    if ':' in authority and not authority.startswith('[') and not authority.partition(':')[2].isdigit():
-        return scheme + '****'
+    if ':' in authority and not authority.startswith('['):
+        host, _, tail = authority.partition(':')
+        if (
+            not tail.isdigit()
+            or not (1 <= int(tail) <= 65535)
+            or ('.' not in host and host.lower() not in {'localhost', 'proxy'})
+        ):
+            return scheme + '****'
     return match[0]
 
 
@@ -873,8 +880,9 @@ class LogHousekeeper:
                 thread.start()
 
     def enable_maintenance(self, task):
-        self._maintenance = task
-        self._maintenance_day = time.strftime("%Y-%m-%d")
+        with self._lock:
+            self._maintenance = task
+            self._maintenance_day = time.strftime("%Y-%m-%d")
         self.ensure_started()
 
     def request_maintenance(self):
@@ -907,11 +915,12 @@ class LogHousekeeper:
             today = time.strftime("%Y-%m-%d")
             if self._maintenance_due or today != self._maintenance_day:
                 self._maintenance_due = False
-                self._maintenance_day = today
                 try:
                     task()
                 except Exception:
                     pass
+                else:
+                    self._maintenance_day = today
 
     def stop(self, flush: bool = True, timeout: float = 2.0):
         self._stopped = True

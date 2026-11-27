@@ -279,7 +279,7 @@
   overflow: hidden;
   text-decoration: none;
   color: var(--ink-3);
-  font: 600 11px var(--font-mono);
+  font: 600 12px var(--font-mono);
 }
 .desk-thumb img {
   position: absolute; inset: 0; width: 100%; height: 100%;
@@ -355,18 +355,18 @@
   border-top: 1px solid var(--line);
 }
 .atelier-collection .card-tags, .atelier-collection .card-body { overflow-wrap: anywhere; }
-.atelier-collection .tag-badge, .atelier-collection .card-body .badge { white-space: normal; font-size: 11px; }
+.atelier-collection .tag-badge, .atelier-collection .card-body .badge { white-space: normal; font-size: 12px; }
 .atelier-collection .card-action-buttons {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   width: 100%;
 }
 .atelier-collection .card-actions .btn {
   height: 28px;
-  padding: 0 7px;
-  font-size: 11.5px;
+  padding: 0 6px;
+  font-size: 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -383,17 +383,17 @@
   margin-left: auto;
 }
 .atelier-collection .card-actions .export-picker .export-format-select {
-  min-width: 48px;
+  min-width: 46px;
   height: 100%;
-  padding: 0 15px 0 6px;
-  font-size: 11px;
-  background-position: right 4px center !important;
+  padding: 0 14px 0 5px;
+  font-size: 12px;
+  background-position: right 3px center !important;
   background-size: 9px 7px !important;
 }
 .atelier-collection .card-actions .export-picker .export-run-btn {
   height: 100%;
-  padding: 0 6px !important;
-  font-size: 11.5px;
+  padding: 0 5px !important;
+  font-size: 12px;
   gap: 2px;
 }
 .atelier-collection .shelf-results .d-flex.gap-2 { flex-wrap: wrap; }
@@ -439,7 +439,7 @@
   content: '藏书阁';
   display: block;
   color: var(--accent);
-  font: 600 .7rem/1 var(--font-mono);
+  font: 600 .75rem/1 var(--font-mono);
   letter-spacing: .16em;
 }
 .atelier-collection .shelf-cover img {
@@ -474,7 +474,7 @@
 }
 .atelier-collection[data-layout="catalog"] .shelf-pedestal { padding: 0; background: transparent; }
 .atelier-collection[data-layout="catalog"] .shelf-cover { width: 54px; margin: 0; border-radius: var(--r-sm); }
-.atelier-collection[data-layout="catalog"] .shelf-ticket { inset: 4px; padding: 2px; font-size: 10px; }
+.atelier-collection[data-layout="catalog"] .shelf-ticket { inset: 4px; padding: 2px; font-size: 12px; }
 .atelier-collection[data-layout="catalog"] .shelf-ticket::before { display: none; }
 .atelier-collection[data-layout="catalog"] :is(.album-card, .library-card) .card-body { padding: 0; }
 .atelier-collection[data-layout="catalog"] .library-card .card-actions { border-top: 0; padding-top: 0; }
@@ -514,7 +514,7 @@
 .wish-register .wishlist-table .wishlist-actions { flex-wrap: wrap; gap: 4px; }
 .wish-register .wishlist-col-added { font-size: .75rem; color: var(--ink-3); font-family: var(--font-mono); }
 .wish-register[data-layout="catalog"] .wish-book .shelf-cover { width: 42px; flex: none; border-radius: var(--r-sm); }
-.wish-register[data-layout="catalog"] .shelf-ticket { inset: 3px; font-size: 9px; padding: 2px; border: 0; }
+.wish-register[data-layout="catalog"] .shelf-ticket { inset: 3px; font-size: 12px; padding: 2px; border: 0; }
 .wish-register[data-layout="catalog"] .shelf-ticket::before { display: none; }
 
 .wish-register[data-layout="shelf"] table { display: block; }

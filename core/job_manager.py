@@ -391,6 +391,10 @@ class JobManager:
                 self._schedule_wakeup.set()
             if result == (True, "已取消"):
                 log.info(f"取消任务 job_id={job_id}")
+                tracker = progress_manager.get_tracker(job_id)
+                if tracker is not None and not tracker.is_done():
+                    tracker.push("canceled", {"job_id": job_id, "status": "canceled", "message": "任务已被取消"})
+                    tracker.close()
         return result
 
     def remove_job(self, job_id: str):

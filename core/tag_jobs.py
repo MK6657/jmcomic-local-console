@@ -55,7 +55,7 @@ class TagJobs:
                 raise BulkSyncActive("已有批量同步正在运行，请勿重复提交")
             if len(self._threads) >= self._capacity:
                 raise BackgroundCallsBusy("标签同步繁忙，请稍后重试")
-            worker = threading.Thread(target=bind_request_id(run), name="library-tag-sync", daemon=False)
+            worker = threading.Thread(target=bind_request_id(run), name="library-tag-sync", daemon=True)
             self._threads[key] = worker
             worker.start()
         return future

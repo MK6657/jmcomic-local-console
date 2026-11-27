@@ -14,6 +14,128 @@
   }
 
   window.readingNav = {
+    imageUrl: function (value, prefixes) {
+      try {
+        var url = new URL(value, location.origin);
+        if (url.origin === location.origin && prefixes.some(function (prefix) { return url.pathname.startsWith(prefix); })) return url.href;
+      } catch (_) {}
+      return null;
+    },
+
+    loadImage: function (image, url, failed, options) {
+      var opts = options || {};
+      var keepPreviousUntilLoad = !!opts.keepPrevious;
+      var controller = new AbortController();
+      var objectUrl;
+      var loaded = false;
+      var signal = controller.signal;
+      if (url) fetch(url, { signal: signal }).then(function (response) {
+        if (signal.aborted) return;
+        if (!response.ok) { failed(response, signal); return; }
+        return response.blob().then(function (blob) {
+          if (signal.aborted) return;
+          objectUrl = URL.createObjectURL(blob);
+          loaded = true;
+          image.src = objectUrl;
+        });
+      }).catch(function () { if (!signal.aborted) failed(null, signal); });
+      else Promise.resolve().then(function () { if (!signal.aborted) failed(null, signal); });
+      var cancel = function (preserveDisplayed) {
+        controller.abort();
+        if (!preserveDisplayed && !keepPreviousUntilLoad) image.removeAttribute('src');
+        if (objectUrl && (!preserveDisplayed || !loaded)) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+        }
+      };
+      cancel.abortPending = function () {
+        if (loaded) return false;
+        controller.abort();
+        return true;
+      };
+      cancel.revoke = function () {
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+        }
+      };
+      cancel.isLoaded = function () { return loaded; };
+      return cancel;
+    },
+
+    manifest: function (url, timeout) {
+      var controller = new AbortController();
+      var expired = false;
+      var timer = setTimeout(function () { expired = true; controller.abort(); }, timeout);
+      return {
+        cancel: function () { clearTimeout(timer); controller.abort(); },
+        result: window.apiFetch(url, { signal: controller.signal }).catch(function (error) {
+          if (expired) throw new Error('请求超时，请稍后重试');
+          throw error;
+        }).finally(function () { clearTimeout(timer); })
+      };
+    },
+
+    bindLifecycle: function (suspend, resume) {
+      var active = false;
+      function hide(unloading) {
+        if (active) {
+          active = false;
+          suspend(!!unloading);
+        } else if (unloading) {
+          suspend(true);
+        }
+      }
+      function show() { if (!active && !document.hidden) { active = true; resume(); } }
+      window.addEventListener('pagehide', function () { hide(true); });
+      window.addEventListener('pageshow', show);
+      document.addEventListener('visibilitychange', function () { if (document.hidden) hide(false); else show(); });
+      show();
+    },
+
+    widthPreference: function () {
+      try {
+        var v = localStorage.getItem('jm_reader_width');
+        if (v === 'wide' || v === 'full') return v;
+      } catch (_) {}
+      return 'standard';
+    },
+
+    bindWidthToggle: function (containerEl, buttonEl, onChange) {
+      var MODES = ['standard', 'wide', 'full'];
+      var LABELS = { standard: '标准宽', wide: '宽屏', full: '铺满' };
+      function apply(mode, persist) {
+        if (MODES.indexOf(mode) < 0) mode = 'standard';
+        if (mode === 'standard') containerEl.removeAttribute('data-width');
+        else containerEl.setAttribute('data-width', mode);
+        if (buttonEl) {
+          buttonEl.textContent = '画幅：' + LABELS[mode];
+          buttonEl.title = '切换阅读画幅宽度（快捷键 W）';
+        }
+        if (persist) {
+          try { localStorage.setItem('jm_reader_width', mode); } catch (_) {}
+        }
+        if (onChange) onChange(mode);
+      }
+      var currentMode = window.readingNav.widthPreference();
+      apply(currentMode, false);
+      function cycle() {
+        currentMode = MODES[(MODES.indexOf(currentMode) + 1) % MODES.length];
+        apply(currentMode, true);
+      }
+      if (buttonEl) buttonEl.addEventListener('click', cycle);
+      return cycle;
+    },
+
+    plainKey: function (event) {
+      var target = event && event.target;
+      var inField = Boolean(target && typeof target.closest === 'function' &&
+        target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
+      var modalOpen = Boolean(typeof document !== 'undefined' && document.querySelector &&
+        document.querySelector('.modal.show, dialog[open]'));
+      return !(event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+        event.isComposing || inField || modalOpen);
+    },
     /** 起始页：地址栏 ?page= 优先，其次本标签页记住的页码，默认 1（由调用方夹到有效范围） */
     initialPage: function (albumId) {
       var requested = Math.floor(Number(new URLSearchParams(location.search).get('page')));

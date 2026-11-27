@@ -70,7 +70,8 @@ class ProgressTracker:
     def iter_events(self, client_queue: queue.Queue | None = None,
                     max_duration: float | None = None):
         """SSE 事件生成器；可限制连接寿命，不传 max_duration 时保持兼容行为。"""
-        if client_queue is None:
+        legacy_queue = client_queue is None
+        if legacy_queue:
             with self._lock:
                 q = self._subscribers[0] if self._subscribers else None
         else:
@@ -99,9 +100,9 @@ class ProgressTracker:
                         break
                     # 发送心跳保持连接
                     yield f": heartbeat\n\n"
-        except GeneratorExit:
-            self.unsubscribe(q)
-            raise
+        finally:
+            if legacy_queue:
+                self.unsubscribe(q)
 
     def close(self):
         with self._lock:

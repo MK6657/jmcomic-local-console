@@ -19,11 +19,13 @@
   var pageObserver;
   var moreObserver;
   var visiblePages = new Set();
+  var autoRetryTimers = new Set();
   var byId = function (id) { return document.getElementById(id); };
   var tools = byId('reader-tools');
   var toolsToggle = byId('reader-tools-toggle');
   var pageInput = byId('reader-page-input');
   var pagedLink = byId('reader-paged');
+  var cycleWidth = nav.bindWidthToggle ? nav.bindWidthToggle(root, byId('reader-width-btn'), function () { alignJump(); }) : null;
 
   // After a jump, lazy images around the target keep loading and shift the layout.
   // The anchor re-aligns the target after every load until the reader scrolls on their own.
@@ -90,10 +92,15 @@
   });
   document.addEventListener('keydown', function (event) {
     if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].indexOf(event.key) >= 0) releaseJump();
-    if (event.key === 'Escape') { showTools(false); return; }
-    if (event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
-    if ((event.key === 'm' || event.key === 'M') && !event.ctrlKey && !event.altKey && !event.metaKey && !event.repeat) {
+    if (event.key === 'Escape') {
+      if (!event.defaultPrevented) showTools(false);
+      return;
+    }
+    if (!nav.plainKey || !nav.plainKey(event)) return;
+    if ((event.key === 'm' || event.key === 'M') && !event.repeat) {
       event.preventDefault(); showTools(tools.hidden, true);
+    } else if ((event.key === 'w' || event.key === 'W') && !event.repeat && cycleWidth) {
+      event.preventDefault(); cycleWidth();
     }
   });
   ['wheel', 'touchmove'].forEach(function (name) {
@@ -115,6 +122,8 @@
     if (pageObserver) pageObserver.disconnect();
     if (moreObserver) moreObserver.disconnect();
     visiblePages.clear();
+    autoRetryTimers.forEach(function (timer) { clearTimeout(timer); });
+    autoRetryTimers.clear();
   }
   function observe() {
     disconnect();
@@ -134,11 +143,7 @@
     moreObserver.observe(byId('reader-more'));
   }
   function readerImageUrl(value) {
-    try {
-      var url = new URL(value, location.origin);
-      var ours = imagePrefixes.some(function (prefix) { return url.pathname.indexOf(prefix) === 0; });
-      return url.origin === location.origin && ours ? url.href : null;
-    } catch (_) { return null; }
+    return nav.imageUrl ? nav.imageUrl(value, imagePrefixes) : null;
   }
   function appendPages() {
     var end = Math.min(rendered + 20, pages.length);
@@ -186,7 +191,11 @@
           // after a short pause before asking the reader to retry.
           if (online && src && !autoRetried) {
             autoRetried = true;
-            setTimeout(reload, AUTO_RETRY_MS);
+            var retryTimer = setTimeout(function () {
+              autoRetryTimers.delete(retryTimer);
+              reload();
+            }, AUTO_RETRY_MS);
+            autoRetryTimers.add(retryTimer);
             return;
           }
           img.classList.add('d-none'); error.classList.remove('d-none'); alignJump();

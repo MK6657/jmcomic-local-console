@@ -69,11 +69,15 @@ def _view_job(marker: Path) -> str | None:
     return record['job']
 
 
-def published_path(path: Path, root: Path, *, directory=False, conn=None) -> Path | None:
+def published_path(path: Path, root: Path, *, directory=False, conn=None, _resolved_root=None) -> Path | None:
     """Legacy paths need no DB row. A managed view is public only while its catalog row points here."""
-    abs_path, abs_root = Path(path).absolute(), Path(root).absolute()
+    abs_path = Path(path).absolute()
+    if _resolved_root is not None:
+        abs_root, real_root = _resolved_root
+    else:
+        abs_root, real_root = Path(root).absolute(), Path(os.path.realpath(root))
     lexical_rel = abs_path.is_relative_to(abs_root)
-    real, real_root = Path(os.path.realpath(path)), Path(os.path.realpath(root))
+    real = Path(os.path.realpath(path))
     if (real == real_root or not real.is_relative_to(real_root)
             or (lexical_rel and publication.private_path(abs_path, abs_root))
             or publication.private_path(real, real_root) or is_temporary_path(path) or is_temporary_path(real)):

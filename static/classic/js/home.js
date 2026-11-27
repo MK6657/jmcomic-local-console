@@ -15,10 +15,12 @@
     function finish(jobId, status, label, color) {
       var badge = document.getElementById('pct-' + jobId);
       if (!badge) return;
-      badge.closest('[data-job-id]').dataset.status = status;
+      var card = badge.closest('[data-job-id]');
+      if (card) card.dataset.status = status;
       badge.textContent = label;
       badge.classList.replace('bg-primary', color);
-      document.getElementById('progress-' + jobId).parentElement.hidden = true;
+      var bar = document.getElementById('progress-' + jobId);
+      if (bar && bar.parentElement) bar.parentElement.hidden = true;
     }
     window.setSSECallbacks({
       onCanceled: function (event, jobId) { finish(jobId, 'canceled', '已取消', 'bg-secondary'); },
@@ -26,7 +28,9 @@
       onFailed: function (event, jobId) { finish(jobId, 'failed', '失败', 'bg-danger'); },
     });
     document.querySelectorAll('[data-status="running"]').forEach(function (row) {
-      window._jobTitleMap[row.getAttribute('data-job-id')] = row.querySelector('strong').textContent;
+      var jid = row.getAttribute('data-job-id');
+      var strong = row.querySelector('strong');
+      if (jid && strong) window._jobTitleMap[jid] = strong.textContent;
     });
     function syncVisible() {
       if (document.visibilityState === 'hidden') window.disconnectAllSSE();
@@ -43,7 +47,7 @@
     if (heroForm && heroKeyword) {
       heroForm.addEventListener('submit', function () {
         var raw = heroKeyword.value.trim();
-        if (window.extractAlbumId && (/^https?:\/\//i.test(raw) || /18comic|jmcomic/i.test(raw))) {
+        if (window.extractAlbumId) {
           var parsed = window.extractAlbumId(raw);
           if (parsed) heroKeyword.value = parsed;
         }

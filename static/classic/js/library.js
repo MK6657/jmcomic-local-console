@@ -363,20 +363,46 @@
         var read = window.readLink.create(albumId, window.readLink.stateFor(item.readable, item.archive_problem), 'btn-sm');
         if (read) buttons.appendChild(read);
         if (item.readable) {
-            ['ZIP', 'PDF'].forEach(function (format) {
-                var button = el('button', 'btn btn-outline-secondary btn-sm', format);
-                button.type = 'button';
-                button.dataset.action = 'export-' + format.toLowerCase();
-                button.title = '将本地已下载的内容导出为 ' + format;
-                button.setAttribute('aria-label', '导出 ' + format);
-                buttons.appendChild(button);
+            var picker = el('div', 'export-picker');
+            var select = el('select', 'form-select form-select-sm export-format-select');
+            select.setAttribute('aria-label', '选择导出格式');
+            ['cbz', 'zip', 'pdf'].forEach(function (fmt) {
+                var opt = el('option', null, fmt.toUpperCase());
+                opt.value = fmt;
+                select.appendChild(opt);
             });
+            select.value = getSavedExportFormat();
+            var exportBtn = el('button', 'btn btn-outline-secondary btn-sm export-run-btn');
+            exportBtn.type = 'button';
+            exportBtn.dataset.action = 'export-selected';
+            exportBtn.title = '按所选格式导出本地已下载内容';
+            exportBtn.setAttribute('aria-label', '导出');
+            exportBtn.appendChild(icon('bi-box-arrow-up'));
+            exportBtn.appendChild(document.createTextNode(' 导出'));
+            picker.appendChild(select);
+            picker.appendChild(exportBtn);
+            buttons.appendChild(picker);
         }
         actions.appendChild(buttons);
         body.appendChild(actions);
 
         card.appendChild(body);
         return card;
+    }
+
+    function getSavedExportFormat() {
+        try {
+            var stored = window.localStorage && window.localStorage.getItem('jm_export_format');
+            if (stored === 'cbz' || stored === 'zip' || stored === 'pdf') return stored;
+        } catch (_) {}
+        return 'cbz';
+    }
+
+    function saveExportFormat(fmt) {
+        if (fmt !== 'cbz' && fmt !== 'zip' && fmt !== 'pdf') return;
+        try {
+            if (window.localStorage) window.localStorage.setItem('jm_export_format', fmt);
+        } catch (_) {}
     }
 
     // 切换按钮：名称固定为“收藏”，是否已收藏只由 aria-pressed 表达（名称跟着变会读成“取消收藏，已按下”）；
@@ -511,7 +537,7 @@
             var isActive = selectedTags.indexOf(t.tag) !== -1;
             var item = el('button', 'tag-cloud-item' + (isActive ? ' active' : ''));
             item.type = 'button';
-            item.style.fontSize = (0.8 + ratio * 0.5).toFixed(2) + 'rem';
+            item.style.fontSize = (0.88 + ratio * 0.42).toFixed(2) + 'rem';
             item.dataset.tag = t.tag;
             item.setAttribute('aria-pressed', isActive ? 'true' : 'false');
             item.appendChild(document.createTextNode(t.tag + ' '));
@@ -904,8 +930,16 @@
                 removeCardTag(albumId, target.dataset.tag || '', e);
             } else if (action === 'toggle-wishlist') {
                 if (albumId) toggleLibraryWishlist(albumId, target);
-            } else if (albumId && (action === 'export-zip' || action === 'export-pdf')) {
-                var format = action === 'export-zip' ? 'zip' : 'pdf';
+            } else if (albumId && (action === 'export-selected' || action === 'export-cbz' || action === 'export-zip' || action === 'export-pdf')) {
+                var format = action === 'export-pdf' ? 'pdf' : (action === 'export-zip' ? 'zip' : 'cbz');
+                if (action === 'export-selected') {
+                    var picker = target.closest('.export-picker');
+                    var select = picker && (picker.querySelector('.export-format-select') ||
+                        Array.prototype.find.call(picker.children || [], function (node) { return node && node.tagName === 'SELECT'; }));
+                    var picked = select && String(select.value || '').toLowerCase();
+                    if (picked === 'cbz' || picked === 'zip' || picked === 'pdf') format = picked;
+                }
+                saveExportFormat(format);
                 window.downloadExport('/api/library/' + encodeURIComponent(albumId) + '/export/' + format,
                     format.toUpperCase(), 'JM' + albumId);
             } else if (action === 'filter-author') {
@@ -974,13 +1008,38 @@
         }
     });
 
-    searchInput.addEventListener('input', debouncedSearch);
+    grid.addEventListener('change', function (e) {
+        var select = e.target && e.target.closest ? e.target.closest('.export-format-select') : null;
+        if (!select || !grid.contains(select)) return;
+        var fmt = String(select.value || '').toLowerCase();
+        saveExportFormat(fmt);
+        grid.querySelectorAll('.export-format-select').forEach(function (other) {
+            if (other !== select) other.value = fmt;
+        });
+    });
+
+    var _searchComposing = false;
+    searchInput.addEventListener('compositionstart', function () { _searchComposing = true; });
+    searchInput.addEventListener('compositionend', function () {
+        _searchComposing = false;
+        debouncedSearch();
+    });
+    searchInput.addEventListener('input', function (e) {
+        if (_searchComposing || (e && e.isComposing)) return;
+        debouncedSearch();
+    });
     statusSelect.addEventListener('change', function () { loadLibrary(1); });
     sortSelect.addEventListener('change', function () { loadLibrary(1); });
     document.getElementById('clear-filters-btn').addEventListener('click', clearFilters);
     document.getElementById('library-resync-btn').addEventListener('click', reSyncAll);
     document.getElementById('library-refresh-btn').addEventListener('click', refreshLibrary);
     document.getElementById('library-download-new-btn').addEventListener('click', downloadNewChapters);
+    var openExportBtn = document.getElementById('library-open-export-btn');
+    if (openExportBtn) {
+        openExportBtn.addEventListener('click', function () {
+            if (window.openExportFolder) window.openExportFolder();
+        });
+    }
 
     // ── 供控制台/其他脚本调用（页面本身不再依赖这些全局函数） ──
     window.refreshLibrary = refreshLibrary;

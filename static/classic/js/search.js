@@ -170,12 +170,14 @@
   });
 
   // ── 全局 alert 管理 ──
+  var alertTimer = 0;
 
   function showGlobalAlert(message, type) {
     type = type || 'danger';
     var container = document.getElementById('global-alert-container');
     if (!container) return;
 
+    clearTimeout(alertTimer);
     container.style.display = 'block';
     container.innerHTML = '<div class="alert alert-' + type + ' alert-dismissible fade show mb-3" role="alert">'
       + escapeHtml(message)
@@ -183,7 +185,7 @@
       + '</div>';
 
     // 自动隐藏（5秒后）
-    setTimeout(function () {
+    alertTimer = setTimeout(function () {
       container.style.display = 'none';
       container.innerHTML = '';
     }, 5000);
@@ -204,7 +206,7 @@
       searchInput.focus();
       return;
     }
-    if (window.extractAlbumId && (/^https?:\/\//i.test(q) || /18comic|jmcomic/i.test(q))) {
+    if (window.extractAlbumId) {
       var parsedId = window.extractAlbumId(q);
       if (parsedId) {
         q = parsedId;
@@ -240,6 +242,7 @@
     resultsDiv.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">搜索中...</span></div><p class="mt-2 text-muted">搜索中...</p></div>';
     statusDiv.classList.add('d-none');
     // 清除全局错误
+    clearTimeout(alertTimer);
     var alertContainer = document.getElementById('global-alert-container');
     if (alertContainer) {
       alertContainer.style.display = 'none';
@@ -290,6 +293,7 @@
   // ── 渲染 ──
 
   var _wishlistCache = {};
+  var _dirtyWishlist = Object.create(null);
 
   function renderResults(data) {
     var items = data.items || [];
@@ -297,6 +301,7 @@
     var totalPages = Math.min(MAX_PAGE, total == null
       ? currentPage + (data.has_more ? 1 : 0) : Math.ceil(total / currentPageSize));
     var albumIds = items.map(function (item) { return item.album_id; });
+    _dirtyWishlist = Object.create(null);
 
     // 批量查询收藏状态（15s 超时 + abortKey 去重，防止页面跳转/翻页时堆积占用浏览器连接池）
     if (albumIds.length > 0) {
@@ -309,7 +314,12 @@
       })
       .then(function (checkData) {
         if (checkData.status === 'ok' && checkData.result) {
-          _wishlistCache = checkData.result;
+          var nextCache = Object.assign({}, checkData.result);
+          Object.keys(_dirtyWishlist).forEach(function (id) {
+            if (_dirtyWishlist[id]) nextCache[id] = nextCache[id] || 'none';
+            else delete nextCache[id];
+          });
+          _wishlistCache = nextCache;
           updateWishlistButtons();
         }
       })
@@ -337,6 +347,7 @@
     var html = '<div class="row row-cols-1 row-cols-sm-2 row-cols-lg-3 row-cols-xl-4 g-3 mb-4">';
     items.forEach(function (item) {
       var albumUrl = '/album/' + encodeURIComponent(item.album_id);
+      var itemTitle = item.title || ('JM' + item.album_id);
       html += '<div class="col">';
       html += '<div class="card album-card h-100" data-album-url="' + albumUrl + '" data-album-id="' + escapeHtmlAttr(item.album_id) + '">';
       // 已下载标记（+ 压缩包标记）或本地文件不可用的原因：盖在封面左上角，由 refreshReadable 按 /api/preview/available 的结果显示
@@ -351,7 +362,7 @@
       }
 
       html += '</a><div class="card-body d-flex flex-column">';
-      html += '<h6 class="card-title" title="' + escapeHtmlAttr(item.title) + '"><a class="text-decoration-none text-reset" href="' + albumUrl + '">' + escapeHtml(item.title) + '</a></h6>';
+      html += '<h6 class="card-title" title="' + escapeHtmlAttr(itemTitle) + '"><a class="text-decoration-none text-reset" href="' + albumUrl + '">' + escapeHtml(itemTitle) + '</a></h6>';
       html += '<div class="mb-2 small text-muted">';
       if (item.author) html += '<div><i class="bi bi-person"></i> ' + escapeHtml(item.author) + '</div>';
       if (item.album_id) html += '<div><i class="bi bi-hash"></i> ' + escapeHtml(item.album_id) + '</div>';
@@ -529,6 +540,7 @@
     btn.classList.toggle('btn-warning', starred);
     btn.classList.toggle('btn-outline-warning', !starred);
     btn.title = starred ? '取消收藏' : '收藏';
+    btn.setAttribute('aria-label', '收藏');
     btn.setAttribute('aria-pressed', String(!!starred));
   }
 
@@ -543,6 +555,7 @@
       window.apiFetch('/api/wishlist/' + encodeURIComponent(albumId), { method: 'DELETE', timeoutMs: 15000 })
         .then(function (data) {
           if (data.status === 'ok') {
+            _dirtyWishlist[albumId] = false;
             setWishlistButton(btn, false);
             if (typeof showToast === 'function') showToast('已取消收藏', 'info');
             delete _wishlistCache[albumId];
@@ -570,6 +583,7 @@
       })
       .then(function (data) {
         if (data.status === 'ok') {
+          _dirtyWishlist[albumId] = true;
           setWishlistButton(btn, true);
           if (typeof showToast === 'function') showToast('已添加收藏', 'success');
           _wishlistCache[albumId] = 'none';
@@ -593,15 +607,31 @@
 
   // ── 事件绑定 ──
 
-  if (searchBtn) searchBtn.addEventListener('click', doSearch);
+  if (resultsDiv.addEventListener) {
+    resultsDiv.addEventListener('error', function (e) {
+      var img = e.target;
+      if (!img || img.tagName !== 'IMG' || img.dataset.fallback) return;
+      img.dataset.fallback = '1';
+      img.src = '/static/images/no-cover.svg';
+    }, true);
+  }
 
-  // 拦截表单提交（Enter 键），防止页面重载
+  if (searchBtn) searchBtn.addEventListener('click', function (e) {
+    e.preventDefault();
+    doSearch();
+  });
+
+  // 拦截表单提交（Enter 键 / submit 按钮），防止页面重载
   if (searchForm) {
-    searchForm.addEventListener('submit', function (e) { e.preventDefault(); });
+    searchForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      doSearch();
+    });
   }
 
   if (searchInput) searchInput.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') {
+      if (e.isComposing || e.keyCode === 229) return;
       e.preventDefault();
       doSearch();
     }

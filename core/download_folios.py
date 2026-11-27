@@ -45,7 +45,7 @@ def _title_from_output_path(output_path: object, album_id: object) -> str:
     return '' if _is_placeholder_title(name, aid) else name
 
 
-def resolve_job_titles(jobs: list[dict], books: dict | None = None) -> list[dict]:
+def resolve_job_titles(jobs: list[dict], books: dict | None = None, *, conn=None) -> list[dict]:
     """Backfill missing or numeric-ID job titles from album_meta, detail cache, or folder name."""
     missing_ids: list[str] = []
     for job in jobs:
@@ -61,8 +61,8 @@ def resolve_job_titles(jobs: list[dict], books: dict | None = None) -> list[dict
     if missing_ids:
         unique_ids = tuple(dict.fromkeys(missing_ids))
         placeholders = ','.join('?' for _ in unique_ids)
-        with closing(db.get_db()) as conn:
-            for row in conn.execute(
+        with db.library_snapshot(conn) as reader:
+            for row in reader.execute(
                 f'SELECT album_id, title FROM album_meta WHERE album_id IN ({placeholders})',
                 unique_ids,
             ):
@@ -72,7 +72,7 @@ def resolve_job_titles(jobs: list[dict], books: dict | None = None) -> list[dict
             still_missing = [aid for aid in unique_ids if aid not in meta_titles]
             if still_missing:
                 p2 = ','.join('?' for _ in still_missing)
-                for aid, raw in conn.execute(
+                for aid, raw in reader.execute(
                     f'SELECT album_id, detail_json FROM album_detail_cache WHERE album_id IN ({p2}) '
                     'AND length(CAST(detail_json AS BLOB)) <= 262144',
                     tuple(still_missing),
@@ -100,32 +100,45 @@ def resolve_job_titles(jobs: list[dict], books: dict | None = None) -> list[dict
     return jobs
 
 
-def transfer_page(page, page_size, album_id=None):
-    with closing(db.get_db()) as conn:
-        conn.execute('BEGIN')
+def transfer_page(page, page_size, album_id=None, *, conn=None):
+    with db.library_snapshot(conn) as reader:
         counts = dict.fromkeys(STATES, 0)
-        counts.update(conn.execute('SELECT status, COUNT(*) FROM jobs GROUP BY status').fetchall())
+        counts.update(reader.execute('SELECT status, COUNT(*) FROM jobs GROUP BY status').fetchall())
         counts['all'] = sum(counts.values())
         counts['active'] = counts['running'] + counts['paused']
         size = min(page_size, 200 if album_id else 12)
-        total = conn.execute('SELECT COUNT(*) FROM jobs WHERE album_id=?', (album_id,)).fetchone()[0] if album_id else (
-            conn.execute('SELECT COUNT(DISTINCT album_id) FROM jobs').fetchone()[0])
-        pages = max(1, (total + size - 1) // size)
-        page = min(page, pages)
-        offset = (page - 1) * size
         jobs = []
         album_totals = {}
         if album_id:
-            latest = conn.execute("SELECT job_id FROM jobs WHERE album_id=? AND status='completed' "
-                                  'ORDER BY created_at DESC,id DESC LIMIT 1', (album_id,)).fetchone()
-            jobs = [dict(row, latest_completed_job_id=latest[0] if latest else None) for row in conn.execute(
+            total = reader.execute('SELECT COUNT(*) FROM jobs WHERE album_id=?', (album_id,)).fetchone()[0]
+            pages = max(1, (total + size - 1) // size)
+            page = min(page, pages)
+            offset = (page - 1) * size
+            latest = reader.execute("SELECT job_id FROM jobs WHERE album_id=? AND status='completed' "
+                                    'ORDER BY created_at DESC,id DESC LIMIT 1', (album_id,)).fetchone()
+            jobs = [dict(row, latest_completed_job_id=latest[0] if latest else None) for row in reader.execute(
                 'SELECT * FROM jobs WHERE album_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?',
                 (album_id, size, offset))]
             album_totals[album_id] = total
         else:
-            books = conn.execute("SELECT album_id, COUNT(*) AS n FROM jobs GROUP BY album_id ORDER BY "
-                                 "MAX(status IN ('running','paused')) DESC, MAX(status='queued') DESC, MAX(created_at) DESC, "
-                                 'MAX(id) DESC LIMIT ? OFFSET ?', (size, offset)).fetchall()
+            if page == 1:
+                books = reader.execute(
+                    "SELECT album_id, COUNT(*) AS n, COUNT(*) OVER () AS _total_books FROM jobs GROUP BY album_id ORDER BY "
+                    "MAX(status IN ('running','paused')) DESC, MAX(status='queued') DESC, MAX(created_at) DESC, "
+                    'MAX(id) DESC LIMIT ? OFFSET 0', (size,),
+                ).fetchall()
+                total = books[0]['_total_books'] if books else 0
+                pages = max(1, (total + size - 1) // size)
+            else:
+                total = reader.execute('SELECT COUNT(DISTINCT album_id) FROM jobs').fetchone()[0]
+                pages = max(1, (total + size - 1) // size)
+                page = min(page, pages)
+                offset = (page - 1) * size
+                books = reader.execute(
+                    "SELECT album_id, COUNT(*) AS n FROM jobs GROUP BY album_id ORDER BY "
+                    "MAX(status IN ('running','paused')) DESC, MAX(status='queued') DESC, MAX(created_at) DESC, "
+                    'MAX(id) DESC LIMIT ? OFFSET ?', (size, offset),
+                ).fetchall()
             if books:
                 ordered_ids = []
                 for book in books:
@@ -134,7 +147,7 @@ def transfer_page(page, page_size, album_id=None):
                     album_totals[key] = book['n']
                 state_rank = {state: idx for idx, state in enumerate(STATES)}
                 album_rank = {aid: idx for idx, aid in enumerate(ordered_ids)}
-                rows = conn.execute(
+                rows = reader.execute(
                     """WITH ranked AS (
                            SELECT *,
                                   ROW_NUMBER() OVER (
@@ -163,7 +176,7 @@ def transfer_page(page, page_size, album_id=None):
                     total=total, filter='all', view='album' if album_id else 'folios', album_id=album_id)
 
 
-def book_metadata(jobs):
+def book_metadata(jobs, *, conn=None):
     wanted = {}
     for job in jobs:
         selected = job.get('selected_photo_ids')
@@ -172,13 +185,13 @@ def book_metadata(jobs):
             photo_ids.add(str(selected[0]))
     if not wanted:
         return {}
-    with closing(db.get_db()) as conn:
+    with db.library_snapshot(conn) as reader:
         ids = tuple(wanted)
         placeholders = ','.join('?' for _ in ids)
-        rows = conn.execute(f'SELECT album_id,title,author FROM album_meta WHERE album_id IN ({placeholders})', ids)
+        rows = reader.execute(f'SELECT album_id,title,author FROM album_meta WHERE album_id IN ({placeholders})', ids)
         books = {row['album_id']: dict(row) for row in rows}
-        cached = conn.execute(f'SELECT album_id,detail_json FROM album_detail_cache WHERE album_id IN ({placeholders}) '
-                              'AND length(CAST(detail_json AS BLOB)) <= 262144', ids)
+        cached = reader.execute(f'SELECT album_id,detail_json FROM album_detail_cache WHERE album_id IN ({placeholders}) '
+                                'AND length(CAST(detail_json AS BLOB)) <= 262144', ids)
         for album_id, raw in cached:
             try:
                 detail = json.loads(raw)

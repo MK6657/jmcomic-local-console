@@ -112,7 +112,7 @@ from flask import Flask
 # 导入即配置好 app.log / error.log（不删除任何文件）；过期日志清理在 main() 中启动。
 from core.logger import (
     log, MAX_LOG_AGE_DAYS, MAX_TOTAL_SIZE_MB,
-    adopt_logger, install_process_hooks, start_log_maintenance,
+    adopt_logger, flush_log_summaries, install_process_hooks, start_log_maintenance,
     shutdown_logging,
 )
 log.info("=== JMComic 下载控制台 启动 ===")
@@ -211,6 +211,7 @@ def create_app() -> Flask:
     @app.context_processor
     def _inject_ui_theme() -> dict:
         """直出当前持久化的主题与动效配置（异常兜底默认），实现零闪屏渲染。"""
+        from core import APP_VERSION
         from core.ui_themes import (
             DEFAULT_UI_FX_PRESET,
             DEFAULT_UI_THEME,
@@ -234,6 +235,7 @@ def create_app() -> Flask:
             fx_enabled = True
             fx_preset = DEFAULT_UI_FX_PRESET
         return {
+            "app_version": APP_VERSION,
             "ui_theme": theme,
             "ui_themes": THEME_SPECS,
             "ui_dark_themes": DARK_THEMES,
@@ -266,13 +268,44 @@ def create_app() -> Flask:
             return response
         # Loopback binding alone does not prevent browser-origin attacks/DNS rebinding.
         try:
-            host = urlsplit("http://" + request.host).hostname
+            host_parsed = urlsplit("http://" + request.host)
+            host = (host_parsed.hostname or "").lower()
             origin = request.headers.get("Origin")
-            foreign_origin = origin is not None and origin != request.host_url.rstrip("/")
+            foreign_origin = False
+            if origin is not None:
+                if origin == "null":
+                    foreign_origin = True
+                else:
+                    orig_parsed = urlsplit(origin)
+                    req_scheme = (request.scheme or "http").lower()
+                    req_port = host_parsed.port or (443 if req_scheme == "https" else 80)
+                    orig_port = orig_parsed.port or (443 if orig_parsed.scheme.lower() == "https" else 80)
+                    foreign_origin = (
+                        orig_parsed.scheme.lower() != req_scheme
+                        or (orig_parsed.hostname or "").lower() != host
+                        or orig_port != req_port
+                        or bool(
+                            orig_parsed.username
+                            or orig_parsed.password
+                            or orig_parsed.path
+                            or orig_parsed.query
+                            or orig_parsed.fragment
+                        )
+                    )
             if host not in {"127.0.0.1", "localhost", "::1"} or foreign_origin:
                 return jsonify(status="error", message="仅允许本机同源访问"), 403
-            if request.headers.get("Sec-Fetch-Site") == "cross-site":
+            sec_fetch_site = request.headers.get("Sec-Fetch-Site")
+            if sec_fetch_site == "cross-site":
                 return jsonify(status="error", message="拒绝跨站请求"), 403
+            if (
+                sec_fetch_site
+                and sec_fetch_site not in {"same-origin", "none"}
+                and (
+                    request.method not in {"GET", "HEAD"}
+                    or request.path.startswith(("/api/", "/ui/", "/demo/"))
+                )
+            ):
+                return jsonify(status="error", message="仅允许本机同源访问"), 403
         except ValueError:
             return jsonify(status="error", message="无效主机地址"), 403
         if request.path.startswith("/api/"):
@@ -285,10 +318,15 @@ def create_app() -> Flask:
                 if not isinstance(parsed_body, dict):
                     return jsonify(status="error", message="请求体需为 JSON 对象"), 400
             elif not (upload_endpoint and request.mimetype == "multipart/form-data"):
+                form_media = request.mimetype in {
+                    "application/x-www-form-urlencoded",
+                    "text/plain",
+                    "multipart/form-data",
+                }
                 has_body = bool(request.content_length) or (
                     bool(request.headers.get("Transfer-Encoding")) and bool(request.get_data(cache=True))
                 )
-                if has_body:
+                if form_media or has_body:
                     return jsonify(status="error", message="请使用 application/json 或文件上传"), 415
 
     # 页面路由
@@ -558,6 +596,8 @@ def main(*, instance_lease=None):
             try:
                 if safe and maintenance_started:
                     shutdown_logging()
+                elif maintenance_started:
+                    flush_log_summaries(force=True)
             finally:
                 for signum, handler in old_handlers.items():
                     signal.signal(signum, handler)

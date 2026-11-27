@@ -30,16 +30,26 @@ def use_root_staging(root: Path) -> bool:
         return False
     # Even an ID-only chapter may require twenty digits; the other components
     # are the existing v5 workspace layout and the names mkstemp/mkdtemp emit.
-    longest = (Path(root) / '.jmcomic-work' / ('0' * 32) / 'pages' / ('__' + '9' * 20)
-               / STAGING_DIRECTORY / 'attempt-xxxxxxxx' / 'page-xxxxxxxx.webp')
-    return path_units(longest) > 259
+    suffix = (Path('.jmcomic-work') / ('0' * 32) / 'pages' / ('__' + '9' * 20)
+              / STAGING_DIRECTORY / 'attempt-xxxxxxxx' / 'page-xxxxxxxx.webp')
+    longest = Path(root) / suffix
+    if path_units(longest) > 259:
+        return True
+    try:
+        resolved = Path(os.path.realpath(root)) / suffix
+        return path_units(resolved) > 259
+    except OSError:
+        return False
 
 
 def staging_parent(parent: Path) -> Path:
     from .path_guard import DOWNLOAD_ROOT, get_download_root
     # Backup/checkpoint files outside the download tree keep their own volume.
     root = Path(DOWNLOAD_ROOT)
-    in_download_tree = parent.is_relative_to(root) or Path(os.path.realpath(parent)).is_relative_to(get_download_root())
+    same_drive = os.path.normcase(root.drive) == os.path.normcase(parent.drive)
+    in_download_tree = same_drive and (
+        parent.is_relative_to(root) or Path(os.path.realpath(parent)).is_relative_to(get_download_root())
+    )
     return root if in_download_tree and use_root_staging(root) else parent
 
 

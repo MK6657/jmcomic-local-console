@@ -350,7 +350,7 @@
 
     // 方向键翻页；带修饰键时交给浏览器（Alt+← 是后退），输入框内不拦截
     document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') { showTools(false); return; }
+        if (e.key === 'Escape') { if (!e.defaultPrevented) showTools(false); return; }
         if (!nav.plainKey(e) || !pages.length) return;
         if (e.key.toLowerCase() === 'w' && !e.repeat && cycleWidth) { e.preventDefault(); cycleWidth(); return; }
         if (e.key.toLowerCase() === 'm' && !e.repeat) { e.preventDefault(); showTools(tools.hidden); return; }

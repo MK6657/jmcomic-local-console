@@ -316,6 +316,7 @@
   var readableSerial = 0;
   var lastCompleted = [];
   var lastFailed = [];
+  var lastCanceled = [];
   var newestCompleted = {};  // album_id → 这部漫画最新的已完成任务的 job_id（新章节标记只放在这张卡片上）
   var READABLE_RECHECK_MS = 60000; // 文件可能在页面打开期间被移走：至少每分钟复查一次
 
@@ -376,7 +377,7 @@
 
   function refreshReadable(finishedJobs) {
     var ids = [];
-    finishedJobs.forEach(function (job) {
+    (finishedJobs || []).concat(lastCanceled).forEach(function (job) {
       var id = String(job.album_id || '');
       if (/^[0-9]{1,20}$/.test(id) && ids.indexOf(id) < 0) ids.push(id);
     });
@@ -486,6 +487,7 @@
     });
     lastCompleted = jobs.filter(function (job) { return job.status === 'completed'; });
     lastFailed = jobs.filter(function (job) { return job.status === 'failed'; });
+    lastCanceled = jobs.filter(function (job) { return job.status === 'canceled'; });
     newestCompleted = newestCompletedJobs(lastCompleted);
     // 有任务新完成：立即重新判断可读与新章节（刚下载的新章节已被服务端并入，不能再挂着“有新章节”）
     var newestKey = JSON.stringify(newestCompleted);
@@ -536,14 +538,16 @@
   function resolvedProgress(job) {
     var done = Number(job.done_pages) || 0;
     var total = Number(job.total_pages) || 0;
+    var archiving = false;
     if (job.status === 'running') {
       var live = liveProgress[job.job_id];
       if (live) {
+        archiving = Boolean(live.archiving);
         if (live.total >= total && live.done >= done) {
           done = live.done;
           total = live.total;
         } else {
-          liveProgress[job.job_id] = { done: done, total: total };
+          liveProgress[job.job_id] = { done: done, total: total, archiving: archiving };
         }
       }
     } else {
@@ -553,6 +557,7 @@
       done: done,
       total: total,
       hasTotal: total > 0,
+      archiving: archiving,
       pct: total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0,
     };
   }
@@ -560,7 +565,9 @@
   function patchRunningProgress(row, job) {
     var progress = resolvedProgress(job);
     var infoEl = row.querySelector('.folio-state span');
-    var nextText = progress.hasTotal ? (progress.done + ' / ' + progress.total + ' 页') : '总页数待确认';
+    var nextText = progress.archiving
+      ? '正在打包归档…'
+      : (progress.hasTotal ? (progress.done + ' / ' + progress.total + ' 页') : '总页数待确认');
     if (infoEl && infoEl.textContent !== nextText) infoEl.textContent = nextText;
     var barEl = row.querySelector('.folio-meter .progress-bar');
     if (barEl) {
@@ -844,7 +851,7 @@
 
     var infoText = structuralOnly
       ? ''
-      : (progress.hasTotal ? progress.done + ' / ' + progress.total + ' 页' : '总页数待确认');
+      : (progress.archiving ? '正在打包归档…' : (progress.hasTotal ? progress.done + ' / ' + progress.total + ' 页' : '总页数待确认'));
     var meterHtml = isQueued
       ? ''
       : '<div class="folio-meter"><div id="progress-' + jobIdAttr + '" class="progress-bar" role="progressbar" aria-label="任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + progress.pct + '" style="width:' + progress.pct + '%"></div></div>';
@@ -944,12 +951,14 @@
       var total = Number(data.total_pages) || 0;
       var prev = liveProgress[data.job_id];
       if (!prev || total > prev.total || done >= prev.done) {
-        liveProgress[data.job_id] = { done: done, total: total };
+        liveProgress[data.job_id] = { done: done, total: total, archiving: false };
       }
     },
     onArchiving: function (data, jobId) {
       var id = (data && data.job_id) || jobId;
       if (!id) return;
+      var prev = liveProgress[id] || { done: 0, total: 0 };
+      liveProgress[id] = { done: prev.done, total: prev.total, archiving: true };
       var infoEl = document.getElementById('info-' + id);
       if (infoEl) infoEl.textContent = '正在打包归档…';
     },

@@ -1,5 +1,6 @@
 """Optional desktop operations; callers retain all filesystem authorization."""
 import ctypes
+import functools
 import os
 from pathlib import Path
 import subprocess
@@ -7,6 +8,8 @@ import threading
 import time
 
 _REAL_STARTFILE = getattr(os, "startfile", None)
+_focus_lock = threading.Lock()
+_focus_generation = 0
 
 _ASFW_ANY = -1
 _SW_SHOW = 5
@@ -24,6 +27,7 @@ def supports_open_folder() -> bool:
     return callable(getattr(os, "startfile", None))
 
 
+@functools.lru_cache(maxsize=1)
 def _win32_user32():
     from ctypes import wintypes
 
@@ -94,7 +98,7 @@ def _title_matches_folder(title: str, folder: Path) -> bool:
         or title_cf.startswith(name_cf + " -")
         or title_cf.startswith(name_cf + " —")
         or full_cf in title_cf
-        or ("\\" + name_cf) in title_cf
+        or title_cf.endswith("\\" + name_cf)
     )
 
 
@@ -135,15 +139,19 @@ def _force_window_foreground(hwnd: int) -> None:
             user32.AttachThreadInput(cur_tid, fg_tid, False)
 
 
-def _focus_explorer_window(folder: Path, before_titles: dict[int, str]) -> None:
+def _focus_explorer_window(folder: Path, before_titles: dict[int, str], generation: int = 0) -> None:
     deadline = time.monotonic() + 2.0
     fallback_deadline = time.monotonic() + 0.45
     while time.monotonic() < deadline:
+        if generation and generation != _focus_generation:
+            return
         current = _snapshot_explorer_windows()
         created = [hwnd for hwnd in current if hwnd not in before_titles]
         if created:
             matched = next((hwnd for hwnd in created if _title_matches_folder(current[hwnd], folder)), created[0])
             time.sleep(0.08)
+            if generation and generation != _focus_generation:
+                return
             _force_window_foreground(matched)
             return
         changed = [hwnd for hwnd, title in current.items() if before_titles.get(hwnd) != title]
@@ -223,9 +231,13 @@ def open_folder(path, *, select=None) -> None:
     else:
         opener(target)
     if real_windows and before_titles is not None:
+        global _focus_generation
+        with _focus_lock:
+            _focus_generation += 1
+            gen = _focus_generation
         threading.Thread(
             target=_focus_explorer_window,
-            args=(Path(target), before_titles),
+            args=(Path(target), before_titles, gen),
             name="explorer-foreground",
             daemon=True,
         ).start()

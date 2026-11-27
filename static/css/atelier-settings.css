@@ -42,7 +42,7 @@
   color: var(--ink-2); text-decoration: none; font-size: 13px; font-weight: 500;
   transition: background-color 150ms ease, color 150ms ease;
 }
-.pref-index a span { color: var(--ink-3); font: 600 11px/1.6 var(--font-mono); }
+.pref-index a span { color: var(--ink-3); font: 600 12px/1.6 var(--font-mono); }
 .pref-index a:hover, .pref-index a:focus-visible { color: var(--accent); background: var(--bg-tint); }
 
 .pref-pages { min-width: 0; }

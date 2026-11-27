@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if __name__ == "__main__" and not __package__:
     sys.path.insert(0, str(ROOT))
 OPTIONAL_REVIEW = "WINDOWS_VNEXT_REVIEW.md"
-SOURCE_PATTERNS = ("app.py", "desktop.py", "launcher.py", "jmcomic_cli.py", "core/*.py", "routes/*.py",
+SOURCE_PATTERNS = ("app.py", "desktop.py", "launcher.py", "launcher.pyw", "start.bat", "jmcomic_cli.py", "core/*.py", "routes/*.py",
                    "templates/**/*.html", "static/**/*", "requirements*.txt", "build.spec", "tools/*.py",
                    "tools/windows-portable.manifest", "tools/licenses/**/*",
                    "docs/WINDOWS_RELEASE.md", "docs/DATA_MAINTENANCE.md",

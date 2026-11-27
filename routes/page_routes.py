@@ -2,6 +2,7 @@
 页面路由 —— 返回 Jinja2 模板，传入必要数据
 """
 from contextlib import closing
+from urllib.parse import urlsplit
 
 from flask import Blueprint, request, abort, redirect, current_app
 from core.interface import render_page as render_template
@@ -17,15 +18,21 @@ page_bp = Blueprint("page", __name__)
 def _safe_local_next(raw_next: str) -> str:
     candidate = (raw_next or '').strip()
     if (
-        candidate.startswith('/')
-        and not candidate.startswith('//')
-        and '\\' not in candidate
-        and '\r' not in candidate
-        and '\n' not in candidate
-        and not candidate.startswith('/ui/')
+        not candidate.startswith('/')
+        or candidate.startswith('//')
+        or '\\' in candidate
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in candidate)
     ):
-        return candidate
-    return '/downloads'
+        return '/downloads'
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or not parsed.path.startswith('/')
+        or parsed.path.startswith(('//', '/ui/', '/api/', '/demo/'))
+    ):
+        return '/downloads'
+    return candidate
 
 
 @page_bp.get('/ui/<edition>')
@@ -80,8 +87,10 @@ def index():
 def search():
     """搜索页面"""
     keyword = request.args.get("keyword", "")
-    sort = request.args.get("sort", "latest")
-    page_size = request.args.get("page_size", 20, type=int)
+    raw_sort = request.args.get("sort", "latest")
+    sort = raw_sort if raw_sort in ("latest", "views", "likes", "pictures") else "latest"
+    raw_size = request.args.get("page_size", 20, type=int)
+    page_size = max(1, min(raw_size if raw_size is not None else 20, 100))
     log.info(f"页面访问 搜索页 keyword={keyword}")
     return render_template("search.html", title="搜索漫画",
                            keyword=keyword, sort=sort, page_size=page_size,

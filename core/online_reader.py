@@ -597,10 +597,12 @@ def _page_content(image, url: str, data: bytes) -> bytes:
     with Image.open(io.BytesIO(data), formats=("WEBP", "JPEG", "GIF", "PNG")) as source:
         _check_pixels(*source.size)
         if num == 0:
-            if source.format in ("JPEG", "GIF"):
+            frames = int(getattr(source, "n_frames", 1) or 1)
+            for frame_idx in range(min(frames, 500)):
+                if frame_idx:
+                    source.seek(frame_idx)
+                    _check_pixels(*source.size)
                 source.load()
-            else:
-                source.verify()
             return data
         restored = _unscramble(source, num)
     buffer = io.BytesIO()

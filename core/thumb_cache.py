@@ -25,11 +25,13 @@ DEFAULT_PORTRAIT_WIDTH = 480
 MAX_CACHED_THUMBS = 400
 PRUNE_TARGET = 320
 WEBP_QUALITY = 82
+MAX_SOURCE_PIXELS = 64_000_000
 _MEM_CACHE_MAX = 500
 _CacheKey = tuple[Path, str, int]
 _mem_lock = threading.Lock()
 _mem_hits: OrderedDict[_CacheKey, Path | None] = OrderedDict()
 _in_flight: dict[_CacheKey, Future] = {}
+_encode_semaphore = threading.BoundedSemaphore(4)
 
 
 def parse_width(raw: str | None) -> int | None:
@@ -60,17 +62,26 @@ def _prune_if_needed(folder: Path) -> None:
         with os.scandir(folder) as it:
             for entry in it:
                 try:
-                    if not entry.name.endswith(".webp") or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
                         continue
                     st = entry.stat(follow_symlinks=False)
-                    if is_link(Path(entry.path)):
+                    entry_path = Path(entry.path)
+                    if is_link(entry_path):
                         continue
-                    candidates.append((st.st_mtime, Path(entry.path)))
+                    if entry.name.startswith(".thumb-") and entry.name.endswith(".tmp"):
+                        if now - st.st_mtime > 300.0:
+                            entry_path.unlink(missing_ok=True)
+                        continue
+                    if not entry.name.endswith(".webp"):
+                        continue
+                    candidates.append((st.st_mtime, entry_path))
                 except OSError:
                     continue
         if len(candidates) <= MAX_CACHED_THUMBS:
             return
-        candidates.sort(key=lambda item: item[0])
+        with _mem_lock:
+            hot_paths = {v for v in list(_mem_hits.values())[-160:] if isinstance(v, Path)}
+        candidates.sort(key=lambda item: (item[1] in hot_paths, item[0]))
         to_remove = len(candidates) - PRUNE_TARGET
         removed = []
         for mtime, stale in candidates:
@@ -104,13 +115,21 @@ def _encode_thumbnail(source_bytes: bytes | None, source_path: Path | None, widt
     if target is None:
         return None
     max_height = width * 2
-    with Image.open(target) as raw_img:
-        img = ImageOps.exif_transpose(raw_img)
-        if img.width <= width and img.height <= max_height:
+    with _encode_semaphore, Image.open(target) as raw_img:
+        if raw_img.width * raw_img.height > MAX_SOURCE_PIXELS:
             return None
+        orientation = 1
+        try:
+            orientation = int(raw_img.getexif().get(274, 1) or 1)
+        except Exception:
+            orientation = 1
+        eff_w, eff_h = (raw_img.height, raw_img.width) if orientation in (5, 6, 7, 8) else raw_img.size
+        if eff_w <= width and eff_h <= max_height:
+            return None
+        img = ImageOps.exif_transpose(raw_img) if orientation != 1 else raw_img
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
-        else:
+        elif img is raw_img:
             img = img.copy()
         img.thumbnail((width, max_height), Image.Resampling.LANCZOS)
         out = io.BytesIO()
@@ -125,8 +144,10 @@ def _cache_path(folder: Path, cache_key: str, width: int) -> Path:
 
 def _valid_thumbnail(folder: Path, target: Path) -> bool:
     try:
-        return (target.parent == folder and not is_link(folder)
-                and not is_link(target) and target.is_file())
+        if target.parent != folder or is_link(folder) or is_link(target):
+            return False
+        st = target.stat()
+        return st.st_size > 0 and target.is_file()
     except (OSError, RuntimeError):
         return False
 

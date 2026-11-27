@@ -11,7 +11,7 @@ from flask import Blueprint, jsonify, request
 
 import core.database as db
 from core import local_availability, update_checker, update_store
-from core.local_availability import MAX_IDS, readable_among
+from core.local_availability import MAX_IDS, readable_among, states_among
 from core.logger import log
 from core.settings import get_settings
 from core.validation import validate_numeric
@@ -125,7 +125,9 @@ def update_summary():
             runtime["phase"] = "idle"   # 刚打开开关：后台下一轮（1 分钟内）就会继续
         if runtime["phase"] not in ("starting", "paused"):
             runtime["resume_at"] = None
-        targets = readable_among(db.get_completed_album_ids())
+        with db.library_snapshot() as conn:
+            states = states_among(db.get_completed_album_ids(conn=conn), conn)
+            targets = {aid for aid, st in states.items() if st.readable}
         return jsonify({
             "status": "ok",
             "enabled": enabled,

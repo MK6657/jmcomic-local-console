@@ -133,12 +133,13 @@
 
     // ── archiving ──
     source.addEventListener('archiving', function (e) {
+      var data = null;
       try {
-        var data = JSON.parse(e.data);
+        data = JSON.parse(e.data);
         var pctEl = document.getElementById('pct-' + data.job_id);
         if (pctEl) pctEl.textContent = '📦 打包中';
       } catch (err) { /* 忽略 */ }
-      if (_callbacks.onArchiving) _callbacks.onArchiving(e);
+      if (_callbacks.onArchiving) _callbacks.onArchiving(data || { job_id: jobId }, (data && data.job_id) || jobId, e);
     });
 
     // ── 自动重连（最多连续失败 5 次）──

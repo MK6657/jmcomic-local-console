@@ -169,12 +169,14 @@
   });
 
   // ── 全局 alert 管理 ──
+  var alertTimer = null;
 
   function showGlobalAlert(message, type) {
     type = type || 'danger';
     var container = document.getElementById('global-alert-container');
     if (!container) return;
 
+    if (alertTimer) clearTimeout(alertTimer);
     container.style.display = 'block';
     container.innerHTML = '<div class="alert alert-' + type + ' alert-dismissible fade show mb-3" role="alert">'
       + escapeHtml(message)
@@ -182,7 +184,8 @@
       + '</div>';
 
     // 自动隐藏（5秒后）
-    setTimeout(function () {
+    alertTimer = setTimeout(function () {
+      alertTimer = null;
       container.style.display = 'none';
       container.innerHTML = '';
     }, 5000);
@@ -203,12 +206,10 @@
       searchInput.focus();
       return;
     }
-    if (window.extractAlbumId && (/^https?:\/\//i.test(q) || /18comic|jmcomic/i.test(q))) {
-      var parsedId = window.extractAlbumId(q);
-      if (parsedId) {
-        q = parsedId;
-        searchInput.value = q;
-      }
+    var parsedId = window.extractAlbumId ? window.extractAlbumId(q) : null;
+    if (parsedId) {
+      q = parsedId;
+      searchInput.value = q;
     }
 
     currentQuery = q;
@@ -289,6 +290,7 @@
   // ── 渲染 ──
 
   var _wishlistCache = {};
+  var _dirtyWishlist = Object.create(null);
 
   function renderResults(data) {
     var items = data.items || [];
@@ -296,6 +298,8 @@
     var totalPages = Math.min(MAX_PAGE, total == null
       ? currentPage + (data.has_more ? 1 : 0) : Math.ceil(total / currentPageSize));
     var albumIds = items.map(function (item) { return item.album_id; });
+    _wishlistCache = {};
+    _dirtyWishlist = Object.create(null);
 
     // 批量查询收藏状态（15s 超时 + abortKey 去重，防止页面跳转/翻页时堆积占用浏览器连接池）
     if (albumIds.length > 0) {
@@ -308,8 +312,10 @@
       })
       .then(function (checkData) {
         if (checkData.status === 'ok' && checkData.result) {
-          _wishlistCache = checkData.result;
-          updateWishlistButtons();
+          Object.keys(checkData.result).forEach(function (aid) {
+            if (!_dirtyWishlist[aid]) _wishlistCache[aid] = checkData.result[aid];
+          });
+          updateWishlistButtons(true);
         }
       })
       .catch(function (err) {
@@ -534,6 +540,7 @@
     if (btn.disabled) return;
     btn.disabled = true;
     var albumId = btn.getAttribute('data-album-id');
+    _dirtyWishlist[albumId] = true;
     var isStarred = btn.querySelector('i').classList.contains('bi-star-fill');
 
     if (isStarred) {
@@ -583,9 +590,11 @@
     }
   }
 
-  function updateWishlistButtons() {
+  function updateWishlistButtons(skipDirty) {
     resultsDiv.querySelectorAll('.wishlist-btn').forEach(function (btn) {
-      setWishlistButton(btn, _wishlistCache[btn.getAttribute('data-album-id')] !== undefined);
+      var aid = btn.getAttribute('data-album-id');
+      if (skipDirty && _dirtyWishlist[aid]) return;
+      setWishlistButton(btn, _wishlistCache[aid] !== undefined);
     });
   }
 

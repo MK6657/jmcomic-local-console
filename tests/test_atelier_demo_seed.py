@@ -201,16 +201,20 @@ def test_install_catalog_serves_offline_detail_cover_and_blocks_live_syncs(app):
     assert cover_resp.status_code == 200 and cover_resp.mimetype == 'image/webp'
     assert demo_client.get('/api/cover/99999999').status_code == 404
 
-    # All upstream-mutating or network endpoints are rejected with 409 in demo mode
+    # All upstream-mutating or network endpoints are rejected with 409 in demo mode,
+    # while read-only batch preview stays available offline.
     for blocked_path in (
         '/api/jobs',
         f'/api/updates/{aid}/check',
         f'/api/library/{aid}/tags/sync',
         '/api/library/tags/sync-all',
         '/api/wishlist/download',
+        '/api/batch-downloads/confirm',
     ):
         resp = demo_client.post(blocked_path, json={})
         assert resp.status_code == 409, f'{blocked_path} returned {resp.status_code}'
+    assert demo_client.delete('/api/jobs/demo-job-1').status_code == 409
+    assert demo_client.post('/api/batch-downloads/preview', json={'kind': 'new_chapters'}).status_code == 200
     assert demo_client.get('/api/system/diagnose').status_code == 409
 
     # Demo online image route validates numeric photo_id
@@ -222,9 +226,15 @@ def test_install_catalog_serves_offline_detail_cover_and_blocks_live_syncs(app):
     assert wish_resp.status_code == 201 and wish_resp.get_json()['status'] == 'ok'
 
     # Classic settings template exposes #settings-reset-btn for parity with Atelier
-    classic_settings = demo_client.get('/settings?ui=classic')
-    assert classic_settings.status_code == 200
-    assert 'id="settings-reset-btn"' in classic_settings.get_data(as_text=True)
+    demo_client.set_cookie('jmconsole_edition', 'classic')
+    try:
+        classic_settings = demo_client.get('/settings')
+        assert classic_settings.status_code == 200
+        classic_html = classic_settings.get_data(as_text=True)
+        assert 'classic/css/style.css' in classic_html
+        assert 'id="settings-reset-btn"' in classic_html
+    finally:
+        demo_client.delete_cookie('jmconsole_edition')
 
 
 def test_demo_retry_maintenance_packs_pending_album_offline(tmp_path):

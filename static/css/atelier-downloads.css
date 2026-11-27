@@ -44,7 +44,7 @@
 .folio-filters a:hover, .record-cleanup summary:hover { background: var(--bg-subtle); color: var(--ink); }
 .folio-filters a[aria-current],
 .folio-filters a[aria-current]:hover { background: var(--accent); color: var(--accent-fg); }
-.folio-filter-count { font: 600 11px var(--font-mono); font-variant-numeric: tabular-nums; }
+.folio-filter-count { font: 600 12px var(--font-mono); font-variant-numeric: tabular-nums; }
 
 .record-cleanup { position: relative; }
 .record-cleanup summary { list-style: none; cursor: pointer; }

@@ -71,24 +71,24 @@ def public_directory(album_id, conn=None):
         return _location(json.loads(row['payload'])) if row else None
 
 
-def statuses(album_ids):
+def statuses(album_ids, *, conn=None):
     ids = tuple(str(a) for a in set(album_ids))
     if not ids:
         return {}
-    with closing(db.get_db()) as conn:
-        rows = conn.execute('SELECT album_id,state,error,generation, CASE WHEN json_valid(payload) THEN '
-                            "json_extract(payload,'$._attempt') END AS attempts FROM album_maintenance "
-                            'WHERE album_id IN (SELECT value FROM json_each(?))', (json.dumps(ids),))
+    with db.library_snapshot(conn) as reader:
+        rows = reader.execute('SELECT album_id,state,error,generation, CASE WHEN json_valid(payload) THEN '
+                              "json_extract(payload,'$._attempt') END AS attempts FROM album_maintenance "
+                              'WHERE album_id IN (SELECT value FROM json_each(?))', (json.dumps(ids),))
         return {row['album_id']: {'state': row['state'], 'error': row['error'], 'generation': row['generation'],
                                   'attempts': row['attempts'] or 0, 'max_attempts': MAX_ATTEMPTS} for row in rows}
 
 
-def failed_without_history(limit=20):
+def failed_without_history(limit=20, *, conn=None):
     """Keep retry reachable after the user clears disposable job history."""
-    with closing(db.get_db()) as conn:
-        rows = conn.execute("SELECT m.album_id,m.error FROM album_maintenance m WHERE m.state='failed' "
-                            "AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.album_id=m.album_id AND j.status='completed') "
-                            'ORDER BY m.rowid LIMIT ?', (limit,))
+    with db.library_snapshot(conn) as reader:
+        rows = reader.execute("SELECT m.album_id,m.error FROM album_maintenance m WHERE m.state='failed' "
+                              "AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.album_id=m.album_id AND j.status='completed') "
+                              'ORDER BY m.rowid LIMIT ?', (limit,))
         return [dict(row) for row in rows]
 
 
@@ -201,22 +201,45 @@ def _apply_move(conn, work, *, recover_only=False):
             if 'displaced' in intent and not os.path.lexists(target):
                 retained.rename(target)
             raise
-    different = conn.execute('SELECT c.job_id,c.output_path,c.superseded_at FROM resource_catalog c '
-                             'JOIN jobs j USING(job_id) WHERE j.album_id=? AND j.status=\'completed\' AND '
-                             '(j.output_path IS NOT c.output_path OR j.superseded_at IS NOT c.superseded_at)',
-                             (work['album_id'],)).fetchall()
-    conn.execute("UPDATE jobs SET output_path=? WHERE album_id=? AND status='completed' AND job_id IN ("
-                 'SELECT p.job_id FROM published_tasks p JOIN resource_catalog c USING(job_id) '
-                 'WHERE p.album_id=? AND c.output_path=? AND c.superseded_at IS NULL)',
-                 (str(target), work['album_id'], work['album_id'], str(source)))
+    source_norm = os.path.normcase(os.path.abspath(source))
+    different = conn.execute(
+        'SELECT c.job_id, c.job_order, c.title, c.selected_photo_ids, c.output_path, '
+        'c.created_at, c.updated_at, c.completed_at, c.superseded_at FROM resource_catalog c '
+        'JOIN jobs j USING(job_id) WHERE j.album_id=? AND j.status=\'completed\' AND '
+        '(j.id IS NOT c.job_order OR j.title IS NOT c.title OR j.selected_photo_ids IS NOT c.selected_photo_ids '
+        'OR j.output_path IS NOT c.output_path OR j.created_at IS NOT c.created_at '
+        'OR j.updated_at IS NOT c.updated_at OR j.completed_at IS NOT c.completed_at '
+        'OR j.superseded_at IS NOT c.superseded_at)',
+        (work['album_id'],),
+    ).fetchall()
+    matched_pub_jobs = [
+        row['job_id'] for row in conn.execute(
+            'SELECT p.job_id, c.output_path FROM published_tasks p JOIN resource_catalog c USING(job_id) '
+            'WHERE p.album_id=? AND c.superseded_at IS NULL AND c.output_path IS NOT NULL',
+            (work['album_id'],),
+        ).fetchall()
+        if row['output_path'] and os.path.normcase(os.path.abspath(row['output_path'])) == source_norm
+    ]
+    if matched_pub_jobs:
+        placeholders = ','.join('?' for _ in matched_pub_jobs)
+        conn.execute(
+            f"UPDATE jobs SET output_path=? WHERE album_id=? AND status='completed' AND job_id IN ({placeholders})",
+            (str(target), work['album_id'], *matched_pub_jobs),
+        )
     for table in ('jobs', 'resource_catalog'):
         if table == 'resource_catalog':
-            conn.executemany('UPDATE resource_catalog SET output_path=?,superseded_at=? WHERE job_id=?',
-                             ((row['output_path'], row['superseded_at'], row['job_id']) for row in different))
+            conn.executemany(
+                'UPDATE resource_catalog SET job_order=?,title=?,selected_photo_ids=?,output_path=?,'
+                'created_at=?,updated_at=?,completed_at=?,superseded_at=? WHERE job_id=?',
+                ((
+                    row['job_order'], row['title'], row['selected_photo_ids'], row['output_path'],
+                    row['created_at'], row['updated_at'], row['completed_at'], row['superseded_at'], row['job_id'],
+                ) for row in different),
+            )
         paths = conn.execute(f'SELECT DISTINCT output_path FROM {table} WHERE album_id=? AND output_path IS NOT NULL',
                              (work['album_id'],)).fetchall()
         for row in paths:
-            if row['output_path'] and Path(row['output_path']) == source:
+            if row['output_path'] and os.path.normcase(os.path.abspath(row['output_path'])) == source_norm:
                 conn.execute(f'UPDATE {table} SET output_path=? WHERE album_id=? AND output_path=?',
                              (str(target), work['album_id'], row['output_path']))
     moved = {**payload, 'directory': intent['to'], 'preferred_directory': intent['to']}

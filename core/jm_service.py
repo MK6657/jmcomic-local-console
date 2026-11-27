@@ -127,10 +127,10 @@ def _acquire_client(kind, timeout=None, stop=None):
         deadline = min(outer_deadline, sdk_adapter.discovery_deadline(option, timeout))
         metadata_budget.remaining(deadline, stop)
         overrides = {}
+        if not shared and option.client.postman.src_dict.get("type") == "curl_cffi_session":
+            overrides["use_thread_local_curl"] = False
         if kind == "image":
             overrides["image_only"] = True
-            if option.client.postman.src_dict.get("type") == "curl_cffi_session":
-                overrides["use_thread_local_curl"] = False
         elif kind == "check":
             overrides.update(cache=False, timeout=timeout)
         try:
@@ -188,6 +188,9 @@ def get_client(shared=True):
         with _factory_drained:
             _shared_builders -= 1
             _factory_drained.notify_all()
+
+
+_DEFAULT_GET_CLIENT = get_client
 
 
 def option_generation() -> int:
@@ -308,12 +311,21 @@ class _JobImageClientPool:
         self._closed = False
 
     def acquire(self):
+        chosen = None
+        stale = []
         with self._lock:
             while self._idle:
                 candidate, gen = self._idle.pop()
-                if not self._closed and gen == _option_generation:
-                    return candidate
-                threading.Thread(target=close_client, args=(candidate,), daemon=True).start()
+                if chosen is None and not self._closed and gen == _option_generation:
+                    chosen = candidate
+                else:
+                    stale.append(candidate)
+        for old in stale:
+            close_client(old)
+        if chosen is not None:
+            return chosen
+        if get_client is _DEFAULT_GET_CLIENT:
+            return new_image_client()
         client, _ = get_client(shared=False)
         return client
 
@@ -388,7 +400,7 @@ def _download_image_single_attempt(
     photo, idx, img, img_url, img_path, scramble_id,
     done_pages, total_pages, failed_pages, pending_images,
     tracker, photo_dir, pass_num, timeout, lock, refetch_gif=False, stop_event=None, node_attempts=None,
-    checkpoint=None, settings=None,
+    checkpoint=None, settings=None, _preverified=False,
 ):
     """下载单页的一趟：在同一超时预算内最多尝试 node_attempts 个节点。
     成功 → done_pages +1
@@ -416,10 +428,12 @@ def _download_image_single_attempt(
     try:
         # Existing files need the same error boundary as downloaded files. An
         # invalid/bomb image must be replaced or recorded, never abort a chapter.
-        reusable = pass_num == 1 and ((not getattr(checkpoint, 'isolated', False) and skip and not (gif and refetch_gif))
-                                      or (checkpoint is not None and checkpoint.contains(img_path)))
+        reusable = _preverified or (
+            pass_num == 1 and ((not getattr(checkpoint, 'isolated', False) and skip and not (gif and refetch_gif))
+                               or (checkpoint is not None and checkpoint.contains(img_path)))
+        )
         verified_digest = None
-        if reusable and _valid_image(img_path):
+        if reusable and (_preverified or _valid_image(img_path)):
             if getattr(checkpoint, 'isolated', False):
                 verified_digest = checkpoint.receipt_digest(img_path)
         else:
@@ -993,6 +1007,7 @@ def _download_chapter_image(
                 pending_images if pass_num == 1 else None,
                 tracker, photo_dir, pass_num=pass_num, timeout=timeout, lock=lock, refetch_gif=refetch_gif,
                 stop_event=stop_event, node_attempts=node_attempts, checkpoint=checkpoint, settings=settings,
+                _preverified=True,
             )
             return
 
@@ -1139,7 +1154,12 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
         # 残缺的几页不能让它们重新显示成完整、可离线阅读（core.local_availability）。
         # 只剩能读的压缩包（自动打包后删了原图）不算空壳：那次下载的内容还在
         if not has_local_pages(album_dir):
-            db.mark_completed_jobs_superseded(album_id, str(album_dir), job_id)
+            db.mark_completed_jobs_superseded(
+                album_id,
+                str(album_dir),
+                job_id,
+                missing_predicate=(lambda p: not has_local_pages(Path(p))) if existing is None else None,
+            )
         workspace = Workspace(dl_root, job_id, album_id, album_dir, checkpoint)
         seeds = workspace.seed(photos_to_download, existing or album_dir,
                                settings.get('skip_existing') == 'true', _valid_image, image_is_gif,
@@ -1282,6 +1302,8 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
         final_job = db.get_job(job_id)
         if final_job and final_job["status"] == "canceled":
             log.info(f"任务已被取消，跳过最终状态写入 job_id={job_id}")
+            if not tracker.is_done():
+                tracker.push("canceled", {"job_id": job_id, "status": "canceled", "message": "任务已被取消"})
             tracker.close()
             return
 
@@ -1320,7 +1342,10 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
 
         tracker.close()
 
-    except DownloadInterrupted:
+    except DownloadInterrupted as interrupted:
+        if str(interrupted) == "canceled" and not tracker.is_done():
+            tracker.push("canceled", {"job_id": job_id, "status": "canceled", "message": "任务已被取消"})
+            tracker.close()
         return
     except Exception as e:
         if stop_event is not None and stop_event.is_set():
@@ -1336,6 +1361,8 @@ def _run_album_download(job_id, album_id, photo_ids, checkpoint, stop_event, beg
             cur_job = None
         if cur_job and cur_job["status"] == "canceled":
             log.info(f"任务已被取消，异常处理跳过状态写入 job_id={job_id}")
+            if not tracker.is_done():
+                tracker.push("canceled", {"job_id": job_id, "status": "canceled", "message": "任务已被取消"})
             tracker.close()
             return
         if failed_pages:

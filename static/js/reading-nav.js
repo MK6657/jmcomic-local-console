@@ -128,8 +128,13 @@
     },
 
     plainKey: function (event) {
-      return !(event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing ||
-        event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
+      var target = event && event.target;
+      var inField = Boolean(target && typeof target.closest === 'function' &&
+        target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
+      var modalOpen = Boolean(typeof document !== 'undefined' && document.querySelector &&
+        document.querySelector('.modal.show, dialog[open]'));
+      return !(event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+        event.isComposing || inField || modalOpen);
     },
     /** 起始页：地址栏 ?page= 优先，其次本标签页记住的页码，默认 1（由调用方夹到有效范围） */
     initialPage: function (albumId) {

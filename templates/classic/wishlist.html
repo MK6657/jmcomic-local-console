@@ -5,7 +5,7 @@
 <!-- 与资源库标题栏一样可以换行：窄屏时按钮组整体换到下一行，标题不被挤得在词中间断开 -->
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
     <h4 class="text-nowrap"><i class="bi bi-bookmark-heart"></i> 收藏清单</h4>
-    <div>
+    <div class="d-flex flex-wrap gap-2">
         <!-- 下载“未下载”里的收藏（整部）：先在确认窗口里列出清单（js/batch-download.js），确认后才加入下载队列 -->
         <button type="button" class="btn btn-outline-primary btn-sm" id="wishlist-download-undownloaded-btn" aria-haspopup="dialog"
                 title="只下载“未下载”里的收藏（从未下载过的、下载被取消的），每部下载整部：先列出清单，确认后才加入下载队列">
@@ -71,7 +71,7 @@
     <button type="button" class="btn btn-danger btn-sm" id="batch-remove-btn">
         <i class="bi bi-trash"></i> 批量移除
     </button>
-    <span class="text-muted ms-2" id="selected-count">已选择 0 项</span>
+    <span class="text-muted ms-2" id="selected-count" role="status" aria-live="polite">已选择 0 项</span>
 </div>
 
 <!-- 收藏列表（列宽见 style.css .wishlist-table：长标题/作者在格内换行，窄屏时表格在本容器内横向滚动） -->
@@ -100,11 +100,11 @@
 </nav>
 
 <!-- 批量导入弹窗 -->
-<div class="modal fade" id="importModal" tabindex="-1">
+<div class="modal fade" id="importModal" tabindex="-1" aria-labelledby="importModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">批量导入收藏</h5>
+                <h5 class="modal-title" id="importModalLabel">批量导入收藏</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">

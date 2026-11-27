@@ -798,7 +798,7 @@ code {
 .tag-edit-btn {
   cursor: pointer;
   opacity: 0.6;
-  font-size: 0.65rem;
+  font-size: 0.75rem;
   margin-left: 0.2rem;
   color: var(--error);
   transition: opacity 0.15s ease;
@@ -886,7 +886,7 @@ code {
   min-height: 1.2rem;
 }
 .library-card .card-tags .tag-badge {
-  font-size: 0.65rem;
+  font-size: 0.75rem;
   padding: 0.1rem 0.4rem;
   cursor: default;
 }
@@ -894,7 +894,7 @@ code {
   cursor: pointer;
   margin-left: 0.15rem;
   opacity: 0.6;
-  font-size: 0.6rem;
+  font-size: 0.75rem;
 }
 .library-card .card-tags .tag-badge .tag-remove:hover { opacity: 1; }
 .library-card .card-actions {
@@ -904,7 +904,7 @@ code {
   padding-top: 0.3rem;
 }
 .library-card .card-actions .btn {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   padding: 0.15rem 0.5rem;
 }
 
@@ -1042,14 +1042,8 @@ code {
    骨架屏 & 加载
    ════════════════════════════════════════════════════════════════ */
 .skeleton {
-  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--border) 50%, var(--bg-tertiary) 75%);
-  background-size: 200% 100%;
-  animation: skeleton-loading 1.5s ease-in-out infinite;
+  background: var(--bg-tertiary);
   border-radius: var(--radius-sm);
-}
-@keyframes skeleton-loading {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
 }
 .spinner-overlay {
   display: flex;
@@ -1057,7 +1051,10 @@ code {
   align-items: center;
   padding: 3rem;
 }
-.spinner-border { color: var(--primary) !important; }
+.spinner-border {
+  color: var(--primary) !important;
+  animation: none !important;
+}
 
 /* ════════════════════════════════════════════════════════════════
    分页

@@ -361,7 +361,7 @@ html[data-fx="cyber"] :is(.btn-primary, .desk-tile)::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(112deg, transparent 22%, rgba(var(--accent-rgb), .24) 48%, rgba(255, 255, 255, .36) 52%, transparent 78%);
+  background: linear-gradient(112deg, transparent 22%, rgba(var(--accent-rgb), .24) 48%, var(--top-gleam) 52%, transparent 78%);
   transform: translate3d(-140%, 0, 0);
   pointer-events: none;
   z-index: 1;
@@ -431,7 +431,7 @@ html[data-fx="anime"] :is(.desk-search, .desk-ledger, .monograph-front, .monogra
   position: absolute;
   left: 20px; right: 20px; top: 0; height: 3px;
   border-radius: 0 0 6px 6px;
-  background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), .55), rgba(242, 140, 177, .85), rgba(126, 184, 240, .75), transparent);
+  background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), .55), rgba(var(--accent-rgb), .82), rgba(var(--warn-rgb), .65), transparent);
   opacity: 0;
   transform: scaleX(.5);
   transition: opacity 180ms ease, transform 240ms cubic-bezier(.34, 1.45, .64, 1);

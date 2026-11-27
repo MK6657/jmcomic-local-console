@@ -27,6 +27,10 @@ def test_saved_palette_is_in_first_html_response(client, theme):
         assert html.index('css/atelier.css?v=') < html.index('</head>')
         assert html.index('css/atelier-fx.css?v=') < html.index('</head>')
         assert re.findall(r'data-set-theme="(\w+)" aria-pressed="true"', html) == [theme]
+        assert re.search(
+            rf'data-set-theme="{theme}"[^>]*data-scheme="{"dark" if theme in DARK_THEMES else "light"}"',
+            html,
+        )
         assert 'href="/ui/classic"' in html
         assert ('id="quick-nav"' not in html) == url.startswith(('/online/', '/preview/'))
 

@@ -89,11 +89,14 @@
 (function () {
   var link = document.getElementById('classic-switch-atelier');
   if (!link) return;
-  link.addEventListener('click', function () {
-    var cur = window.location.pathname + window.location.search;
-    if (cur && cur !== '/downloads' && cur.indexOf('/ui/') !== 0) {
-      link.href = '/ui/atelier?next=' + encodeURIComponent(cur);
-    }
+  function syncHref() {
+    var cur = (window.location.pathname || '') + (window.location.search || '') + (window.location.hash || '');
+    link.href = (cur && cur !== '/downloads' && cur.indexOf('/ui/') !== 0)
+      ? '/ui/atelier?next=' + encodeURIComponent(cur)
+      : '/ui/atelier';
+  }
+  ['pointerover', 'focusin', 'pointerdown', 'click', 'contextmenu'].forEach(function (evt) {
+    link.addEventListener(evt, syncHref);
   });
 })();
 </script>
@@ -176,7 +179,7 @@ window.showToast = function (message, type, action) {
       icon = 'bi-x-circle-fill';
       break;
     case 'warning':
-      bgClass = 'bg-warning text-dark';
+      bgClass = 'bg-warning text-white';
       icon = 'bi-exclamation-triangle-fill';
       break;
     case 'info':

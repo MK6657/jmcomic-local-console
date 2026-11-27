@@ -12,16 +12,22 @@
   if (switcher) {
     var collection = switcher.closest('.atelier-collection');
     var defaultView = collection.dataset.layout;
-    var requested = new URLSearchParams(window.location.search).get('view');
     var modes = {shelf: '书架', catalog: '名录'};
-    collection.dataset.layout = Object.hasOwn(modes, requested) ? requested : defaultView;
+    function applyLayoutFromUrl() {
+      var req = new URLSearchParams(window.location.search).get('view');
+      var activeMode = Object.hasOwn(modes, req) ? req : defaultView;
+      collection.dataset.layout = activeMode;
+      switcher.querySelectorAll('button').forEach(function (btn) {
+        btn.setAttribute('aria-pressed', String(btn.dataset.mode === activeMode));
+      });
+    }
     Object.keys(modes).forEach(function (mode) {
       var button = document.createElement('button');
       button.type = 'button';
       button.textContent = modes[mode];
       button.dataset.mode = mode;
       button.setAttribute('aria-controls', switcher.getAttribute('aria-controls'));
-      button.setAttribute('aria-pressed', String(mode === collection.dataset.layout));
+      button.setAttribute('aria-pressed', 'false');
       button.addEventListener('click', function () {
         collection.dataset.layout = mode;
         switcher.querySelectorAll('button').forEach(function (other) {
@@ -30,10 +36,28 @@
         var url = new URL(window.location.href);
         if (mode === defaultView) url.searchParams.delete('view');
         else url.searchParams.set('view', mode);
-        window.history.replaceState(window.history.state, '', url);
+        var nextRelative = url.pathname + url.search;
+        var st = window.history.state;
+        if (st && st.jmSearch && typeof st.jmSearch === 'object') {
+          st = Object.assign({}, st, { jmSearch: Object.assign({}, st.jmSearch, { url: nextRelative }) });
+          try {
+            var rawSnap = window.sessionStorage.getItem('jm-search-state-v1');
+            if (rawSnap) {
+              var snap = JSON.parse(rawSnap);
+              if (snap && typeof snap === 'object') {
+                snap.url = nextRelative;
+                window.sessionStorage.setItem('jm-search-state-v1', JSON.stringify(snap));
+              }
+            }
+          } catch (_) {}
+        }
+        window.history.replaceState(st, '', url);
       });
       switcher.appendChild(button);
     });
+    applyLayoutFromUrl();
+    window.addEventListener('popstate', applyLayoutFromUrl);
+    window.addEventListener('pageshow', function (event) { if (event.persisted) applyLayoutFromUrl(); });
     collection.addEventListener('error', function (event) {
       var image = event.target;
       if (image.tagName === 'IMG' && image.closest('.shelf-cover')) image.hidden = true;
@@ -48,10 +72,12 @@
     function finish(jobId, status, label, color) {
       var badge = document.getElementById('pct-' + jobId);
       if (!badge) return;
-      badge.closest('[data-job-id]').dataset.status = status;
+      var row = badge.closest('[data-job-id]');
+      if (row) row.dataset.status = status;
       badge.textContent = label;
       badge.classList.replace('bg-primary', color);
-      document.getElementById('progress-' + jobId).parentElement.hidden = true;
+      var bar = document.getElementById('progress-' + jobId);
+      if (bar && bar.parentElement) bar.parentElement.hidden = true;
     }
     window.setSSECallbacks({
       onCanceled: function (event, jobId) { finish(jobId, 'canceled', '已取消', 'bg-secondary'); },
@@ -59,7 +85,8 @@
       onFailed: function (event, jobId) { finish(jobId, 'failed', '失败', 'bg-danger'); },
     });
     document.querySelectorAll('[data-status="running"]').forEach(function (row) {
-      window._jobTitleMap[row.getAttribute('data-job-id')] = row.querySelector('strong').textContent;
+      var strong = row.querySelector('strong');
+      window._jobTitleMap[row.getAttribute('data-job-id')] = strong ? strong.textContent : row.getAttribute('data-job-id');
     });
     function syncVisible() {
       if (document.visibilityState === 'hidden') window.disconnectAllSSE();
@@ -75,10 +102,8 @@
     if (heroForm && heroKeyword) {
       heroForm.addEventListener('submit', function () {
         var raw = heroKeyword.value.trim();
-        if (window.extractAlbumId && (/^https?:\/\//i.test(raw) || /18comic|jmcomic/i.test(raw))) {
-          var parsed = window.extractAlbumId(raw);
-          if (parsed) heroKeyword.value = parsed;
-        }
+        var parsed = window.extractAlbumId ? window.extractAlbumId(raw) : null;
+        if (parsed) heroKeyword.value = parsed;
       });
     }
     if (heroDownload && heroKeyword) {

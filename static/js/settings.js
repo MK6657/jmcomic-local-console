@@ -120,6 +120,7 @@
     }
     syncDeleteOriginals();
     syncScheduleHint();
+    clearFieldErrors();
   }
 
   function collectFormValues() {
@@ -208,7 +209,7 @@
   }
 
   function clearFieldErrors() {
-    if (!els.form) return;
+    if (!els.form || typeof els.form.querySelectorAll !== 'function') return;
     els.form.querySelectorAll('.is-invalid').forEach(function (el) {
       el.classList.remove('is-invalid');
     });

@@ -81,14 +81,13 @@ _armed = False
 _draining = False
 
 
-def start():
-    """启动定时调度器后台线程（幂等）"""
+def _start_worker(*, arm: bool) -> None:
     global _scheduler_thread, _stop_event, _armed
     with _scheduler_lock:
-        if _draining or (_scheduler_thread is not None and _scheduler_thread.is_alive()):
+        if _draining or (not arm and not _armed) or (_scheduler_thread is not None and _scheduler_thread.is_alive()):
             return
-
-        _armed = True
+        if arm:
+            _armed = True
         # 如果定时调度未启用，不启动线程以节省资源
         enabled = db.get_setting("schedule_enabled", "false")
         if enabled != "true":
@@ -103,6 +102,11 @@ def start():
         _scheduler_thread = thread
         thread.start()
         log.info("定时下载调度器已启动")
+
+
+def start():
+    """启动定时调度器后台线程（幂等）"""
+    _start_worker(arm=True)
 
 
 def request_stop() -> None:
@@ -156,8 +160,7 @@ def sync_with_settings():
         return
     enabled = db.get_setting("schedule_enabled", "false")
     if enabled == "true":
-        if _armed and not _draining:
-            start()
+        _start_worker(arm=False)
     else:
         _stop_worker(disarm=False)
 

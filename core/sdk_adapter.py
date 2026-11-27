@@ -345,6 +345,13 @@ def new_client(option, domain_list=None, impl=None, cache=None, domain_retry_str
     config["meta_data"].update(overrides)
     if config.get("type") == "curl_cffi_session":
         curl_options = dict(config["meta_data"].get("curl_options") or {})
+        try:
+            from curl_cffi import CurlOpt
+            curl_options.setdefault(CurlOpt.CONNECTTIMEOUT_MS, 4000)
+            curl_options.setdefault(CurlOpt.LOW_SPEED_LIMIT, 1024)
+            curl_options.setdefault(CurlOpt.LOW_SPEED_TIME, 8)
+        except Exception:
+            pass
         _apply_windows_cainfo(config["meta_data"], curl_options)
         if curl_options:
             config["meta_data"]["curl_options"] = curl_options

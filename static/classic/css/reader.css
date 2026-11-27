@@ -1,6 +1,8 @@
 /* Continuous reader. Uses the locked eye-care colors, typography, spacing and radius tokens.
    The page header (.reader-toolbar) is shared with the paged reader and lives in style.css. */
 .continuous-reader { max-width: 64rem; margin: 0 auto; padding-top: 16px; }
+.continuous-reader[data-width="wide"] { max-width: min(92vw, 1280px); }
+.continuous-reader[data-width="full"] { max-width: 100%; padding-left: 8px; padding-right: 8px; }
 .continuous-reader:focus { outline: none; }
 .reader-tools {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 10;

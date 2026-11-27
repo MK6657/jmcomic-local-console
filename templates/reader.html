@@ -37,7 +37,7 @@
         <button type="button" class="btn btn-outline-secondary btn-sm" id="reader-tools-close" aria-label="收起阅读工具">收起</button>
     </section>
     <div class="card reader-state" id="reader-loading" role="status"><div class="card-body">{{ '正在获取在线页面…' if online else '正在读取本地图片…' }}</div></div>
-    <div class="card reader-state d-none" id="reader-empty" role="status">
+    <div class="card reader-state d-none" id="reader-empty" role="alert">
         <div class="card-body">
             <i class="bi bi-journal-x reader-state-icon" aria-hidden="true"></i>
             <h2 class="h5">暂时无法阅读</h2>

@@ -228,6 +228,7 @@
     'retry-maintenance': retryMaintenance,
     'delete': function (el) { deleteJob(el.getAttribute('data-job-id')); },
     'open-folder': function (el) { window.openFolder(el.getAttribute('data-job-id')); },
+    'open-export-folder': function () { if (window.openExportFolder) window.openExportFolder(); },
     'export-cbz': function (el) { exportCbz(el.getAttribute('data-job-id')); },
     'export-zip': function (el) { exportZip(el.getAttribute('data-job-id')); },
     'export-pdf': function (el) { exportPdf(el.getAttribute('data-job-id')); },
@@ -268,6 +269,7 @@
   var readableSerial = 0;
   var lastCompleted = [];
   var lastFailed = [];
+  var lastCanceled = [];
   var newestCompleted = {};  // album_id → 这部漫画最新的已完成任务的 job_id（新章节标记只放在这张卡片上）
   var READABLE_RECHECK_MS = 60000; // 文件可能在页面打开期间被移走：至少每分钟复查一次
 
@@ -365,6 +367,7 @@
         localInfo = info;
         renderSection('completed', lastCompleted, renderCompletedCard);
         renderSection('failed', lastFailed, renderFailedCard);
+        renderSection('canceled', lastCanceled, renderCanceledCard);
         // 可读的漫画里有没有已确认的新章节（只读数据库，不联网）
         refreshUpdates(ids.filter(function (id) { return next[id] === true; }));
       })
@@ -435,7 +438,7 @@
           job.done_pages = done;
           job.total_pages = total;
         } else if (live) {
-          liveProgress[job.job_id] = { done: done, total: total };
+          liveProgress[job.job_id] = { done: done, total: total, archiving: !!live.archiving };
         }
       } else {
         delete liveProgress[job.job_id];
@@ -455,6 +458,7 @@
       newestCompleted = newestCompletedJobs(groups.completed);
     }
     if (!scope || scope === 'failed') lastFailed = groups.failed;
+    if (!scope || scope === 'canceled') lastCanceled = groups.canceled;
     // 有任务新完成：立即重新判断可读与新章节（刚下载的新章节已被服务端并入，不能再挂着“有新章节”）
     var newestKey = JSON.stringify(newestCompleted);
     if (newestKey !== lastNewestKey) {
@@ -467,7 +471,7 @@
     if (!scope || scope === 'completed') renderSection('completed', groups.completed, renderCompletedCard);
     if (!scope || scope === 'failed') renderSection('failed', groups.failed, renderFailedCard);
     if (!scope || scope === 'canceled') renderSection('canceled', groups.canceled, renderCanceledCard);
-    refreshReadable(lastCompleted.concat(lastFailed));
+    refreshReadable(lastCompleted.concat(lastFailed, lastCanceled));
 
     // 更新计数徽章 — running 计数包含 paused
     var runningCount = groups.running.length + groups.paused.length;
@@ -539,9 +543,12 @@
           var widthText = job._pct + '%';
           if (barEl.style.width !== widthText) barEl.style.width = widthText;
           barEl.setAttribute('aria-valuenow', String(job._pct));
-          if (job.status !== 'paused' && pctEl.textContent.indexOf('打包中') === -1) {
+          var isArchiving = Boolean(liveProgress[job.job_id] && liveProgress[job.job_id].archiving);
+          if (job.status !== 'paused' && !isArchiving && pctEl.textContent.indexOf('打包中') === -1) {
             var nextBadge = '<i class="bi-arrow-repeat"></i> ' + job._pct + '%';
             if (pctEl.innerHTML !== nextBadge) pctEl.innerHTML = nextBadge;
+          } else if (job.status !== 'paused' && isArchiving && pctEl.textContent.indexOf('打包中') === -1) {
+            pctEl.textContent = '打包中…';
           }
         }
         if (matched) return;
@@ -552,19 +559,47 @@
     }
     var html = items.map(function (job) { return renderFn(job); }).join('');
     if (container._sectionMarkup === html) return;
+    var active = document.activeElement;
+    var savedFocus = null;
+    if (active && container.contains && container.contains(active) && active.closest) {
+      var focusCard = active.closest('.job-card[data-job-id]');
+      if (focusCard) {
+        savedFocus = {
+          jobId: focusCard.getAttribute('data-job-id'),
+          action: active.getAttribute ? active.getAttribute('data-action') : null,
+          href: active.getAttribute ? active.getAttribute('href') : null
+        };
+      }
+    }
     container.innerHTML = html;
     container._sectionMarkup = html;
+    if (savedFocus && savedFocus.jobId && container.querySelectorAll) {
+      var cards = container.querySelectorAll('.job-card[data-job-id]');
+      for (var ci = 0; ci < cards.length; ci++) {
+        if (cards[ci].getAttribute('data-job-id') !== savedFocus.jobId) continue;
+        var nextFocus = savedFocus.action
+          ? cards[ci].querySelector('button[data-action="' + savedFocus.action + '"]')
+          : (savedFocus.href ? cards[ci].querySelector('a[href="' + savedFocus.href + '"]') : null);
+        if (nextFocus && typeof nextFocus.focus === 'function') nextFocus.focus({ preventScroll: true });
+        break;
+      }
+    }
   }
 
   function statusLabel(s) {
     return { running: '进行中的任务', paused: '暂停中的任务', queued: '排队中的任务', completed: '已完成的任务', failed: '失败的任务', canceled: '已取消的任务' }[s] || s;
   }
 
+  function displayJobTitle(job) {
+    return job.title || (job.album_id ? ('车号 ' + job.album_id) : '') || job.job_id || '未命名任务';
+  }
+
   function renderRunningCard(job) {
     var isPaused = job.status === 'paused';
-    var badgeClass = isPaused ? 'bg-warning text-dark' : 'bg-primary';
+    var isArchiving = !isPaused && Boolean(liveProgress[job.job_id] && liveProgress[job.job_id].archiving);
+    var badgeClass = isPaused ? 'bg-warning text-white' : 'bg-primary';
     var badgeIcon = isPaused ? 'bi-pause-circle' : 'bi-arrow-repeat';
-    var badgeText = isPaused ? '已暂停' : job._pct + '%';
+    var badgeText = isPaused ? '已暂停' : (isArchiving ? '打包中…' : job._pct + '%');
     var jobIdAttr = escapeHtmlAttr(job.job_id);
     var total = Number(job.total_pages) || 0;
     var done = Math.max(0, Number(job.done_pages) || 0);
@@ -601,7 +636,7 @@
   function renderQueuedCard(job) {
     return '<div class="card job-card shadow-sm mb-3" data-job-id="' + escapeHtmlAttr(job.job_id) + '" data-status="queued">'
       + '<div class="card-body d-flex justify-content-between align-items-center">'
-      + '<div><h6 class="mb-1">' + escapeHtml(job.title) + '</h6><small class="text-muted">等待中...</small></div>'
+      + '<div><h6 class="mb-1">' + escapeHtml(displayJobTitle(job)) + '</h6><small class="text-muted">等待中...</small></div>'
       + jobButton('cancel', job, 'btn-outline-danger', '取消', '<i class="bi bi-x-circle"></i> 取消')
       + '</div></div>';
   }
@@ -641,7 +676,7 @@
     // 放不下时按钮组整体换行（长路径不再把按钮文字挤成竖排）
     return '<div class="card job-card shadow-sm mb-3" data-job-id="' + escapeHtmlAttr(job.job_id) + '" data-status="completed">'
       + '<div class="card-body job-card-row">'
-      + '<div class="job-card-info"><h6 class="mb-1">' + escapeHtml(job.title) + '</h6>'
+      + '<div class="job-card-info"><h6 class="mb-1">' + escapeHtml(displayJobTitle(job)) + '</h6>'
       + '<div class="job-card-status">' + cbzBadge + '<span class="badge bg-success">已完成</span>' + marker + updateChip + '</div>'
       + '<small class="text-muted"><i class="bi bi-folder"></i> ' + escapeHtml(job._path) + '</small>' + maintenanceInfo + '</div>'
       + '<div class="job-card-actions">'
@@ -669,7 +704,7 @@
     return '<div class="card job-card shadow-sm mb-3 border-danger" data-job-id="' + escapeHtmlAttr(job.job_id) + '" data-status="failed">'
       + '<div class="card-body">'
       + '<div class="d-flex justify-content-between align-items-start">'
-      + '<div><h6 class="mb-1">' + escapeHtml(job.title) + '</h6></div>'
+      + '<div><h6 class="mb-1">' + escapeHtml(displayJobTitle(job)) + '</h6></div>'
       + '<span class="badge bg-danger">失败</span>'
       + '</div>'
       + errorHtml
@@ -700,12 +735,15 @@
       var total = Number(data.total_pages) || 0;
       var prev = liveProgress[data.job_id];
       if (!prev || total > prev.total || done >= prev.done) {
-        liveProgress[data.job_id] = { done: done, total: total };
+        liveProgress[data.job_id] = { done: done, total: total, archiving: !!(prev && prev.archiving) };
       }
     },
     onArchiving: function (data, jobId) {
       var id = (data && data.job_id) || jobId;
       if (!id) return;
+      var prev = liveProgress[id] || { done: 0, total: 0 };
+      prev.archiving = true;
+      liveProgress[id] = prev;
       var pctEl = document.getElementById('pct-' + id);
       if (pctEl) pctEl.textContent = '打包中…';
     },
@@ -740,6 +778,12 @@
       window.disconnectAllSSE();
       refreshJobs();
     });
+    var openExportBtn = document.getElementById('downloads-open-export-btn');
+    if (openExportBtn) {
+      openExportBtn.addEventListener('click', function () {
+        if (window.openExportFolder) window.openExportFolder();
+      });
+    }
     refreshJobs();
   });
 

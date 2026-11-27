@@ -83,13 +83,9 @@
         // 封面 + 信息：同一个 .row 内的两列，垂直居中对齐——封面比信息卡片矮时封面居中，高时信息卡片居中
         html += '<div class="row g-4 mb-4 align-items-center">';
 
-        // 左侧封面
+        // 左侧封面（本地有下载封面时即使 album.cover 为空也能由 /api/cover 返回，失败由 error 事件切换占位）
         html += '<div class="col-12 col-md-4 col-lg-3">';
-        if (album.cover) {
-            html += '<img src="/api/cover/' + encodeURIComponent(album.album_id) + '/portrait" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title) + '" decoding="async">';
-        } else {
-            html += COVER_PLACEHOLDER;
-        }
+        html += '<img src="/api/cover/' + encodeURIComponent(album.album_id) + '/portrait" class="detail-cover" alt="' + window.escapeHtmlAttr(album.title || album.album_id) + '" decoding="async">';
         html += '</div>';
 
         // 右侧信息
@@ -141,6 +137,11 @@
             html += '</div>';
         }
 
+        // 简介
+        if (album.description && String(album.description).trim()) {
+            html += '<div class="mt-3 text-muted small" style="white-space:pre-line;">' + window.escapeHtml(String(album.description).trim()) + '</div>';
+        }
+
         html += '</div></div>'; // 信息卡片结束
         html += '</div>';       // 右侧列结束
         html += '</div>';       // 封面 + 信息行结束
@@ -155,9 +156,9 @@
 
         html += '<div class="card-body p-0">';
         if (album.photos && album.photos.length > 0) {
-            html += '<table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" title="全选" aria-label="全选章节"></th><th style="width:60px">序号</th><th>章节名</th><th style="width:80px">页数</th><th class="chapter-online"><span class="visually-hidden">在线观看</span></th></tr></thead>';
+            html += '<div class="table-responsive"><table class="table table-hover chapter-table mb-0"><thead><tr><th class="chapter-checkbox"><input type="checkbox" id="select-all-inline" class="form-check-input" title="全选" aria-label="全选章节"></th><th style="width:60px">序号</th><th>章节名</th><th style="width:80px">页数</th><th class="chapter-online"><span class="visually-hidden">在线观看</span></th></tr></thead>';
             // 章节行由 fillChapterRows 用 DOM 建（章节更新块里的 chapterRow），刷新章节表时只重建这些行
-            html += '<tbody id="chapter-rows"></tbody></table>';
+            html += '<tbody id="chapter-rows"></tbody></table></div>';
         } else {
             html += '<div class="text-center text-muted py-4"><i class="bi bi-journal-text" style="font-size:2rem;"></i><p class="mt-2 mb-0">暂无章节信息</p></div>';
         }
@@ -300,26 +301,13 @@
             });
         }
 
-        function updateSelectedLabel() {
-            var dlBtn = document.getElementById('download-selected-btn');
-            if (!dlBtn || typeof dlBtn.appendChild !== 'function') return;
-            var count = 0;
-            document.querySelectorAll('.chapter-checkbox-item').forEach(function (cb) { if (cb.checked) count++; });
-            var label = count > 0 ? (' 下载选中章节 (' + count + ')') : ' 下载选中章节';
-            var iconEl = dlBtn.querySelector ? dlBtn.querySelector('i') : null;
-            dlBtn.textContent = '';
-            if (iconEl) dlBtn.appendChild(iconEl);
-            if (typeof document.createTextNode === 'function') dlBtn.appendChild(document.createTextNode(label));
-            else dlBtn.textContent = label.trim();
-        }
-
         // 章节行可能被刷新（refreshChapterTable）：每次都重新取复选框
         function toggleAll(checked) {
             document.querySelectorAll('.chapter-checkbox-item').forEach(function (cb) { cb.checked = checked; });
             if (selectAllMain) selectAllMain.checked = checked;
             if (selectAllInline) selectAllInline.checked = checked;
             if (typeof syncSelectAll === 'function') syncSelectAll();
-            updateSelectedLabel();
+            syncSelectedChapterCount();
         }
 
         if (selectAllMain) {
@@ -332,14 +320,14 @@
             invertBtn.addEventListener('click', function () {
                 document.querySelectorAll('.chapter-checkbox-item').forEach(function (cb) { cb.checked = !cb.checked; });
                 if (typeof syncSelectAll === 'function') syncSelectAll();
-                updateSelectedLabel();
+                syncSelectedChapterCount();
             });
         }
         // 一个委托监听器：刷新后新建的行同样生效，支持点击整行切换与 Shift 连选
         var chapterRows = document.getElementById('chapter-rows');
         if (chapterRows) {
             chapterRows.addEventListener('change', syncSelectAll);
-            chapterRows.addEventListener('change', updateSelectedLabel);
+            chapterRows.addEventListener('change', syncSelectedChapterCount);
             chapterRows.addEventListener('click', function (e) {
                 var boxes = Array.prototype.slice.call(chapterRows.querySelectorAll('.chapter-checkbox-item'));
                 if (!boxes.length) return;
@@ -350,7 +338,7 @@
                         var s = Math.min(lastCheckedIdx, idx), end = Math.max(lastCheckedIdx, idx);
                         for (var i = s; i <= end; i++) boxes[i].checked = directCb.checked;
                         if (typeof syncSelectAll === 'function') syncSelectAll();
-                        updateSelectedLabel();
+                        syncSelectedChapterCount();
                     }
                     lastCheckedIdx = idx;
                     return;
@@ -368,7 +356,7 @@
                 }
                 lastCheckedIdx = rowIdx;
                 if (typeof syncSelectAll === 'function') syncSelectAll();
-                updateSelectedLabel();
+                syncSelectedChapterCount();
             });
         }
 
@@ -413,6 +401,19 @@
             if (selBtn) selBtn.disabled = false;
             if (allBtn) allBtn.disabled = false;
         });
+    }
+
+    function syncSelectedChapterCount() {
+        var dlBtn = document.getElementById('download-selected-btn');
+        if (!dlBtn || typeof dlBtn.appendChild !== 'function') return;
+        var count = 0;
+        Array.prototype.forEach.call(document.querySelectorAll('.chapter-checkbox-item'), function (cb) { if (cb.checked) count++; });
+        var label = count > 0 ? (' 下载选中章节 (' + count + ')') : ' 下载选中章节';
+        var iconEl = dlBtn.querySelector ? dlBtn.querySelector('i') : null;
+        dlBtn.textContent = '';
+        if (iconEl) dlBtn.appendChild(iconEl);
+        if (typeof document.createTextNode === 'function') dlBtn.appendChild(document.createTextNode(label));
+        else dlBtn.textContent = label.trim();
     }
 
     // ── 章节更新 ──
@@ -553,6 +554,7 @@
             var count = document.getElementById('chapter-count');
             if (count) count.textContent = String(photos.length);
             syncSelectAll();
+            if (typeof syncSelectedChapterCount === 'function') syncSelectedChapterCount();
             if (window.updateBadges) markNewChapters(updateData && updateData.eligible && updateData.update ? updateData.update.new_chapters : []);
             if (focused !== null) {
                 Array.prototype.forEach.call(document.querySelectorAll('.chapter-checkbox-item'), function (cb) {
@@ -878,6 +880,7 @@
         }
         boxes.forEach(function (cb) { cb.checked = !!wanted[String(cb.value)]; });
         syncSelectAll();
+        if (typeof syncSelectedChapterCount === 'function') syncSelectedChapterCount();
         // 瞬时定位到第一话新章节（Bootstrap 的 :root { scroll-behavior: smooth } 会让它慢慢滑过去）
         var row = present[0].closest('tr');
         if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'center', behavior: 'instant' });
